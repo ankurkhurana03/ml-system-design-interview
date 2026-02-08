@@ -1,0 +1,527 @@
+id: privacy-blurring
+title: "Privacy Blurring"
+description: "Design an automated blurring system for privacy in street-level imagery."
+companies: ["Google", "Apple", "Mapbox"]
+domains: ["Computer Vision", "Real-time"]
+root: pd_start
+
+nodes:
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design an **automated privacy blurring system** for street-level imagery, similar to what Google Street View or Apple Maps uses.
+
+      The company operates a fleet of **500+ mapping vehicles** capturing panoramic street-level imagery across 80+ countries. Each vehicle generates approximately **1TB of imagery per day** (360-degree captures at 8K resolution, one frame every 3 meters). That's roughly **500TB/day** across the fleet.
+
+      **Legal requirements** are strict: GDPR in Europe mandates blurring of faces and license plates before publication. Similar regulations exist in Japan, South Korea, and Brazil. Failure to comply can result in fines up to 4% of global revenue.
+
+      Current state: A semi-manual pipeline processes imagery with ~70% automated detection, requiring human reviewers to catch misses. This creates a **6-month backlog** and costs $2M/year in labeling. The goal is to achieve **>99% recall** on faces and license plates to eliminate the manual review bottleneck.
+
+      Let's start by scoping the problem.
+    dialogue:
+      - speaker: interviewer
+        text: "Welcome! Today we'll design an automated privacy blurring system for street-level imagery. Think Google Street View's face and plate blurring."
+      - speaker: candidate
+        text: "Interesting problem. What's the scale of imagery we're dealing with?"
+      - speaker: interviewer
+        text: "500+ mapping vehicles, each generating about 1TB of imagery per day. That's 500TB daily across the fleet, with 360-degree panoramic captures at 8K resolution."
+      - speaker: candidate
+        text: "And what's driving the need for automation? Regulatory compliance?"
+      - speaker: interviewer
+        text: "Exactly. GDPR mandates blurring faces and plates before publication. The current semi-manual pipeline has a 6-month backlog and costs $2M/year. We need over 99% recall to eliminate manual review."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: info
+    label: "Scope & Requirements"
+    speaker: interviewer
+    content: |
+      Let's define the scope more precisely.
+
+      **What to blur:**
+      - **Faces** - any recognizable human face, including partial faces, faces in windows, faces on posters/billboards (privacy-by-default)
+      - **License plates** - vehicle registration plates of all formats globally (US, EU, Asian formats vary significantly)
+      - **Stretch goals**: House numbers, business signage with personal names, visible screens
+
+      **Key constraints:**
+      - **Recall > 99%** for faces and plates (missing a face is a regulatory violation)
+      - **Precision > 95%** (over-blurring is acceptable but degrades map quality)
+      - **Processing throughput**: Must keep up with daily capture rate (500TB/day)
+      - **Latency**: Not real-time; batch processing within 24-48 hours is acceptable
+      - **Resolution**: Input images are 8192x4096 equirectangular panoramas
+      - **Diversity**: Must handle faces/plates across all lighting conditions, angles, occlusions, and global plate formats
+
+      How would you formulate this as an ML problem?
+    dialogue:
+      - speaker: interviewer
+        text: "Let's define scope. We need to blur faces and license plates across global street-level imagery."
+      - speaker: candidate
+        text: "What's the tolerance for false negatives versus false positives?"
+      - speaker: interviewer
+        text: "Recall above 99% is non-negotiable since missing a face is a regulatory violation. Precision above 95% is our target, but some over-blurring is acceptable."
+      - speaker: candidate
+        text: "And is this real-time processing or batch?"
+      - speaker: interviewer
+        text: "Batch processing is fine. We need to keep up with the 500TB daily capture rate, processing within 24-48 hours. Input images are 8K equirectangular panoramas."
+    next: pd_formulation
+
+  - id: pd_formulation
+    stage: problem_definition
+    type: question
+    label: "ML Formulation"
+    speaker: interviewer
+    content: |
+      How would you formulate the core ML task for this privacy blurring system?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you formulate the core ML task? What type of computer vision problem is this?"
+      - speaker: candidate
+        text: "There are a few ways to approach this. We could treat it as object detection, instance segmentation, or even a two-stage detect-then-blur pipeline."
+      - speaker: interviewer
+        text: "Walk me through the trade-offs of each approach."
+    choices:
+      - label: "Object Detection (bounding boxes)"
+        answer: |
+          I'd formulate this as an **object detection** problem, predicting axis-aligned bounding boxes around faces and license plates.
+
+          **Why bounding boxes?** For privacy blurring, we don't need pixel-perfect segmentation masks. A bounding box with some padding provides sufficient coverage. Google's own Street View pipeline uses bounding-box detection with Gaussian blur applied to the detected region. The slight over-blur from rectangular regions is actually desirable for privacy - it provides a safety margin.
+
+          **Two-class detection**: We predict boxes for two classes: `face` and `license_plate`. Each detection includes a confidence score. We set a low confidence threshold (e.g., 0.3) to maximize recall, accepting more false positives.
+
+          **Advantages**:
+          - Simpler annotation pipeline (boxes are 5-10x faster to annotate than masks)
+          - Faster inference (no mask head computation)
+          - Well-studied problem with mature architectures (YOLO, RetinaNet, DETR)
+          - Rectangular blur regions look natural and don't draw attention
+
+          **Trade-off**: We lose precise boundary information, meaning some background near faces/plates gets blurred. For a mapping product, this is acceptable - slightly more blur is better than missing private information.
+        next: met_detection
+      - label: "Instance Segmentation (pixel masks)"
+        answer: |
+          I'd formulate this as **instance segmentation**, predicting pixel-level masks for each face and license plate instance.
+
+          **Why segmentation?** While bounding boxes work for simple cases, street-level imagery presents challenges where pixel precision matters. Consider a face partially behind a pole, a license plate at an oblique angle, or multiple overlapping faces in a crowd. Segmentation masks allow us to blur exactly the private region without destroying surrounding context.
+
+          **Practical benefits for map quality**: Maps are a visual product. Over-blurring degrades the user experience - blurred street signs, blurred building details near faces. With instance segmentation, we can apply a tight Gaussian blur only to the face/plate pixels, preserving maximum image quality in surrounding areas. Apple Maps notably uses tighter blurring regions than Google Street View.
+
+          **Architecture**: Mask R-CNN or its successors (PointRend, Mask2Former) provide both detection boxes and per-instance masks. The mask head adds ~15% computational overhead but gives pixel-level control.
+
+          **Trade-off**: Annotation cost is significantly higher (polygon masks take 5-10x longer than bounding boxes to label). Training data requirements increase. But the visual quality improvement justifies this for a premium mapping product.
+
+          **Hybrid approach**: Use detection for initial screening (high recall), then apply segmentation only on detected regions to refine blur boundaries.
+        next: met_segmentation
+
+  - id: met_detection
+    stage: metrics
+    type: info
+    label: "Detection Metrics"
+    speaker: interviewer
+    content: |
+      Good choice with object detection. Let's define the evaluation metrics carefully.
+
+      **Primary metric: Recall at IoU 0.5** - What percentage of actual faces/plates do we detect? This is our regulatory compliance metric. Target: **>99.5% for faces, >99% for plates**.
+
+      **Why recall over precision?** A missed face (false negative) is a privacy violation with legal consequences. A falsely blurred tree stump (false positive) is just a minor image quality issue. The asymmetry is extreme.
+
+      **Secondary metrics:**
+      - **Precision**: Track to avoid excessive over-blurring. Target >95%
+      - **mAP@0.5**: Standard detection metric for overall model quality
+      - **Face recall by size**: Separate tracking for large (>64px), medium (32-64px), and small (<32px) faces. Small faces are hardest but still legally required
+      - **Recall by condition**: Night, rain, motion blur, heavy occlusion subsets
+      - **Throughput**: Images processed per second per GPU. Target: >5 panoramas/sec on A100
+
+      **Failure analysis dimensions**: Region (EU vs Asia plate formats), face angle (frontal vs profile vs rear), distance from camera, lighting condition. We must maintain >99% recall across ALL segments, not just on average.
+    dialogue:
+      - speaker: interviewer
+        text: "Let's define our metrics. Given the regulatory requirements, what should be our primary metric?"
+      - speaker: candidate
+        text: "Recall has to be primary. A missed face is a GDPR violation, while a false positive just means we blurred a bit too much."
+      - speaker: interviewer
+        text: "Exactly. We need 99.5% recall for faces and 99% for plates. What secondary metrics would you track?"
+      - speaker: candidate
+        text: "Precision to avoid degrading map quality, plus recall segmented by face size, lighting conditions, and geographic region to catch any systematic gaps."
+      - speaker: interviewer
+        text: "Good. Let's also track throughput - we need at least 5 panoramas per second per GPU to keep up with daily capture rates."
+    next: data_pipeline
+
+  - id: met_segmentation
+    stage: metrics
+    type: info
+    label: "Segmentation Metrics"
+    speaker: interviewer
+    content: |
+      Good choice with instance segmentation. Let's define metrics for this approach.
+
+      **Primary metric: Mask Recall at IoU 0.5** - What percentage of actual face/plate pixels are covered by our predicted masks? Target: **>99.5% for faces, >99% for plates**. We use a lower IoU threshold (0.5 instead of 0.75) because partial coverage still provides privacy protection.
+
+      **Mask quality metrics:**
+      - **Boundary IoU**: Measures mask precision specifically at object boundaries. Important because sloppy boundaries = either leaked face pixels or unnecessarily blurred background
+      - **AP^mask at IoU 0.5**: Standard instance segmentation metric
+      - **Pixel-level recall**: For each ground-truth face/plate pixel, was it covered by a predicted mask? This is the ultimate privacy metric
+
+      **Practical metrics:**
+      - **Over-blur ratio**: Average ratio of predicted mask area to ground-truth area. Target 1.0-1.3x (slight over-blur is fine)
+      - **Context preservation score**: How much non-private image content is unnecessarily blurred? Measures map quality impact
+      - **Throughput**: Segmentation is ~15% slower than detection-only. Target >4 panoramas/sec on A100
+
+      **Recall segmentation**: Same as detection - by face size, lighting, angle, region. Must maintain >99% recall across ALL demographic groups to avoid discrimination claims (e.g., ensuring equal detection rates across skin tones).
+    dialogue:
+      - speaker: interviewer
+        text: "For instance segmentation, we need pixel-level metrics. What's your primary evaluation approach?"
+      - speaker: candidate
+        text: "Mask recall at IoU 0.5 as the primary metric - did we cover enough of each face and plate to ensure privacy?"
+      - speaker: interviewer
+        text: "Good. We also need to track boundary quality and the over-blur ratio to balance privacy with map quality."
+      - speaker: candidate
+        text: "And critically, we need to segment recall across demographic groups. The system must detect faces equally well across all skin tones and face shapes."
+      - speaker: interviewer
+        text: "Exactly. Fairness in detection is both an ethical and legal requirement. Let's move to data."
+    next: data_pipeline
+
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      Now let's discuss the data pipeline for training and evaluation.
+
+      **Available data sources:**
+      - **Internal captures**: 50M+ panoramic images from mapping vehicles, partially annotated from the existing semi-manual pipeline (~5M with face/plate annotations)
+      - **Public datasets**: WIDER Face (32K images, 394K faces), FDDB (2,845 images, 5,171 faces), CCPD (Chinese plates, 250K images), OpenALPR datasets
+      - **Synthetic data**: 3D rendering of faces/plates in street scenes using tools like Unity or Unreal Engine
+
+      **Data challenges:**
+      - **Long-tail distribution**: 80% of faces are frontal, well-lit, and >64px. The remaining 20% (profile, occluded, tiny, night) are critical for recall
+      - **Global diversity**: License plate formats vary dramatically (US wide plates vs EU narrow, Japanese character plates, Middle Eastern right-to-left text)
+      - **Equirectangular distortion**: Panoramic images have severe distortion at poles; faces near image edges appear stretched
+      - **Privacy-of-training-data paradox**: Using real face images for training raises the same privacy concerns we're trying to solve
+
+      **Annotation pipeline**: Use a tiered approach - automated pre-labeling with current model, human review for corrections, senior annotator audit for edge cases. Target 100K fully annotated panoramas for training.
+
+      How would you handle the data diversity and annotation challenges?
+    dialogue:
+      - speaker: interviewer
+        text: "Let's talk about data. We have 5M partially annotated panoramas from the existing pipeline, plus public face and plate datasets."
+      - speaker: candidate
+        text: "What are the main data challenges specific to street-level imagery?"
+      - speaker: interviewer
+        text: "Long-tail distribution is the biggest issue. Most faces are easy - frontal, well-lit, large. But the hard 20% - tiny faces, profiles, night captures, occluded plates - are critical for regulatory compliance."
+      - speaker: candidate
+        text: "And the equirectangular distortion must create interesting challenges for detection models trained on rectilinear images."
+      - speaker: interviewer
+        text: "Great observation. Plus, global plate format diversity is huge. How would you address these data challenges?"
+    next: data_question
+
+  - id: data_question
+    stage: data
+    type: question
+    label: "Data Strategy"
+    speaker: interviewer
+    content: |
+      How would you approach the data diversity challenge, particularly for the long-tail of hard cases?
+    dialogue:
+      - speaker: interviewer
+        text: "The long-tail cases are where our current system fails. How would you ensure we have enough training data for these hard examples?"
+      - speaker: candidate
+        text: "There are two main strategies: we can either mine hard examples from our existing captures, or generate synthetic data to fill the gaps."
+    choices:
+      - label: "Hard example mining + active learning"
+        answer: |
+          I'd implement a **hard example mining pipeline** combined with active learning to systematically fill data gaps.
+
+          **Hard example mining**: Run the current model on all 50M unannotated panoramas. Collect detections with confidence scores between 0.3-0.7 (the model's uncertainty zone). These are likely hard cases - partially occluded faces, unusual plate angles, ambiguous objects. Also collect high-confidence false positives (model thinks it's a face but it's a mannequin/poster).
+
+          **Active learning loop**: Prioritize annotation effort on the most informative samples. Use uncertainty sampling (low-confidence detections), diversity sampling (images from underrepresented conditions like night/rain), and error-based sampling (cases where the model disagrees with itself across augmentations).
+
+          **Stratified collection**: Explicitly target underrepresented segments. Deploy additional capture vehicles specifically during nighttime, in rain, and in countries with underrepresented plate formats. Tag images with metadata (time, weather, country) for stratified sampling.
+
+          **Curriculum**: Start training on easy examples, progressively add harder ones. This **curriculum learning** approach (Bengio et al., 2009) helps the model build robust features before encountering edge cases.
+
+          **Scale**: Mine ~500K hard examples from existing data, annotate ~100K with human reviewers, augment with targeted captures. Total training set: ~200K panoramas with ~2M face annotations and ~800K plate annotations.
+        next: feat_question
+      - label: "Synthetic data generation"
+        answer: |
+          I'd invest in **synthetic data generation** to create unlimited, perfectly labeled training data for the long tail.
+
+          **Face synthesis pipeline**: Use a 3D face generation tool (e.g., Microsoft's SynthFace or NVIDIA's DeepFace) to render photorealistic faces at any angle, size, lighting, and occlusion level. Key parameters to vary:
+          - Pose: -90 to +90 degrees yaw, -45 to +45 pitch
+          - Scale: 8px to 512px face size
+          - Lighting: daylight, twilight, night, direct sun, shadow
+          - Occlusion: 0-70% by poles, trees, other people
+          - Demographics: Balanced across skin tones, ages, genders
+
+          **Plate synthesis**: Render license plates using country-specific templates. We can procedurally generate plates for all 150+ global formats with correct fonts, colors, and dimensions. Place them on 3D car models at realistic angles and distances.
+
+          **Domain randomization**: Composite synthetic faces/plates onto real street backgrounds using **domain randomization** (Tobin et al., 2017). Vary blur, noise, compression artifacts, and equirectangular projection parameters to match real capture conditions.
+
+          **Gap filling**: Use real data analysis to identify underrepresented conditions, then generate synthetic data specifically for those gaps. If nighttime faces are underrepresented, generate 50K synthetic night faces.
+
+          **Validation**: Always validate on real data. Synthetic data for training, real data for evaluation. Track the "sim-to-real gap" and iterate on rendering pipeline quality.
+        next: feat_question
+
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Approach"
+    speaker: interviewer
+    content: |
+      What feature extraction approach would you use for the detection model? This is really about choosing between learning features end-to-end versus using pretrained representations.
+    dialogue:
+      - speaker: interviewer
+        text: "Now let's discuss features. For a detection model operating on 8K panoramic imagery, what's your feature extraction strategy?"
+      - speaker: candidate
+        text: "The key question is whether to use pretrained backbone features or train end-to-end on our panoramic data."
+    choices:
+      - label: "Pretrained backbone (ImageNet/COCO) with fine-tuning"
+        answer: |
+          I'd use a **pretrained backbone** and fine-tune on our domain-specific data. Specifically, a **ResNet-50 or ConvNeXt-Base** backbone pretrained on COCO object detection.
+
+          **Why pretrained?** Street-level face and plate detection benefits enormously from transfer learning. COCO-pretrained models already understand edges, textures, object boundaries, and spatial relationships. Fine-tuning adapts these general features to our specific domain (panoramic distortion, small faces, global plate formats) with much less data than training from scratch.
+
+          **Feature Pyramid Network (FPN)**: Attach an FPN to the backbone to generate multi-scale feature maps. This is critical for our problem because faces range from 8px (far away) to 500px+ (close to camera). FPN creates feature maps at 1/4, 1/8, 1/16, 1/32, and 1/64 resolution, allowing the detector to match faces to the appropriate feature scale.
+
+          **Panoramic adaptation**: The equirectangular projection causes spatial distortion. I'd add **deformable convolutions** (Dai et al., 2017) in the later backbone stages. These learn offset-aware convolutions that adapt kernel shapes to local distortion, rather than assuming uniform spatial structure.
+
+          **Training strategy**: Freeze backbone for first 5 epochs (learn detection head on our data), then unfreeze and fine-tune end-to-end with a lower learning rate (1/10th) for the backbone layers. This prevents catastrophic forgetting of useful pretrained features.
+        next: mod_question
+      - label: "Train from scratch on panoramic data"
+        answer: |
+          I'd **train a custom backbone from scratch** on our panoramic street-level imagery, rather than relying on ImageNet/COCO pretraining.
+
+          **Why from scratch?** Our domain is significantly different from standard computer vision datasets. Equirectangular panoramic images have projection distortion, extreme aspect ratios (2:1), and unique content distribution (street scenes, not ImageNet's animals/objects). A backbone trained from scratch can learn features specifically adapted to panoramic geometry.
+
+          **Self-supervised pretraining**: First, pretrain the backbone using **MAE (Masked Autoencoder)** or **DINO** on our 50M unlabeled panoramas. This learns panoramic-aware features without any annotation cost. The backbone learns equirectangular distortion patterns, typical street scene layouts, and lighting variations specific to our capture hardware.
+
+          **Custom architecture choices**:
+          - **Swin Transformer** backbone with modified patch embedding to handle 2:1 aspect ratio natively
+          - **Spherical convolutions** or **tangent-plane projection** to handle equirectangular distortion geometrically rather than learning it implicitly
+          - Larger input resolution patches (384px instead of 224px) to capture more context for small face detection
+
+          **Trade-offs**: Requires significantly more compute for pretraining (estimate 64 A100-hours for MAE pretraining on 50M panoramas). But the resulting features are perfectly adapted to our domain. Research shows self-supervised pretraining on domain data can outperform ImageNet transfer by 3-5 mAP points on specialized tasks.
+
+          **Practical benefit**: No dependency on ImageNet or COCO data distribution. As we capture more panoramas in new regions, we can continuously improve the backbone with more self-supervised pretraining.
+        next: mod_question
+
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Model Architecture"
+    speaker: interviewer
+    content: |
+      What detection model architecture would you choose for this system?
+    dialogue:
+      - speaker: interviewer
+        text: "Now for the core model architecture. What detector would you use for detecting faces and plates in 8K panoramic imagery?"
+      - speaker: candidate
+        text: "The main trade-off is between one-stage detectors like YOLO for speed and two-stage detectors like Faster R-CNN for accuracy on small objects."
+      - speaker: interviewer
+        text: "Exactly. And keep in mind we need to process 500TB per day while maintaining 99%+ recall."
+    choices:
+      - label: "YOLOv8/YOLOv9 one-stage detector"
+        answer: |
+          I'd use **YOLOv8-X (extra-large)** as the primary detector, optimized for our recall requirements.
+
+          **Why YOLO?** At our scale (500TB/day), throughput is critical. YOLOv8-X achieves **53.9 mAP on COCO** while running at **280 FPS on A100** at 640px input. For our 8K panoramas, we'd process them as sliding windows or tiles, but YOLO's speed means we can afford to run at high resolution with dense overlap.
+
+          **Architecture details**:
+          - **CSPDarknet backbone** with cross-stage partial connections for efficient feature extraction
+          - **Path Aggregation Network (PAN)** for multi-scale feature fusion - critical for detecting both large nearby faces and tiny distant faces
+          - **Decoupled detection heads** for classification and regression, improving accuracy for both face and plate classes
+          - **Anchor-free design** in YOLOv8 avoids anchor hyperparameter tuning
+
+          **Achieving 99% recall with YOLO**:
+          - Use **multi-scale inference**: Run the model at 3 resolutions (640, 1280, 1920) and merge detections via NMS. This ensures tiny faces are captured at higher resolution
+          - Set **low confidence threshold** (0.15) and rely on NMS to remove duplicates
+          - **Test-time augmentation (TTA)**: Flip and slight rotation augmentations at inference, ensemble predictions
+
+          **Throughput estimate**: With multi-scale inference on A100, expect ~8 panoramas/sec per GPU (after tiling into patches). With 50 A100s, process 500TB in ~18 hours. Well within our 24-48 hour window.
+
+          **Trade-off**: Single-stage detectors historically underperform on small objects. We mitigate this with multi-scale inference, but two-stage detectors may still have an edge on <32px faces.
+        next: train_strategy
+      - label: "Faster R-CNN / Cascade R-CNN two-stage detector"
+        answer: |
+          I'd use **Cascade R-CNN** with a strong backbone as the primary detector, prioritizing recall on small objects.
+
+          **Why two-stage?** Our primary metric is recall >99%, especially for small faces (the hardest cases). Two-stage detectors like Faster R-CNN and its Cascade variant consistently outperform one-stage detectors on small object detection. Cascade R-CNN specifically uses **multi-stage refinement** (IoU thresholds 0.5, 0.6, 0.7) to progressively improve localization quality.
+
+          **Architecture for privacy blurring**:
+          - **Region Proposal Network (RPN)** generates ~2000 candidate regions per image. We use a low objectness threshold to propose even uncertain regions (maximizing recall)
+          - **RoI Align** extracts features for each proposal with sub-pixel accuracy - important for small faces where even 1-pixel misalignment matters
+          - **Cascade refinement**: 3 detection stages with increasing IoU thresholds. Each stage refines the previous stage's predictions, reducing false positives while maintaining recall
+          - **Feature Pyramid Network (FPN)** with P2 level (1/4 resolution) for better small object features
+
+          **Small face handling**:
+          - **Higher resolution RPN**: Use anchors as small as 8x8 pixels to detect faces at extreme distances
+          - **Context module**: Add a wider receptive field branch that captures surrounding context (a person's body helps confirm a tiny face)
+          - **SNIPER/AutoFocus** training: Multi-scale training that crops and upscales regions with small objects
+
+          **Throughput**: Slower than YOLO (~2-3 panoramas/sec per A100 with tiling), but still feasible with more GPUs. 100 A100s process 500TB in ~24 hours. The accuracy improvement on small objects justifies the cost for a privacy-critical application.
+        next: train_strategy
+
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: interviewer
+    content: |
+      Let's discuss the training strategy in detail.
+
+      **Multi-resolution training**: Since panoramic images are 8192x4096, we can't feed them directly to the model. Strategy: **tile each panorama** into overlapping patches (e.g., 1024x1024 with 256px overlap). Train on these patches. At inference, tile and merge predictions via NMS.
+
+      **Data augmentation** (critical for recall):
+      - **Mosaic augmentation**: Stitch 4 training patches together, exposing the model to more object configurations per batch
+      - **MixUp**: Blend two images with alpha mixing to regularize
+      - **Random erasing**: Simulate occlusion by randomly masking 10-40% of faces during training
+      - **Photometric distortion**: Brightness, contrast, hue shifts to simulate day/night/weather variations
+      - **Geometric**: Random rotation (+-15 deg), scale jittering (0.5-1.5x), horizontal flip
+
+      **Loss function**: Standard detection losses plus a **recall-focused modification**. Weight false negatives 5x more heavily than false positives in the classification loss. This pushes the model toward higher recall at the expense of slightly lower precision.
+
+      **Training schedule**:
+      - **Phase 1** (20 epochs): Train on curated 200K patch dataset with strong augmentation, lr=0.01
+      - **Phase 2** (10 epochs): Fine-tune on hard examples only (mined from Phase 1 failures), lr=0.001
+      - **Phase 3** (5 epochs): Calibration on balanced test set, optimize confidence thresholds per class
+
+      **Compute**: ~8 A100s for 48 hours for full training run. Weekly retraining with new hard examples.
+    dialogue:
+      - speaker: interviewer
+        text: "How would you handle training on 8K panoramic images? They're too large for standard model inputs."
+      - speaker: candidate
+        text: "I'd tile each panorama into overlapping 1024x1024 patches and train on those. At inference, tile and merge predictions via NMS."
+      - speaker: interviewer
+        text: "Good. What about the recall-precision trade-off in training?"
+      - speaker: candidate
+        text: "Weight false negatives much more heavily in the loss function - a 5x penalty for missed faces versus false alarms. We'd also do a hard example mining phase after initial training."
+      - speaker: interviewer
+        text: "Solid approach. What about augmentation strategies for this domain?"
+      - speaker: candidate
+        text: "Mosaic augmentation for diverse configurations, random erasing to simulate occlusion, and photometric distortion for lighting variations. These are all critical for achieving high recall across conditions."
+    next: deploy_question
+
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Deployment Architecture"
+    speaker: interviewer
+    content: |
+      How would you architect the deployment pipeline to process 500TB of imagery per day?
+    dialogue:
+      - speaker: interviewer
+        text: "Now for deployment. We need to process 500TB of imagery daily. How would you architect this?"
+      - speaker: candidate
+        text: "The key decision is whether to process everything in the cloud or distribute processing closer to where data is captured."
+    choices:
+      - label: "Cloud-based batch processing pipeline"
+        answer: |
+          I'd deploy a **cloud-based batch processing pipeline** using a managed GPU cluster.
+
+          **Architecture**:
+          1. **Ingestion**: Mapping vehicles upload daily captures to cloud storage (S3/GCS) via cellular or wifi when returning to depot. Each vehicle's daily 1TB upload is compressed to ~200GB with lossless compression.
+          2. **Job orchestration**: Apache Airflow or Kubernetes Jobs schedules processing. Each panorama is an independent unit of work, enabling perfect parallelization.
+          3. **Processing cluster**: Auto-scaling GPU cluster (AWS p4d instances with A100 GPUs or GCP A2 instances). Scale to 100-200 A100s during peak processing, scale down overnight.
+          4. **Tiling service**: Splits panoramas into overlapping patches, distributes to GPU workers.
+          5. **Inference workers**: Run optimized model (TensorRT on NVIDIA, or ONNX Runtime). Each A100 processes ~5-8 panoramas/sec.
+          6. **Merge & blur service**: Collects per-patch detections, runs NMS across tile boundaries, applies Gaussian blur to detected regions, writes blurred output.
+          7. **QA sampling**: Random 1% sample routed to human reviewers for quality monitoring.
+
+          **Cost estimate**: 150 A100-hours/day at ~$3/hr = **$450/day GPU cost** (~$165K/year). Add storage, networking, orchestration: ~$300K/year total. Compared to $2M/year for current semi-manual pipeline, this is a **6x cost reduction**.
+
+          **Advantages**: Centralized management, easy model updates, consistent hardware, established MLOps practices. Handles burst loads (end-of-quarter capture pushes) via auto-scaling.
+        next: mon_strategy
+      - label: "Edge processing on mapping vehicles"
+        answer: |
+          I'd deploy **on-vehicle edge processing** to blur imagery in real-time during capture, before data ever leaves the vehicle.
+
+          **Why edge?** Processing on-vehicle has profound privacy and compliance advantages. Personal data (faces, plates) never enters the cloud unblurred. This is the strongest possible GDPR compliance posture - the raw data never exists in a data center. It also reduces upload bandwidth by allowing us to transmit only blurred imagery.
+
+          **Hardware per vehicle**:
+          - **NVIDIA Jetson AGX Orin** or equivalent: 275 TOPS INT8 performance, 64GB memory, automotive-grade
+          - Power consumption: ~60W, easily powered by the vehicle
+          - Cost: ~$2,000 per unit, $1M total fleet investment
+
+          **Optimized model for edge**:
+          - Use **YOLOv8-S (small)** or **YOLOv8-M (medium)** instead of the full-size model
+          - **TensorRT optimization**: INT8 quantization reduces model size 4x and increases throughput 2-3x with <1% accuracy loss
+          - **Pruning**: Remove 30-40% of model weights with structured pruning, recovering accuracy with fine-tuning
+          - Target: 15-20 FPS on Orin at 1024x1024 patches, enough to process each panorama as it's captured (one frame every ~3 seconds at driving speed)
+
+          **Hybrid approach**: Edge processing handles the primary blur pass (achieving ~98% recall). Cloud-based secondary pass on uploaded (already-blurred) imagery catches the remaining misses and handles model updates.
+
+          **Trade-off**: Edge models are less accurate than cloud models. We accept slightly lower recall on-vehicle and compensate with the cloud secondary pass. Model updates require OTA deployment to 500+ vehicles, adding complexity.
+        next: mon_strategy
+
+  - id: mon_strategy
+    stage: monitoring
+    type: info
+    label: "Monitoring & Evaluation"
+    speaker: interviewer
+    content: |
+      Let's discuss production monitoring for this privacy-critical system.
+
+      **Recall monitoring** (most critical):
+      - **Automated QA pipeline**: Run a second, independent model (different architecture) on a 5% sample of processed imagery. Any face/plate detected by the QA model but missed by the primary model triggers an alert
+      - **Human audit**: Professional reviewers check 1,000 random panoramas daily, annotating any missed faces/plates. This gives a daily recall estimate with confidence intervals
+      - **User reports**: Provide a "report unblurred face" button in the mapping product. Track report rate per region/time period
+
+      **Performance dashboards**:
+      - **Real-time**: Processing throughput, GPU utilization, queue depth, error rates
+      - **Daily**: Recall/precision estimates from QA pipeline, recall by face size/angle/lighting, plate detection rate by country
+      - **Weekly**: Model drift analysis comparing current detections vs baseline, hard example analysis, fairness metrics across demographic groups
+
+      **Alerting thresholds**:
+      - Estimated recall drops below 99%: **P1 incident** - halt publishing, investigate
+      - Processing backlog exceeds 48 hours: **P2** - scale up compute
+      - Precision drops below 90%: **P3** - investigate over-blurring
+
+      **Continuous improvement loop**: Hard examples from QA pipeline feed back into training data. Monthly model retraining with accumulated hard examples. A/B testing new models in shadow mode before deployment.
+    dialogue:
+      - speaker: interviewer
+        text: "For a privacy-critical system, monitoring is especially important. What would you track?"
+      - speaker: candidate
+        text: "Recall is the single most critical metric to monitor continuously. I'd use a multi-layered approach: automated QA with a second model, human audits, and user reports."
+      - speaker: interviewer
+        text: "How would you handle the situation where recall drops below the 99% threshold?"
+      - speaker: candidate
+        text: "That's a P1 incident. Halt publishing of new imagery immediately, investigate the cause, and don't resume until recall is restored. The regulatory risk is too high."
+      - speaker: interviewer
+        text: "Good. What about continuous improvement?"
+      - speaker: candidate
+        text: "Hard examples from QA feed back into training. Monthly retraining cycles. And always A/B test new models in shadow mode before switching production traffic."
+    next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Design Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive privacy blurring system for street-level imagery.
+
+      **Your design summary:**
+      - Formulated as object detection/segmentation to identify faces and license plates
+      - Defined recall-focused metrics with >99% recall as the non-negotiable target
+      - Addressed data diversity through hard example mining or synthetic data generation
+      - Selected appropriate feature extraction approach for panoramic imagery
+      - Chose a detector architecture balancing throughput and recall requirements
+      - Designed a training pipeline with multi-resolution tiling, recall-weighted losses, and hard example mining
+      - Architected deployment for 500TB/day throughput with cloud or edge processing
+      - Implemented multi-layered monitoring with automated QA, human audits, and incident response
+
+      **Key strengths of this design:**
+      - Regulatory compliance is treated as the top priority throughout
+      - Practical scale considerations (500TB/day, global diversity) are addressed concretely
+      - The continuous improvement loop ensures the system gets better over time
+      - Fairness considerations prevent systematic failures across demographic groups
+
+      **Areas for further exploration:**
+      - Temporal consistency: Same face across consecutive frames should be consistently blurred
+      - Adversarial robustness: What if someone tries to defeat the detector?
+      - New privacy categories: Body shape, gait, and other biometric identifiers
+      - Cross-camera de-identification: Same person appearing in multiple capture sessions
+
+      This design demonstrates strong ML system design skills with appropriate attention to the unique challenges of privacy-critical computer vision systems.

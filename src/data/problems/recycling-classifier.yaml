@@ -1,0 +1,549 @@
+id: recycling-classifier
+title: "Recycling Waste Classifier"
+description: "Create an automatic recycling bin system that classifies waste via a camera."
+companies: ["Google", "AMP Robotics", "ZenRobotics"]
+domains: ["Computer Vision", "Classification"]
+root: pd_start
+
+nodes:
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design an **automatic waste classification system** that uses computer vision to sort recyclables. Think of a smart recycling bin or a sorting station at a materials recovery facility (MRF).
+
+      **Problem context:**
+      - The US generates **292M tons of waste annually** (EPA, 2023), with only ~32% recycled. Contamination (wrong items in recycling) is the #1 reason recyclables end up in landfills
+      - **AMP Robotics** has shown that AI-powered sorting robots achieve **99% purity rates** vs. ~85% for manual sorting, processing **80 picks per minute** per robot arm
+      - Our system targets two deployment scenarios:
+        1. **Smart bins** in public spaces (airports, malls, offices): Help users sort waste correctly at the point of disposal
+        2. **Sorting stations** in MRFs: High-speed automated sorting on conveyor belts
+
+      **Classification categories** (6 classes):
+      - **Recyclable plastics** (PET bottles, HDPE containers)
+      - **Paper/cardboard** (newspapers, boxes, but NOT soiled paper)
+      - **Glass** (bottles, jars)
+      - **Metal** (aluminum cans, steel cans)
+      - **Compostable** (food scraps, yard waste)
+      - **Landfill** (everything else - contaminated items, certain plastics, ceramics)
+
+      The key challenge: **real-world waste looks nothing like clean stock photos**. Items are crushed, soiled, partially visible, and mixed together.
+    dialogue:
+      - speaker: interviewer
+        text: "We're designing an AI waste classification system for recycling. The US only recycles 32% of waste, largely due to contamination."
+      - speaker: candidate
+        text: "What are the deployment scenarios? Consumer-facing or industrial?"
+      - speaker: interviewer
+        text: "Both. Smart bins in public spaces for user guidance, and high-speed sorting stations in materials recovery facilities processing conveyor belts."
+      - speaker: candidate
+        text: "Those have very different latency and accuracy requirements."
+      - speaker: interviewer
+        text: "Exactly. The MRF conveyor belt moves at 2-3 meters per second, giving us about 200ms per item to classify and trigger a sorting mechanism. Smart bins can be more relaxed but need to be user-friendly."
+    next: pd_formulation
+
+  - id: pd_formulation
+    stage: problem_definition
+    type: question
+    label: "System Focus"
+    speaker: interviewer
+    content: |
+      Which deployment scenario should we optimize for as the primary use case? This will drive our architectural decisions.
+    dialogue:
+      - speaker: interviewer
+        text: "Should we optimize primarily for smart bins or industrial sorting stations? The constraints differ significantly."
+      - speaker: candidate
+        text: "The key differences are in latency, throughput, image quality, and operating environment."
+    choices:
+      - label: "Smart bin (consumer-facing, edge deployment)"
+        answer: |
+          I'd optimize for the **smart bin deployment** in public spaces, which has broader market potential and unique ML challenges.
+
+          **Use case**: User approaches bin, holds item above opening. Camera captures image, system classifies waste type, and the correct bin compartment opens (or LED indicators guide the user). Response time: **<1 second** for good UX.
+
+          **Why smart bin as primary?**
+          - **Massive market**: Every airport, shopping mall, office building, university campus could have smart bins. Millions of potential units
+          - **Education effect**: Teaching people to recycle correctly at the source reduces downstream contamination by up to 50%
+          - **Edge ML showcase**: Requires running efficient models on low-cost hardware (~$50-100 compute budget per bin)
+          - **Diverse conditions**: Varying lighting, backgrounds, user behaviors, and waste types create rich ML challenges
+
+          **Unique challenges**:
+          - **Single-item classification** (not mixed waste stream like MRF)
+          - **Variable presentation**: Users hold items at different angles, distances, and orientations
+          - **Cost constraint**: Can't use expensive GPU hardware in every bin
+          - **Outdoor operation**: Must handle direct sunlight, shadows, rain cover, and night lighting
+          - **User experience**: Must be fast and accurate enough that users trust and use the system
+
+          The architecture we design can later be adapted for MRF sorting by scaling up the hardware and handling multi-item scenes.
+        next: met_smartbin
+      - label: "MRF sorting station (industrial, high-throughput)"
+        answer: |
+          I'd optimize for the **MRF sorting station**, where the economic impact is highest and the ML problem is most challenging.
+
+          **Use case**: Conveyor belt carries mixed waste at **2-3 m/s**. Overhead camera + lighting captures images of the stream. System identifies and localizes each item, then commands robotic arms or air jets to sort items into correct bins. Must process **60-80 items per minute** per sorting station.
+
+          **Why MRF as primary?**
+          - **Highest economic impact**: A single MRF processes 500-1000 tons/day. Improving sorting purity from 85% to 99% recovers $2-5M/year in recyclable material value per facility
+          - **Revenue model**: Clear ROI justifies premium pricing ($100K+ per sorting station)
+          - **Technical depth**: Multi-item detection on cluttered conveyor belt, high-speed inference, robotic actuation integration
+          - **AMP Robotics proven**: They've deployed 400+ systems globally, demonstrating market viability
+
+          **Unique challenges**:
+          - **Object detection, not just classification**: Items overlap, are crushed, and partially occluded. Must localize individual items within the mixed stream
+          - **Speed**: 200ms per detection cycle (capture + inference + actuation command)
+          - **Soiled/damaged items**: Real waste is dirty, crushed, and deformed. A flattened aluminum can looks very different from a clean one
+          - **Material ambiguity**: A plastic container with a paper label and metal cap is three different materials. Classify by primary material
+          - **3D geometry**: Some items need to be seen from multiple angles. A coffee cup looks like paper from outside but has plastic lining inside
+
+          **Hardware budget**: MRF can afford GPU-powered inference ($2-5K compute per station), enabling larger, more accurate models.
+        next: met_mrf
+
+  - id: met_smartbin
+    stage: metrics
+    type: info
+    label: "Smart Bin Metrics"
+    speaker: interviewer
+    content: |
+      Good choice. Let's define metrics for the smart bin system.
+
+      **Classification accuracy metrics:**
+      - **Overall accuracy**: Target **>90%** across all 6 classes (very challenging given real-world conditions)
+      - **Per-class recall**: Minimum **85%** for each class. Can't have a class that's systematically misclassified
+      - **Contamination rate**: Percentage of items sorted into wrong recycling stream. Target: **<5%** (current manual sorting: ~15%)
+      - **Confusion matrix focus**: The most costly error is putting non-recyclable in recycling (contaminates the batch). Less costly: putting recyclable in landfill (lost material, not contamination)
+
+      **User experience metrics:**
+      - **Classification latency**: Image capture to result display. Target: **<500ms** (feels instant)
+      - **User engagement**: What percentage of users follow the bin's recommendation? Track with optional weight sensors
+      - **Retry rate**: How often users re-present items after getting unexpected classification? High retry = confusion
+
+      **System reliability metrics:**
+      - **Uptime**: Target **99.5%** (a broken bin is worse than no bin - users lose trust)
+      - **False trigger rate**: How often does the camera trigger classification without a user present? (Wind-blown debris, shadows)
+      - **Model size**: Must fit on edge hardware with <2GB RAM. Target model size: **<50MB**
+
+      **Business metric**: **Recycling rate improvement** at deployment location. Track before/after installation. Target: 20-30% improvement in correctly sorted waste.
+    dialogue:
+      - speaker: interviewer
+        text: "For a consumer-facing smart bin, what metrics matter beyond just classification accuracy?"
+      - speaker: candidate
+        text: "User experience metrics are critical. If the bin is too slow or too often wrong, people will ignore it and just throw things in any compartment."
+      - speaker: interviewer
+        text: "And the asymmetry of errors?"
+      - speaker: candidate
+        text: "Contamination is the worst error. Putting a food-soiled pizza box in the paper recycling ruins the whole batch. We should weight that type of error more heavily."
+      - speaker: interviewer
+        text: "Good. What about the business case?"
+      - speaker: candidate
+        text: "Ultimately, we measure recycling rate improvement at each location. That's the metric that justifies the investment."
+    next: data_collection
+
+  - id: met_mrf
+    stage: metrics
+    type: info
+    label: "MRF Metrics"
+    speaker: interviewer
+    content: |
+      Good choice. Let's define metrics for the MRF sorting station.
+
+      **Detection + classification metrics:**
+      - **mAP@0.5**: Object detection accuracy for localizing items on the conveyor. Target: **>85%** (challenging due to occlusion and clutter)
+      - **Per-material purity**: After sorting, what percentage of items in each output bin are correct? Target: **>95%** per stream (industry standard for premium recyclables)
+      - **Recovery rate**: What percentage of each recyclable material is correctly captured? Target: **>90%** (better than manual ~80%)
+      - **Throughput**: Items classified per minute. Target: **>80 items/min** per camera station
+
+      **Operational metrics:**
+      - **End-to-end latency**: Camera capture to actuation command. Must be **<150ms** (at 3 m/s belt speed, 150ms = 45cm of belt travel; actuation mechanism needs to be positioned correctly)
+      - **False positive rate by class**: False positives cause good recyclables to be sent to landfill. Track per-material to identify systematic issues
+      - **Uptime**: Target **99%** during operating hours (18 hrs/day). Downtime = manual sorting at lower quality
+      - **Robot pick success rate**: Even if detection is correct, robotic arm might miss the item. Track end-to-end sort accuracy (detection x pick success)
+
+      **Economic metrics:**
+      - **Cost per ton sorted**: Total system operating cost (hardware amortization + electricity + maintenance) divided by tons processed. Target: **<$20/ton** (manual sorting: ~$50/ton)
+      - **Material value recovered**: Dollar value of correctly sorted recyclables. Aluminum: ~$1,600/ton, PET plastic: ~$400/ton, cardboard: ~$100/ton. Every 1% purity improvement = $10K-50K/year per facility
+    dialogue:
+      - speaker: interviewer
+        text: "For an industrial sorting station, what are the key metrics?"
+      - speaker: candidate
+        text: "Purity and recovery rate are the two core metrics. Purity means how clean each output stream is. Recovery means how much recyclable material we capture versus losing to landfill."
+      - speaker: interviewer
+        text: "And the economic justification?"
+      - speaker: candidate
+        text: "Aluminum is worth $1,600 per ton. Even small improvements in recovery translate to significant revenue. A 1% improvement in recovery rate across a 500 ton/day facility could be worth $50K per year."
+    next: data_collection
+
+  - id: data_collection
+    stage: data
+    type: info
+    label: "Data Collection"
+    speaker: interviewer
+    content: |
+      Let's discuss the data strategy for waste classification.
+
+      **Available public datasets:**
+      - **TrashNet** (Yang & Thung, 2016): 2,527 images across 6 classes (glass, paper, cardboard, plastic, metal, trash). Clean backgrounds, single items. Good for prototyping, not production
+      - **TACO** (Trash Annotations in Context): 1,500 images with instance segmentation annotations of litter in natural settings. More realistic but small
+      - **WasteNet**: 25K images, 34 categories. Better variety but still mostly clean items
+      - **ZeroWaste** (Bashkirova et al., 2022): 4,503 images from a real MRF conveyor. The most realistic public dataset, though small
+
+      **Data challenges:**
+      - **Domain gap**: Stock photos of clean bottles look nothing like crushed, soiled, label-less containers in a real bin. Models trained on clean data fail on real waste
+      - **Intra-class variation**: "Plastic" includes rigid bottles, flexible film, styrofoam, colored containers, transparent wraps. Each looks completely different
+      - **Regional variation**: Japanese waste categories differ from American. European glass recycling accepts colors US doesn't
+      - **Temporal changes**: New product packaging materials are introduced constantly (compostable plastics, hybrid packaging)
+      - **Lighting variation**: Indoor fluorescent, outdoor daylight, nighttime LED, and everything in between
+
+      **Custom data collection strategy**: Deploy prototype cameras at 10 pilot locations for 3 months. Collect 500K+ images of real waste being disposed. Label with a combination of:
+      - Material scanners (NIR spectroscopy) for ground truth material identification
+      - Manual annotation by waste management experts
+      - Active learning to prioritize labeling of uncertain samples
+    dialogue:
+      - speaker: interviewer
+        text: "Public waste datasets are small and too clean. How do we get enough real-world data?"
+      - speaker: candidate
+        text: "We need our own data collection pipeline. Deploy cameras at pilot locations and collect real-world waste images."
+      - speaker: interviewer
+        text: "How do we get accurate labels? Even humans struggle to identify some materials."
+      - speaker: candidate
+        text: "NIR spectroscopy can identify material type objectively. Use that as ground truth for a subset, then train annotators to label the visual characteristics."
+    next: data_question
+
+  - id: data_question
+    stage: data
+    type: question
+    label: "Data Augmentation Strategy"
+    speaker: interviewer
+    content: |
+      Given limited real-world data initially, how would you augment the training set?
+    dialogue:
+      - speaker: interviewer
+        text: "We might only have 50K real labeled images to start. How do we augment effectively?"
+      - speaker: candidate
+        text: "The main options are traditional augmentation, synthetic data, and leveraging pretrained models."
+    choices:
+      - label: "Heavy augmentation + domain adaptation"
+        answer: |
+          I'd use **aggressive data augmentation** combined with domain adaptation techniques to maximize the value of limited real data.
+
+          **Augmentation pipeline** (applied online during training):
+          - **Geometric**: Random rotation (0-360, waste has no canonical orientation), random scale (0.5-2x), horizontal/vertical flip, perspective warp
+          - **Photometric**: Extreme color jittering (simulate different lighting), random brightness (-40% to +40%), Gaussian noise, motion blur (simulate hand movement)
+          - **Occlusion simulation**: CutMix/CutOut to simulate partially visible items. RandomErasing to simulate soiling/staining
+          - **Background replacement**: Cut out waste items and paste onto random backgrounds (different bin interiors, conveyor belt textures). This teaches the model to focus on the item, not the background
+          - **Deformation**: Elastic deformation to simulate crushed/bent containers. This is critical - a crushed can looks very different from a pristine one
+
+          **Domain adaptation from clean to real:**
+          - Train initial model on abundant clean images (TrashNet + web scraping)
+          - Apply **CycleGAN style transfer** to make clean images look "real" (add soiling, crushing, variable lighting)
+          - Fine-tune on real-world images with **gradual domain mixing**: Start 80% clean / 20% real, progressively shift to 20% clean / 80% real
+
+          **Self-training/pseudo-labeling**: Run the model on unlabeled real images, take high-confidence predictions (>0.95) as pseudo-labels, add to training set. Iteratively expand training data.
+
+          **Expected outcome**: Effective training set expansion from 50K to ~500K equivalent images through augmentation, enabling competitive accuracy.
+        next: feat_extraction
+      - label: "Foundation model transfer (CLIP/DINOv2)"
+        answer: |
+          I'd leverage **large pretrained foundation models** to compensate for limited domain-specific data.
+
+          **CLIP zero-shot as baseline**: Use OpenAI CLIP to classify waste images using text prompts like "a photo of a plastic bottle," "a photo of a glass jar," "a photo of paper." CLIP achieves ~65-70% accuracy on waste classification zero-shot, without any training data. This provides an immediate baseline.
+
+          **DINOv2 feature extraction**: Use Meta's DINOv2 (ViT-L) as a frozen feature extractor. Extract 1024-dim features from waste images. Train a simple linear classifier on these features with our 50K labeled images. DINOv2 features capture material textures, shapes, and surface properties remarkably well because of its large-scale self-supervised pretraining.
+
+          **Why this works for waste**:
+          - DINOv2 has seen billions of images including many everyday objects. It already understands the visual properties of glass (transparency, reflections), metal (shininess), paper (texture), and plastic (glossy surface)
+          - Fine-tuning the last few layers of DINOv2 with only 50K images achieves accuracy comparable to training a specialized model from scratch with 500K images
+          - The model generalizes better to unseen items because the pretrained features are broadly applicable
+
+          **Fine-tuning strategy**:
+          - **Linear probe** first: Train only the classification head (1 hour on single GPU). Establishes baseline ~80% accuracy
+          - **Last-3-layers fine-tune**: Unfreeze last 3 transformer blocks. Train with lr=1e-5 for 20 epochs. Typically adds 5-8% accuracy
+          - **Full fine-tune** (if enough data): Unfreeze entire model with lr=1e-6 for 10 epochs. Risk of overfitting with <100K images
+
+          **Active learning on top**: Use the fine-tuned model to identify the most uncertain samples in unlabeled data. Label those. Each round of 5K newly labeled images can improve accuracy by 1-2%.
+        next: feat_extraction
+
+  - id: feat_extraction
+    stage: features
+    type: info
+    label: "Feature Engineering"
+    speaker: interviewer
+    content: |
+      Let's discuss what features and representations are most important for waste classification.
+
+      **Visual features critical for waste classification:**
+      - **Material texture**: Glass is transparent/reflective, metal is shiny, paper is matte, plastic varies (glossy, matte, translucent). Texture features from mid-level CNN/ViT layers capture these
+      - **Shape**: Bottles have cylindrical shape, cans are cylindrical but shorter, cardboard is flat. Shape features from higher-level layers
+      - **Color**: Green/brown/clear for glass types, silver for aluminum, brown for cardboard. But color alone is unreliable (colored plastics look like colored glass)
+      - **Surface properties**: Wrinkles (paper), creases (cardboard), smooth (plastic), dented (metal). These low-level features require high-resolution input
+
+      **Non-visual features** (if available):
+      - **Weight** (from bin sensors): Glass is heavy, aluminum is light. Weight alone can distinguish glass from plastic bottles
+      - **NIR spectroscopy** (in MRF): Identifies material composition directly. Can distinguish PET from HDPE plastic, which look identical visually
+      - **Time/location context**: Waste composition varies by location (office = more paper, food court = more compostable) and time (lunch hour = more food waste)
+
+      **Input resolution trade-off**: Higher resolution captures material texture better (critical for glass vs. clear plastic). But higher resolution = larger model = slower inference. Recommended: **448x448** for edge deployment (sufficient for texture + shape), **640x640** for server/MRF deployment.
+
+      **Multi-view consideration**: For smart bins with multiple cameras or user-rotated items, processing multiple views and averaging predictions significantly improves accuracy (up to +5% for ambiguous items).
+    dialogue:
+      - speaker: interviewer
+        text: "What visual features matter most for distinguishing waste materials?"
+      - speaker: candidate
+        text: "Material texture is the most important discriminator. Glass is transparent, metal is shiny, paper is matte. Mid-level CNN features capture these texture patterns well."
+      - speaker: interviewer
+        text: "Can non-visual signals help?"
+      - speaker: candidate
+        text: "Absolutely. Weight from bin sensors is surprisingly discriminative. And NIR spectroscopy in MRF settings provides direct material identification as ground truth or a complementary signal."
+    next: mod_selection
+
+  - id: mod_selection
+    stage: model
+    type: question
+    label: "Model Architecture"
+    speaker: interviewer
+    content: |
+      What model architecture would you choose for the waste classifier?
+    dialogue:
+      - speaker: interviewer
+        text: "What model would you use? Remember the deployment constraints - edge devices for smart bins, GPU for MRF."
+      - speaker: candidate
+        text: "The choice depends heavily on our deployment target and accuracy requirements."
+    choices:
+      - label: "MobileNetV3 / EfficientNet-Lite (edge-optimized)"
+        answer: |
+          I'd use **MobileNetV3-Large** or **EfficientNet-Lite** for edge deployment, optimized for the smart bin's hardware constraints.
+
+          **MobileNetV3-Large**:
+          - **5.4M parameters**, 219 MFLOPs - runs on $50 edge hardware
+          - ImageNet top-1: 75.2% (strong baseline for transfer learning)
+          - On Coral Edge TPU: **~8ms inference** (125 FPS) at 224x224
+          - On Raspberry Pi 5: **~30ms inference** at 224x224
+
+          **Architecture modifications for waste:**
+          - Replace final classifier with 6-class head (recyclable plastic, paper, glass, metal, compostable, landfill)
+          - Add **Squeeze-and-Excitation (SE) blocks** to enhance channel attention (helps distinguish materials by texture)
+          - Use **448x448 input** (2x default) for better texture capture, accepting ~4x FLOP increase
+
+          **Quantization for edge:**
+          - **INT8 quantization-aware training (QAT)**: Simulate INT8 arithmetic during training so the model adapts. Accuracy loss <1% versus FP32
+          - Deploy on **Google Coral Edge TPU** ($25, 4 TOPS INT8) or **NVIDIA Jetson Nano** ($99, 472 GFLOPs FP16)
+          - Resulting model: **~5MB INT8**, <20ms inference on Coral
+
+          **Ensemble on edge**: Run two lightweight models (MobileNet + EfficientNet-Lite) and average predictions. Each takes 15ms, total 30ms. Ensemble improves accuracy by 2-3% without needing a single large model.
+
+          **Accuracy expectation**: ~88% overall accuracy on real-world data with MobileNetV3-Large at 448x448 after fine-tuning. Competitive with much larger models due to transfer learning and domain-specific tuning.
+        next: train_approach
+      - label: "ConvNeXt / DINOv2 ViT (accuracy-optimized)"
+        answer: |
+          I'd use **ConvNeXt-Base** or a **fine-tuned DINOv2 ViT-B** for maximum classification accuracy, suitable for GPU-equipped MRF stations or cloud-backed smart bins.
+
+          **ConvNeXt-Base** (Liu et al., 2022):
+          - **89M parameters**, modernized CNN architecture matching ViT performance
+          - ImageNet top-1: 85.8% (excellent feature extraction baseline)
+          - Inference: ~15ms on A100, ~50ms on T4, ~200ms on edge GPU (Jetson AGX Orin)
+
+          **DINOv2 ViT-B fine-tuned**:
+          - **86M parameters**, self-supervised pretrained on 142M images
+          - Exceptional at material texture recognition due to diverse pretraining
+          - Fine-tune with LoRA (Low-Rank Adaptation): Only train ~4M additional parameters, keeping 82M frozen. Faster fine-tuning, lower overfitting risk
+          - Expected accuracy: **~93%** on real-world waste after fine-tuning (based on similar fine-grained classification benchmarks)
+
+          **Architecture enhancements:**
+          - **Multi-crop inference**: Process the image at 3 scales (224, 448, 640), average predictions. Captures both global shape and local texture. Adds 2x latency but +2% accuracy
+          - **Rejection class**: Add an explicit "uncertain/other" output. If max softmax < 0.6, return "uncertain" rather than a potentially wrong classification
+          - **Hierarchical classification**: First classify into material group (organic, inorganic), then into specific type. This prevents gross errors (confusing metal with paper)
+
+          **For MRF deployment**: Pair with an object detection head (add FPN + YOLO-style head on ConvNeXt features) to handle multi-item conveyor belt scenes. Each detected item is cropped and classified individually.
+
+          **Trade-off**: These models are too large for cheap edge hardware. Requires GPU ($200-5000) or cloud connectivity. Justified for MRF where a single station processes $1M+ of material annually.
+        next: train_approach
+
+  - id: train_approach
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: interviewer
+    content: |
+      Let's discuss the training pipeline for the waste classifier.
+
+      **Transfer learning strategy:**
+      1. Start from ImageNet or DINOv2 pretrained weights
+      2. **Phase 1 - Linear probe** (5 epochs): Freeze backbone, train only the classification head on our waste data. Establishes baseline quickly
+      3. **Phase 2 - Progressive unfreezing** (20 epochs): Unfreeze layers from top to bottom, 3 layers at a time every 5 epochs. Lower learning rate for earlier layers (1e-5 vs 1e-3 for head)
+      4. **Phase 3 - Full fine-tune** (10 epochs): All layers with cosine learning rate decay from 1e-5
+
+      **Class imbalance handling:**
+      - Real waste distribution is highly skewed: ~40% plastic, ~25% paper, ~15% glass, ~10% metal, ~5% compostable, ~5% landfill
+      - Use **class-balanced sampling** (sample inversely proportional to class frequency)
+      - Apply **focal loss** (gamma=2) to reduce the contribution of easy/common examples
+
+      **Hard example mining:**
+      - After Phase 2, evaluate model on validation set
+      - Identify most-confused class pairs (e.g., clear plastic vs glass, soiled paper vs compostable)
+      - Collect additional training data specifically for confused pairs
+      - Create "confusion-focused" training batches with pairs of confusable items
+
+      **Validation strategy:**
+      - **Cross-location validation**: Train on 8 pilot locations, validate on 2 held-out locations. Tests generalization to new environments
+      - **Temporal split**: Train on months 1-2, validate on month 3. Tests handling of new product packaging
+
+      **Compute**: Single GPU (T4 or A100) for 4-8 hours. Weekly retraining with accumulated new data from deployed bins.
+    dialogue:
+      - speaker: interviewer
+        text: "How would you structure the training pipeline?"
+      - speaker: candidate
+        text: "Progressive transfer learning: start with a frozen pretrained backbone, gradually unfreeze, then full fine-tuning. This prevents catastrophic forgetting."
+      - speaker: interviewer
+        text: "What about the class imbalance in waste data?"
+      - speaker: candidate
+        text: "Class-balanced sampling and focal loss. Plastics dominate real waste streams at 40%, while compostables and landfill items are rare. Without balancing, the model just predicts plastic for everything."
+      - speaker: interviewer
+        text: "Good. How do you validate?"
+      - speaker: candidate
+        text: "Cross-location and temporal splits. The model must generalize to new buildings and new product packaging it hasn't seen."
+    next: deploy_approach
+
+  - id: deploy_approach
+    stage: deployment
+    type: question
+    label: "Deployment Architecture"
+    speaker: interviewer
+    content: |
+      How would you deploy the waste classification system?
+    dialogue:
+      - speaker: interviewer
+        text: "Let's talk deployment. How do you get this running on thousands of bins or sorting stations?"
+      - speaker: candidate
+        text: "The key trade-off is edge-only versus cloud-connected deployment."
+    choices:
+      - label: "Fully on-device edge deployment"
+        answer: |
+          I'd deploy the model **entirely on-device** using low-cost edge hardware in each bin.
+
+          **Hardware stack per bin:**
+          - **Compute**: Google Coral Dev Board ($130) with Edge TPU, or Raspberry Pi 5 ($80) + Coral USB Accelerator ($60)
+          - **Camera**: Arducam 5MP wide-angle camera ($25) with IR-cut filter for indoor/outdoor
+          - **Lighting**: Ring of white LEDs around camera for consistent illumination ($10)
+          - **Proximity sensor**: IR sensor to trigger classification when item is presented ($5)
+          - **Total hardware cost**: ~$200-250 per bin
+
+          **Software pipeline:**
+          1. Proximity sensor detects item presence
+          2. Camera captures 3 frames in rapid succession (for multi-frame averaging)
+          3. Preprocess: Resize to 448x448, normalize
+          4. Run INT8 model on Edge TPU: ~15ms per frame, 45ms for 3 frames
+          5. Average predictions, apply confidence threshold
+          6. Display result (LED indicators + optional screen)
+          7. Total latency: **<200ms** from item detection to result
+
+          **OTA model updates**: Each bin connects to WiFi for periodic model updates. Models are <5MB, so updates are quick. Push updates during off-hours (2-4 AM) to avoid service interruption.
+
+          **Offline capability**: Bins work without internet. Classification happens entirely on-device. Only telemetry data (classification counts, confidence distributions) is uploaded when connectivity is available.
+
+          **Fleet management**: Central dashboard monitors all bins - uptime, classification distribution, confidence scores, error rates. Anomalous bins (sudden drop in confidence) are flagged for maintenance.
+
+          **Advantages**: No ongoing cloud costs, works offline, sub-200ms latency, data stays on-device (privacy).
+        next: mon_operations
+      - label: "Cloud-connected with edge preprocessing"
+        answer: |
+          I'd deploy a **cloud-connected architecture** where edge devices capture and preprocess images, and a cloud backend runs the classification model.
+
+          **Architecture:**
+          1. **Edge device** (Raspberry Pi + camera, ~$120): Captures image, detects item presence via proximity sensor, applies basic preprocessing (resize, crop to center), compresses to JPEG
+          2. **Upload**: Send compressed image (~50KB) to cloud endpoint via WiFi/4G. Latency: ~100-200ms
+          3. **Cloud inference**: Run larger, more accurate model (ConvNeXt-Base or DINOv2-ViT) on cloud GPU. Inference: ~20ms on T4
+          4. **Response**: Return classification + confidence to edge device. Display result
+
+          **Why cloud?**
+          - **Model flexibility**: Can use much larger models (100M+ parameters) for higher accuracy. No edge hardware constraints
+          - **Easy updates**: Update model server-side, instantly available to all bins. No OTA deployment needed
+          - **Multi-model ensemble**: Run multiple models and ensemble results for higher accuracy, feasible with cloud GPU resources
+          - **Rich analytics**: Every image and classification is centrally logged for analysis, retraining, and quality monitoring
+          - **Advanced features**: Can add explanation overlays ("We detected plastic because of the glossy surface and shape"), similar image retrieval, and multi-language support
+
+          **Latency budget:**
+          - Image capture + preprocessing: 50ms
+          - Upload (50KB on WiFi): 100ms
+          - Cloud inference + response: 100ms
+          - Display: 50ms
+          - **Total: ~300-400ms** (still feels responsive)
+
+          **Cost**: Cloud inference at 10K queries/day per bin = ~$0.10/day in cloud GPU costs. $3/month per bin. For 10,000 bins = $30K/month total cloud cost.
+
+          **Fallback**: If connectivity drops, edge device runs a small local model (MobileNet, ~75% accuracy) as fallback until cloud is available again.
+        next: mon_operations
+
+  - id: mon_operations
+    stage: monitoring
+    type: info
+    label: "Monitoring & Operations"
+    speaker: interviewer
+    content: |
+      Let's discuss monitoring and continuous improvement for the deployed system.
+
+      **Classification monitoring:**
+      - **Accuracy estimation**: Deploy ground-truth verification at 5 pilot bins using NIR spectroscopy or manual inspection on a sample. Estimate real-world accuracy weekly
+      - **Confidence distribution tracking**: Monitor average prediction confidence over time per bin. Sudden drops indicate distribution shift (new waste types, lighting change, dirty camera)
+      - **Class distribution drift**: If a bin suddenly shows 80% plastic when historical average is 40%, investigate (new vending machine nearby? Or model misclassifying?)
+      - **Confusion pair monitoring**: Track the most common misclassification pairs. If glass-vs-plastic confusion spikes, collect more training data for these categories
+
+      **Operational monitoring:**
+      - **Bin uptime**: Heartbeat check every 5 minutes. Alert maintenance if bin is offline >30 minutes
+      - **Camera quality**: Analyze image brightness, blur, and focus metrics. Alert if degradation detected (dirty lens, failed LED)
+      - **User interaction patterns**: Average items per day, peak hours, abandonment rate (item presented but classification not completed)
+
+      **Continuous improvement loop:**
+      1. Collect images from all deployed bins (with user consent)
+      2. Run uncertainty-based active learning to prioritize labeling
+      3. Label 5K most informative images per month
+      4. Retrain model monthly with accumulated data
+      5. A/B test new model on 10% of bins before full rollout
+
+      **Feedback mechanism**: Users can tap a "wrong classification" button. These flagged images are priority-labeled and fed back into training. This creates a virtuous cycle where user feedback directly improves the model.
+
+      **Measuring impact**: Track waste audit results (manual sorting analysis of bin contents) quarterly. Compare contamination rates before and after system deployment. Target: 50% reduction in contamination.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you know if the system is actually working in the real world?"
+      - speaker: candidate
+        text: "Multiple layers: confidence distribution tracking for automatic anomaly detection, ground-truth verification at pilot sites, and user feedback for flagging errors."
+      - speaker: interviewer
+        text: "And how do you improve over time?"
+      - speaker: candidate
+        text: "Active learning from deployed bins. Every month, label the 5K most uncertain images and retrain. User-reported errors get priority labeling."
+      - speaker: interviewer
+        text: "What about measuring real-world recycling impact?"
+      - speaker: candidate
+        text: "Quarterly waste audits comparing contamination rates before and after deployment. That's the ground truth for whether the system is achieving its mission."
+    next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Design Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive waste classification system.
+
+      **Your design summary:**
+      - Scoped the system for smart bin or MRF deployment with appropriate constraints
+      - Defined accuracy, user experience, and business impact metrics
+      - Addressed the data gap with custom collection and augmentation or foundation model transfer
+      - Identified critical visual features (texture, shape, color) for material classification
+      - Selected model architecture appropriate for deployment constraints
+      - Built training pipeline with transfer learning, class balancing, and hard example mining
+      - Deployed with edge-only or cloud-connected architecture
+      - Implemented monitoring with confidence tracking, accuracy estimation, and user feedback
+
+      **Key strengths:**
+      - Practical consideration of real-world waste conditions (soiled, crushed, deformed items)
+      - Appropriate model sizing for hardware constraints
+      - Continuous improvement loop through active learning and user feedback
+      - Business impact measurement through waste audits
+
+      **Areas for further exploration:**
+      - Multi-material items (plastic bottle with paper label and metal cap)
+      - Regional customization (different recycling rules per municipality)
+      - Gamification to increase user engagement with smart bins
+      - Integration with municipal waste management systems for route optimization
+      - Material composition detection using spectroscopy sensors alongside vision

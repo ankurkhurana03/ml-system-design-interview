@@ -1,0 +1,557 @@
+id: landmark-recognition
+title: "Landmark Recognition"
+description: "Build a landmark recognition system for a travel application."
+companies: ["Google", "TripAdvisor", "Apple"]
+domains: ["Computer Vision", "Classification"]
+root: pd_start
+
+nodes:
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design a **landmark recognition system** for a travel application, similar to Google Lens landmark detection or TripAdvisor's visual search.
+
+      The travel app has **50M monthly active users** who take photos while traveling. The product team wants users to point their camera at any landmark and instantly get information: name, history, hours, nearby restaurants, ticket prices, and user reviews.
+
+      **Scale context:**
+      - The system should recognize **200,000+ landmarks** worldwide, from major sites (Eiffel Tower, Taj Mahal) to lesser-known local monuments
+      - Expected query volume: **10M image queries per day** at peak (summer travel season)
+      - The long tail matters: 80% of queries are for the top 5,000 landmarks, but recognizing the remaining 195,000 differentiates the product
+      - New landmarks are added continuously (new buildings, temporary art installations, seasonal decorations)
+
+      **User experience goal**: Point camera, get result in **<2 seconds** end-to-end (including network latency). Provide a ranked list of top-3 candidate landmarks with confidence scores.
+
+      Let's start by defining the ML problem formulation.
+    dialogue:
+      - speaker: interviewer
+        text: "We're designing a landmark recognition system for a travel app with 50 million monthly active users. Users photograph landmarks and get instant information."
+      - speaker: candidate
+        text: "How many landmarks should the system recognize, and how quickly?"
+      - speaker: interviewer
+        text: "Over 200,000 landmarks worldwide, with results in under 2 seconds. The long tail matters - most queries hit the top 5,000 landmarks, but covering the remaining 195,000 differentiates the product."
+      - speaker: candidate
+        text: "That's a massive classification problem. Are we treating this as classification or retrieval?"
+      - speaker: interviewer
+        text: "Great question - that's exactly the design decision we need to explore."
+    next: pd_formulation
+
+  - id: pd_formulation
+    stage: problem_definition
+    type: question
+    label: "ML Formulation"
+    speaker: interviewer
+    content: |
+      How would you formulate the landmark recognition task? The fundamental question is whether this is a classification or retrieval problem.
+    dialogue:
+      - speaker: interviewer
+        text: "Should we treat this as a classification problem with 200K classes, or as an image retrieval problem?"
+      - speaker: candidate
+        text: "Both approaches have significant implications for how we handle the long tail and new landmarks."
+    choices:
+      - label: "Classification with 200K+ classes"
+        answer: |
+          I'd frame this as a **large-scale image classification** problem with 200K+ output classes, one per landmark.
+
+          **Architecture**: Use a CNN or Vision Transformer backbone to extract image features, followed by a classification head (fully-connected layer) with 200K output neurons. The softmax output gives probability distribution over all landmarks.
+
+          **Advantages**:
+          - **Direct prediction**: Single forward pass produces landmark probabilities. No need for a separate retrieval index or nearest-neighbor search
+          - **Learned decision boundaries**: The model learns discriminative features specifically for separating similar-looking landmarks (e.g., different Gothic cathedrals)
+          - **Well-understood training**: Standard cross-entropy loss, established training recipes from ImageNet-scale classification
+          - **Efficient inference**: One forward pass through the network, no index lookup overhead
+
+          **Challenges**:
+          - **Adding new landmarks** requires retraining the entire classification head. Can't add a new landmark without updating the model
+          - **Class imbalance**: Eiffel Tower may have 100K training images, while a local monument in rural Spain has 50. The long tail will be severely undertrained
+          - **Memory**: 200K output neurons with a 2048-dim feature vector means a 400M parameter classification head alone
+          - **Open-set problem**: What happens when the user photographs something that isn't a landmark? Need explicit "not a landmark" handling
+
+          **Mitigation**: Use hierarchical softmax or sampled softmax to reduce memory. Apply focal loss for class imbalance. Add an "other" class trained on negative examples.
+        next: met_classification
+      - label: "Metric learning + retrieval"
+        answer: |
+          I'd frame this as a **metric learning and image retrieval** problem rather than classification.
+
+          **Approach**: Train a model to produce a compact **embedding vector** (e.g., 512-dim) for each image, where images of the same landmark have similar embeddings and different landmarks have distant embeddings. At inference, compute the query embedding and find the nearest neighbors in a pre-built index of landmark reference embeddings.
+
+          **Why retrieval?**
+          - **Scalable to new landmarks**: Adding a new landmark just means adding its reference embeddings to the index. No model retraining needed. This is critical for growing from 200K to 500K landmarks
+          - **Natural handling of the long tail**: Even a landmark with just 3 reference photos can be recognized if the embedding model generalizes well
+          - **Open-set recognition**: If no embedding is close enough (distance > threshold), we can say "unknown" naturally
+          - **Flexible ranking**: Return top-K nearest landmarks with distance-based confidence scores
+
+          **Architecture**: Use a backbone (ResNet-101, EfficientNet-V2, or ViT-B) trained with **ArcFace loss** or **triplet loss** to produce discriminative embeddings. Build a FAISS index over reference embeddings for fast nearest-neighbor search.
+
+          **Trade-offs**:
+          - Requires maintaining and updating a reference index (operational complexity)
+          - Retrieval quality depends on reference image quality and diversity
+          - Two-stage process (embed + search) adds latency compared to single-pass classification
+          - Harder to train effectively than classification - loss function design matters enormously
+
+          **Real-world precedent**: Google Landmark Recognition Challenge winners all use retrieval-based approaches. Google Lens internally uses embedding + retrieval.
+        next: met_retrieval
+
+  - id: met_classification
+    stage: metrics
+    type: info
+    label: "Classification Metrics"
+    speaker: interviewer
+    content: |
+      Good. Let's define metrics for the classification approach.
+
+      **Primary metrics:**
+      - **Top-1 accuracy**: Percentage of queries where the correct landmark is the highest-probability prediction. Target: **>85%** on known landmarks
+      - **Top-5 accuracy**: Correct landmark in top-5 predictions. Target: **>95%**. This matters because we show users a ranked list
+      - **Recall@1 for long-tail landmarks**: Separately track accuracy for landmarks with <100 training images. Target: **>60%** (harder but important)
+
+      **User experience metrics:**
+      - **Confidence calibration**: When the model says 90% confidence, it should be correct ~90% of the time. Well-calibrated confidence allows us to show "uncertain" UI rather than wrong answers
+      - **"Not a landmark" precision**: When user photographs food, people, or random objects, how often do we correctly abstain? Target: **>98%** rejection rate for non-landmarks
+      - **End-to-end latency**: Image upload + inference + response. Target: **<2 seconds at p95**
+
+      **Fairness metrics**: Recognition accuracy should be consistent across geographic regions. A temple in Southeast Asia should be recognized as reliably as a cathedral in Europe. Track accuracy by continent/country.
+
+      **Offline evaluation**: Hold-out test set stratified by landmark popularity (head vs. long tail), query difficulty (canonical vs. unusual angle), and geography.
+    dialogue:
+      - speaker: interviewer
+        text: "For classification, what metrics capture both model quality and user experience?"
+      - speaker: candidate
+        text: "Top-1 and top-5 accuracy are standard, but we also need to track long-tail performance separately since that's where classification struggles."
+      - speaker: interviewer
+        text: "Right. And how do we handle non-landmark queries? Users will photograph all sorts of things."
+      - speaker: candidate
+        text: "We need strong confidence calibration and a high rejection rate for non-landmarks. Showing a wrong answer is worse than showing no answer."
+      - speaker: interviewer
+        text: "Good thinking. Let's move to data considerations."
+    next: data_sources
+
+  - id: met_retrieval
+    stage: metrics
+    type: info
+    label: "Retrieval Metrics"
+    speaker: interviewer
+    content: |
+      Good choice. Let's define metrics for the retrieval approach.
+
+      **Primary retrieval metrics:**
+      - **Recall@1**: Is the correct landmark the nearest neighbor? Target: **>80%**
+      - **Recall@5**: Correct landmark in top-5 nearest neighbors? Target: **>93%**
+      - **Mean Average Precision (mAP)**: Standard retrieval metric considering the full ranking. Target: **>0.75**
+
+      **Embedding quality metrics:**
+      - **Intra-class compactness**: Average distance between embeddings of the same landmark. Should be small
+      - **Inter-class separation**: Average distance between different landmarks. Should be large
+      - **Silhouette score**: Combines compactness and separation into a single metric
+
+      **Operational metrics:**
+      - **Index search latency**: Time for FAISS nearest-neighbor lookup. Target: **<50ms** for 200K landmark index
+      - **End-to-end latency**: Embedding computation + index search + network. Target: **<2 seconds at p95**
+      - **Index size**: Memory footprint of the landmark index. With 200K landmarks * 10 reference images * 512-dim float32 = ~4GB. Must fit in memory for fast serving
+
+      **Threshold tuning**: The distance threshold for "confident match" vs "unknown" is critical. Track precision-recall curve at various thresholds. A strict threshold means fewer but more accurate matches; a loose threshold means more matches but more errors.
+    dialogue:
+      - speaker: interviewer
+        text: "For retrieval, standard IR metrics like recall at K and mAP are essential. What else would you track?"
+      - speaker: candidate
+        text: "Embedding quality metrics like intra-class compactness and inter-class separation tell us if the embedding space is well-structured."
+      - speaker: interviewer
+        text: "And operationally?"
+      - speaker: candidate
+        text: "Index search latency and memory footprint. With 200K landmarks and multiple reference images each, the index needs to fit in memory for sub-50ms lookups."
+      - speaker: interviewer
+        text: "Good. The distance threshold for confident matches is also crucial. Let's discuss data."
+    next: data_sources
+
+  - id: data_sources
+    stage: data
+    type: info
+    label: "Data Sources"
+    speaker: interviewer
+    content: |
+      Let's discuss the data landscape for landmark recognition.
+
+      **Available data sources:**
+      - **Google Landmarks Dataset v2 (GLDv2)**: 5M images of 200K landmarks. The largest public landmark dataset, but noisy (contains mislabeled images, non-landmark photos)
+      - **User-uploaded photos**: The travel app has 500M geotagged photos from users. Rich but unlabeled - need to associate photos with landmarks using geolocation
+      - **Web scraping**: Wikipedia, Wikimedia Commons, Flickr (Creative Commons) images of landmarks. Abundant but variable quality
+      - **Street View / mapping imagery**: Controlled captures with known GPS coordinates. High quality but limited viewpoints
+
+      **Data challenges:**
+      - **Label noise**: Web-scraped and user photos have 10-20% incorrect labels. A photo tagged "Eiffel Tower" might show the restaurant next to it
+      - **Viewpoint bias**: Most photos of the Colosseum are from the same 3 popular viewpoints. The model needs to recognize it from unusual angles too
+      - **Temporal changes**: Landmarks change over time (renovation scaffolding, seasonal changes, new construction nearby)
+      - **Confusable landmarks**: Many churches, temples, and government buildings look similar. The model must learn subtle distinguishing features
+      - **Class imbalance**: Eiffel Tower has 100K+ images, while a local war memorial might have 5
+
+      How would you handle the training data quality and diversity challenges?
+    dialogue:
+      - speaker: interviewer
+        text: "We have access to GLDv2 with 5M images of 200K landmarks, plus 500M geotagged user photos and web-scraped data."
+      - speaker: candidate
+        text: "The main challenge is data quality. How noisy are these labels?"
+      - speaker: interviewer
+        text: "About 10-20% incorrect labels in web-scraped data. Plus severe viewpoint bias and class imbalance."
+      - speaker: candidate
+        text: "We need a strong data cleaning pipeline and strategies for the long tail."
+      - speaker: interviewer
+        text: "Exactly. How would you approach this?"
+    next: data_strategy
+
+  - id: data_strategy
+    stage: data
+    type: question
+    label: "Data Quality Strategy"
+    speaker: interviewer
+    content: |
+      How would you handle the label noise and class imbalance in the training data?
+    dialogue:
+      - speaker: interviewer
+        text: "With 10-20% label noise and extreme class imbalance, data quality is a critical challenge. What's your strategy?"
+      - speaker: candidate
+        text: "We can either invest in cleaning the data upfront or use noise-robust training techniques."
+    choices:
+      - label: "Automated cleaning + geo-verification"
+        answer: |
+          I'd build an **automated data cleaning pipeline** that uses multiple signals to verify and correct labels.
+
+          **Geo-verification**: Cross-reference photo GPS coordinates with known landmark locations. If a photo labeled "Taj Mahal" was taken in Paris, flag it for removal. Use a radius of 200-500m depending on landmark size. This alone eliminates ~60% of label noise.
+
+          **Visual consistency check**: For each landmark, cluster all candidate images by visual similarity (using a pretrained CLIP or DINOv2 model). Images that fall far from the main cluster are likely mislabeled. Remove outliers beyond 2 standard deviations from the centroid.
+
+          **Cross-source verification**: If a photo is labeled consistently across multiple sources (geotagged + web caption + user tag), confidence is high. Require at least 2 independent signals for a label to be "verified."
+
+          **Human-in-the-loop for ambiguous cases**: Route uncertain samples (near cluster boundaries, conflicting signals) to human annotators. Use a verification UI that shows the candidate image alongside confirmed images of the same landmark.
+
+          **For class imbalance**: After cleaning, use **progressive augmentation** for long-tail classes. Apply heavier augmentation (aggressive crops, color jittering, style transfer) to classes with fewer than 100 images. Also use web scraping targeted at underrepresented landmarks to increase coverage.
+
+          **Result**: Expect to clean the dataset from 10-20% noise down to <2% noise, with ~150K landmarks having at least 20 verified images each.
+        next: feat_approach
+      - label: "Noise-robust training (learning with noisy labels)"
+        answer: |
+          Rather than trying to clean all the data upfront, I'd use **noise-robust training techniques** that learn effectively despite label noise.
+
+          **Co-teaching** (Han et al., 2018): Train two networks simultaneously. In each mini-batch, each network selects the samples with the smallest loss (most likely correct) and teaches them to the other network. This creates a self-correcting loop where both networks gradually filter out noisy labels.
+
+          **MixUp regularization**: Blend training images and their labels with convex combinations. MixUp inherently smooths the label space and makes the model more robust to occasional wrong labels. Studies show MixUp improves accuracy by 1-3% on noisy datasets.
+
+          **Label smoothing**: Instead of hard one-hot labels, use soft targets (e.g., 0.9 for the correct class, 0.1 distributed across others). This prevents the model from becoming overconfident on potentially wrong labels.
+
+          **Curriculum learning**: Start training on high-confidence samples (images with strong geo-verification), then gradually introduce noisier data. The model builds robust features on clean data before encountering noise.
+
+          **Loss correction**: Estimate the noise transition matrix (probability that label X is actually label Y) from a small clean validation set. Modify the loss function to account for expected noise. This is effectively a learned label cleaning approach.
+
+          **For class imbalance**: Use **class-balanced sampling** with square root reweighting. Instead of sampling proportionally to class size, sample proportionally to sqrt(class_size). This upweights rare classes without fully equalizing them.
+
+          **Trade-off**: These methods avoid the cost of manual cleaning ($100K+ for 5M images) but may leave some systematic noise that hurts fine-grained discrimination between similar landmarks.
+        next: feat_approach
+
+  - id: feat_approach
+    stage: features
+    type: question
+    label: "Feature Extraction"
+    speaker: interviewer
+    content: |
+      What approach would you take for feature extraction? The backbone choice significantly impacts both accuracy and latency.
+    dialogue:
+      - speaker: interviewer
+        text: "The feature extractor is the core of the system. What backbone would you choose?"
+      - speaker: candidate
+        text: "The trade-off is between heavyweight models for maximum accuracy and lightweight models for mobile deployment."
+    choices:
+      - label: "Vision Transformer (ViT-B/ViT-L)"
+        answer: |
+          I'd use a **Vision Transformer (ViT-L/14)** as the feature backbone, pretrained with **DINOv2** self-supervised learning.
+
+          **Why ViT?** Vision Transformers have surpassed CNNs on image recognition tasks, especially for fine-grained discrimination between similar objects. For landmark recognition, subtle architectural details (column styles, window patterns, roof shapes) distinguish similar buildings. ViT's **global self-attention** captures these long-range spatial relationships better than CNNs' local receptive fields.
+
+          **DINOv2 pretraining**: Meta's DINOv2 (Oquab et al., 2024) produces exceptional visual features without labeled data. DINOv2 ViT-L achieves state-of-the-art on landmark retrieval benchmarks (Oxford Buildings, Paris Buildings) out-of-the-box, without any fine-tuning. The features naturally cluster by visual similarity.
+
+          **Feature extraction details**:
+          - Input: 518x518 pixel images (ViT-L/14 native resolution)
+          - Output: 1024-dim CLS token embedding, optionally concatenated with GeM-pooled patch tokens
+          - Dimensionality reduction: PCA whitening to 512-dim for efficient storage and retrieval
+
+          **Fine-tuning strategy**: Start from DINOv2 weights, fine-tune with ArcFace loss on our landmark dataset. ArcFace adds an angular margin penalty that forces embeddings of different landmarks further apart. Use learning rate 1e-5 for backbone, 1e-3 for the ArcFace head.
+
+          **Performance reference**: ViT-L/14 with DINOv2 achieves ~90% mAP on Google Landmarks retrieval benchmark, compared to ~80% for ResNet-101.
+
+          **Trade-off**: ViT-L has ~304M parameters and requires ~30ms per image on A100. Heavier than CNN alternatives, but the accuracy gain justifies the server-side cost.
+        next: mod_architecture
+      - label: "EfficientNet / MobileNet (lightweight CNN)"
+        answer: |
+          I'd use **EfficientNet-V2-M** or **MobileNetV3-Large** as the backbone, prioritizing efficiency for mobile-first deployment.
+
+          **Why lightweight?** The travel app runs on mobile devices. If we can run feature extraction **on-device**, we eliminate network round-trip latency for the embedding computation, achieving sub-second results. Only the compact embedding vector (512 floats = 2KB) needs to be sent to the server for retrieval.
+
+          **EfficientNet-V2-M** specs:
+          - 54M parameters, 24 GFLOPs
+          - ImageNet top-1: 85.2% (competitive with much larger models)
+          - On-device inference: ~60ms on iPhone 15 Pro (CoreML), ~80ms on Pixel 8 (TFLite)
+          - 512-dim embedding after global average pooling + FC layer
+
+          **MobileNetV3-Large** for budget devices:
+          - 5.4M parameters, 0.22 GFLOPs
+          - On-device inference: ~15ms on any modern smartphone
+          - Accuracy trade-off: ~3-5% lower recall@5 than EfficientNet
+
+          **On-device advantages**:
+          - Works offline (tourist in area with poor connectivity)
+          - Instant visual feedback (real-time camera viewfinder overlay)
+          - Privacy: raw photos never leave the device
+          - Reduced server costs (only embedding vectors sent)
+
+          **Quantization**: Apply INT8 quantization using post-training quantization (PTQ) with calibration on 1K landmark images. Reduces model size by 4x and inference time by 2x with <0.5% accuracy loss.
+
+          **Trade-off**: Lightweight models are less accurate on fine-grained discrimination. Two similar cathedrals that ViT-L distinguishes easily might confuse EfficientNet. Mitigate with server-side re-ranking of top-K candidates using a heavier model.
+        next: mod_architecture
+
+  - id: mod_architecture
+    stage: model
+    type: question
+    label: "System Architecture"
+    speaker: interviewer
+    content: |
+      Beyond the backbone choice, how would you architect the overall recognition system? This includes handling the 200K landmark catalog and serving predictions.
+    dialogue:
+      - speaker: interviewer
+        text: "We've chosen a backbone. Now how does the full system work end-to-end, from user photo to landmark result?"
+      - speaker: candidate
+        text: "The architecture depends on whether we use classification or retrieval. Either way, we need to handle 200K landmarks efficiently."
+    choices:
+      - label: "Two-stage: coarse retrieval + fine re-ranking"
+        answer: |
+          I'd use a **two-stage retrieval pipeline**: fast coarse retrieval followed by precise re-ranking.
+
+          **Stage 1 - Coarse retrieval with FAISS**:
+          - Build a **FAISS IVF-PQ index** over all landmark reference embeddings. For 200K landmarks * 50 reference images each = 10M vectors of 512-dim
+          - Use **IVF (Inverted File) with 4096 clusters** for fast approximate nearest-neighbor search. Query probes 64 clusters (1.5% of total) for good recall
+          - **Product Quantization (PQ)** compresses each vector from 2048 bytes to 64 bytes, reducing index from 20GB to ~640MB. Fits in memory on a single server
+          - Retrieve **top-100 candidates** in ~5ms
+
+          **Stage 2 - Fine re-ranking**:
+          - For top-100 candidates, recompute similarity using full-precision embeddings (no PQ compression)
+          - Apply **geometric verification**: Use RANSAC with local features (SuperPoint keypoints) to verify that candidate and query share consistent geometry. This eliminates "looks similar but different building" errors
+          - **Query expansion**: If top-1 match is confident, use its embedding to refine the search (average query + match embedding, re-search)
+          - Return **top-5 landmarks** with distance-based confidence scores
+
+          **Result**: Two-stage achieves ~5% higher mAP than single-stage retrieval while keeping latency under 100ms for the retrieval portion.
+
+          **Scalability**: FAISS IVF-PQ scales to billions of vectors. Growing from 200K to 2M landmarks just means rebuilding the index (takes ~30 minutes), no model retraining needed.
+        next: train_pipeline
+      - label: "Hierarchical classification (continent > country > landmark)"
+        answer: |
+          I'd use a **hierarchical classification system** that narrows down candidates progressively, using geographic and visual hierarchy.
+
+          **Level 1 - Geographic prior** (if GPS available):
+          - Use the device's GPS to restrict candidates to landmarks within a reasonable radius (e.g., 50km). This reduces the search space from 200K to typically 100-500 landmarks
+          - Build a **spatial index** (R-tree or geohash) for O(log n) geographic filtering
+          - If GPS is unavailable (indoor), skip to Level 2
+
+          **Level 2 - Coarse category classification**:
+          - Classify the image into architectural categories: church, monument, bridge, natural formation, modern building, etc. (20-30 categories)
+          - This lightweight classifier (MobileNet-scale) further narrows candidates
+          - Example: "Gothic church in Paris" reduces 500 local landmarks to ~30
+
+          **Level 3 - Fine-grained classification**:
+          - Among the remaining candidates (typically 20-100), run a fine-grained classifier trained specifically for this geographic region and category
+          - This allows us to maintain **many small, specialized classifiers** instead of one massive 200K-class model
+          - Each regional classifier has 50-500 classes and can be trained independently
+
+          **Advantages**:
+          - **Dramatically reduced compute**: Instead of searching 200K landmarks, we classify among ~50
+          - **Better accuracy on similar landmarks**: A classifier trained only on "churches in Florence" can learn the subtle differences between them
+          - **Modular updates**: Adding a new landmark to Paris only requires retraining the Paris classifier, not the global model
+
+          **Trade-off**: Requires GPS for best performance. Without GPS, the coarse category classifier must work harder. Also, maintaining hundreds of regional classifiers adds operational complexity.
+        next: train_pipeline
+
+  - id: train_pipeline
+    stage: training
+    type: info
+    label: "Training Pipeline"
+    speaker: interviewer
+    content: |
+      Good architecture choice. Let's discuss the training strategy.
+
+      **Backbone training:**
+      - Start from pretrained weights (DINOv2, ImageNet, or CLIP)
+      - Fine-tune with **ArcFace loss** (Deng et al., 2019) for metric learning or **cross-entropy** for classification
+      - ArcFace margin: s=30, m=0.5 (standard settings for large-scale recognition)
+      - Batch size: 256-512 with **mixed-precision (FP16)** training on 8 A100s
+      - **Hard negative mining**: In each batch, include deliberate hard negatives - images of visually similar but different landmarks
+
+      **Data augmentation for landmarks:**
+      - **Random resized crop**: 0.2-1.0 scale, training the model on both full views and detail crops
+      - **Color jittering**: Heavy (brightness 0.4, contrast 0.4, saturation 0.4, hue 0.1) to handle different times of day
+      - **RandAugment**: Automated augmentation policy selection
+      - **Cutout/GridMask**: Simulate occlusion by tourists, trees, scaffolding blocking parts of the landmark
+      - **Horizontal flip**: Note - do NOT flip for landmarks with asymmetric features (use metadata to skip)
+
+      **Training schedule:**
+      - Warmup: 5 epochs linear warmup to lr=1e-4 (backbone) / 1e-2 (head)
+      - Cosine decay over 50 epochs
+      - Early stopping on validation mAP with patience=10
+
+      **Reference index building** (for retrieval approaches):
+      - After training, embed all reference images through the model
+      - Build FAISS index, optimize cluster parameters on validation set
+      - Index rebuild: automated weekly as new reference images are added
+
+      **Compute**: ~24 hours on 8 A100s for full training. Incremental fine-tuning on new data: ~4 hours.
+    dialogue:
+      - speaker: interviewer
+        text: "Let's discuss training. What loss function would you use?"
+      - speaker: candidate
+        text: "ArcFace loss for metric learning is the gold standard for landmark recognition. It pushes embeddings of different landmarks apart with an angular margin."
+      - speaker: interviewer
+        text: "Good. What about hard negatives?"
+      - speaker: candidate
+        text: "Critical for landmarks. We need to deliberately include similar-looking landmarks in each training batch. Two Gothic cathedrals from the same city should appear together so the model learns their differences."
+      - speaker: interviewer
+        text: "What about augmentation strategies specific to landmarks?"
+      - speaker: candidate
+        text: "Heavy color jittering for time-of-day variation, cutout for simulating occlusion, and random crops to handle both full views and detail shots. But we need to be careful with horizontal flips for asymmetric landmarks."
+    next: deploy_strategy
+
+  - id: deploy_strategy
+    stage: deployment
+    type: question
+    label: "Deployment Strategy"
+    speaker: interviewer
+    content: |
+      How would you deploy this system to serve 10M queries per day with sub-2-second latency?
+    dialogue:
+      - speaker: interviewer
+        text: "10 million queries per day, under 2 seconds end-to-end. How do you architect this?"
+      - speaker: candidate
+        text: "The key trade-off is where to run inference - server-side gives us more powerful models, while on-device gives lower latency."
+    choices:
+      - label: "Server-side inference with global CDN"
+        answer: |
+          I'd deploy **server-side inference** with a globally distributed architecture for low latency.
+
+          **Architecture**:
+          1. **Client**: Mobile app captures photo, compresses to JPEG quality 85 (~200KB for a 1024px image), uploads to nearest edge server
+          2. **Edge CDN** (CloudFlare Workers or AWS Lambda@Edge): Receives image, routes to nearest inference cluster
+          3. **Inference cluster**: GPU servers in 5 regions (US-East, EU-West, Asia-Pacific-Tokyo, Asia-Pacific-Mumbai, South America). Each runs the full model + FAISS index
+          4. **Model serving**: NVIDIA Triton Inference Server with TensorRT optimization. Batch requests for GPU efficiency (dynamic batching with max 8ms wait)
+          5. **Response**: Top-5 landmarks with confidence scores, enriched with metadata from content database
+
+          **Latency budget**:
+          - Image upload: ~300ms (200KB on 4G)
+          - Edge routing: ~20ms
+          - Model inference: ~50ms (ViT-L on A100 with TensorRT)
+          - Index search: ~10ms (FAISS)
+          - Metadata enrichment: ~20ms
+          - Response: ~100ms
+          - **Total: ~500ms** (well under 2s target)
+
+          **Scaling**: At peak 10M queries/day = ~120 QPS average, 500 QPS peak (bursty traffic at tourist attractions). Each A100 handles ~30 QPS. Need 2-3 A100s per region for peak load.
+
+          **Cost**: 15 A100 instances globally at ~$3/hr = ~$400K/year. With spot instances and auto-scaling: ~$250K/year.
+
+          **Advantages**: Can use the most powerful models for maximum accuracy. Easy model updates (deploy new model, roll out region by region). Centralized monitoring.
+        next: mon_system
+      - label: "On-device inference with server fallback"
+        answer: |
+          I'd deploy **on-device inference** as the primary path, with server fallback for difficult cases.
+
+          **On-device pipeline**:
+          1. User points camera at landmark
+          2. **On-device model** (EfficientNet-V2-S, INT8 quantized, ~8MB) runs on the Neural Engine / GPU of the phone, producing a 512-dim embedding in ~40ms
+          3. **Local top-K search**: Compare embedding against a **cached index of nearby landmarks** (downloaded based on GPS region). Typical cache: 200-1000 landmarks for the user's current city/region, ~2MB
+          4. If top match confidence > threshold: show result immediately (**<200ms total**, feels instant)
+          5. If uncertain: send embedding to server for global search (adds ~300ms)
+
+          **Offline capability**: The local cache enables landmark recognition with **zero network connectivity**. Download regional caches via WiFi at hotel. Critical for travelers in areas with poor connectivity.
+
+          **Regional cache strategy**:
+          - Pre-compute regional landmark indexes for all major tourist regions (~500 regions worldwide)
+          - Each cache: landmarks within 100km radius, 200-2000 entries, 1-5MB compressed
+          - Auto-download when user enters a new region (based on GPS geofencing)
+          - Cache freshness: update weekly for new/changed landmarks
+
+          **Model optimization for mobile**:
+          - **CoreML** on iOS, **TFLite** on Android with GPU/NPU delegates
+          - INT8 quantization with QAT (quantization-aware training) for minimal accuracy loss
+          - Model size: ~8MB (fits comfortably on any smartphone)
+          - Battery impact: ~0.1% per 100 recognitions (negligible)
+
+          **Trade-off**: On-device models are less accurate (~3-5% lower recall) than server-side ViT-L. Mitigate by always sending uncertain results to server. The UX of instant results outweighs the small accuracy gap for confident matches.
+        next: mon_system
+
+  - id: mon_system
+    stage: monitoring
+    type: info
+    label: "Monitoring & Iteration"
+    speaker: interviewer
+    content: |
+      Let's discuss production monitoring and continuous improvement.
+
+      **Accuracy monitoring:**
+      - **Implicit feedback**: Track whether users engage with the top-1 result (tap for details, save, share) vs. scroll to other candidates or dismiss. Low engagement rate for a landmark suggests misrecognition
+      - **Explicit feedback**: "Is this correct?" button after showing results. Aggregate correctness rate by landmark, region, and time
+      - **Expert evaluation**: Weekly evaluation on 1,000 randomly sampled queries by trained annotators. Provides ground-truth accuracy estimates
+
+      **System health:**
+      - **Latency percentiles**: Track p50, p95, p99 latency by region. Alert if p95 > 2 seconds
+      - **Error rates**: Model inference failures, index search timeouts, cache miss rates
+      - **Traffic patterns**: Monitor QPS by region, detect seasonal spikes (tourism seasons), plan capacity
+
+      **Index freshness:**
+      - Monitor time since last index rebuild per region
+      - Track "unrecognized" queries that might indicate new landmarks not yet in the index
+      - Automated pipeline to propose new landmarks from clusters of unrecognized queries at the same GPS location
+
+      **Continuous learning:**
+      - Collect high-confidence correct recognitions as additional training data (auto-labeled)
+      - Monthly model retraining with accumulated new data
+      - A/B test new models on 5% of traffic before full rollout
+      - Track recognition accuracy improvements over time by landmark and region
+
+      **Landmark lifecycle**: Detect when landmarks are demolished, renovated, or temporarily obscured (scaffolding). Use user report rates and image freshness signals to flag landmarks needing reference image updates.
+    dialogue:
+      - speaker: interviewer
+        text: "How would you monitor this system in production?"
+      - speaker: candidate
+        text: "A combination of implicit feedback from user engagement, explicit correctness feedback, and expert evaluation on random samples."
+      - speaker: interviewer
+        text: "How do you handle new landmarks that aren't in the system yet?"
+      - speaker: candidate
+        text: "Cluster unrecognized queries by GPS location. If many users photograph the same unknown location, it's likely a new landmark we should add."
+      - speaker: interviewer
+        text: "Smart approach. That creates a self-improving system."
+    next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Design Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive landmark recognition system.
+
+      **Your design summary:**
+      - Formulated as classification or metric learning + retrieval for 200K+ landmarks
+      - Defined appropriate accuracy and latency metrics with long-tail considerations
+      - Addressed data quality through cleaning pipelines or noise-robust training
+      - Selected feature backbone balancing accuracy and deployment constraints
+      - Designed system architecture with retrieval or hierarchical classification
+      - Built training pipeline with ArcFace loss, hard negative mining, and domain-specific augmentation
+      - Deployed with server-side inference or on-device with regional caching
+      - Implemented monitoring with implicit/explicit feedback and automated new landmark discovery
+
+      **Key strengths:**
+      - Long-tail landmark handling is treated as a first-class concern throughout
+      - The system can grow to millions of landmarks without architectural changes
+      - User experience (sub-2-second latency) is prioritized alongside accuracy
+      - Continuous improvement loop with automated new landmark discovery
+
+      **Areas for further exploration:**
+      - Multi-modal recognition: Combine visual features with GPS, compass heading, and augmented reality
+      - Temporal context: "I just recognized the Eiffel Tower, so the nearby building is likely Trocadero"
+      - Personalization: Learn from user's travel history to improve predictions
+      - Landmark storytelling: Generate custom tours based on recognized landmarks

@@ -10,6 +10,7 @@ import { useInterviewLLM, dialogueToConversation } from '@/hooks/useInterviewLLM
 import { mergeBranch, validateConvergenceRefs } from '@/utils/mergeBranch';
 import { getDownstreamSummaries } from '@/utils/treeTraversal';
 import { submitBranchForModeration } from '@/utils/branchModeration';
+import { isDraft, saveDraftProblem } from '@/utils/draftStore';
 import { useAuth } from '@/hooks/useAuth';
 import { useSources } from '@/hooks/useSources';
 import { StageIndicator } from './StageIndicator';
@@ -424,13 +425,17 @@ export function WizardPanel() {
     }
   }, [currentNode, problem, interviewLLM, updateProblem, selectChoice, user, sourcesHook.sources]);
 
-  // Auto-save enhanced problem to localStorage
+  // Auto-save problem to localStorage (drafts use draftStore, others use enhanced_problem_)
   useEffect(() => {
     if (!problem) return;
 
     const timer = setTimeout(() => {
       try {
-        localStorage.setItem(`enhanced_problem_${problem.id}`, JSON.stringify(problem));
+        if (isDraft(problem.id)) {
+          saveDraftProblem(problem);
+        } else {
+          localStorage.setItem(`enhanced_problem_${problem.id}`, JSON.stringify(problem));
+        }
       } catch {
         // localStorage full or unavailable
       }

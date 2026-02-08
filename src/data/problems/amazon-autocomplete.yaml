@@ -1,0 +1,706 @@
+id: amazon-autocomplete
+title: "Amazon Search Autocomplete"
+description: "Design a search query autocomplete (type-ahead) system for Amazon."
+companies: ["Amazon", "Google", "Microsoft"]
+domains: ["NLP", "Ranking/Search"]
+root: pd_start
+
+nodes:
+  # ============ PROBLEM DEFINITION ============
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design an **autocomplete (type-ahead) system** for Amazon's search bar.
+
+      **Business context:**
+      - Amazon processes ~**600M+ product searches per day** across 20+ marketplaces
+      - Users expect suggestions to appear within **<100ms** of each keystroke
+      - Autocomplete drives **~30% of all product searches** -- getting it right directly impacts revenue
+      - Suggestions must be **personalized**, **fresh** (new products, trending queries), and **safe** (no offensive/inappropriate completions)
+
+      **Core problem:** Given a partial query prefix (e.g., "wire"), return the top 8-10 ranked query completions (e.g., "wireless earbuds", "wireless mouse", "wire shelving unit") in real time.
+
+      **Key challenges:**
+      - **Scale**: Hundreds of millions of unique queries, served globally
+      - **Latency**: Must respond faster than a user can type (~50-100ms per keystroke)
+      - **Freshness**: New products (e.g., "iPhone 16 case") must appear within hours, not days
+      - **Personalization**: A gamer typing "key" should see "keyboard mechanical" before "keychain"
+
+      Let's start by framing how we approach this ML problem.
+    dialogue:
+      - speaker: interviewer
+        text: "Let's design Amazon's search autocomplete system. What comes to mind first?"
+      - speaker: candidate
+        text: "This is fundamentally a prefix-matching and ranking problem. We need to retrieve candidate completions and rank them by relevance and likelihood."
+      - speaker: interviewer
+        text: "Good. What makes this different from a simple trie lookup?"
+      - speaker: candidate
+        text: "Scale and personalization. A trie gives you completions, but ranking them requires understanding user intent, query popularity, and context."
+    next: pd_formulation
+
+  - id: pd_formulation
+    stage: problem_definition
+    type: question
+    label: "Problem Formulation"
+    speaker: interviewer
+    content: |
+      How would you frame this as an ML problem? There are two main approaches to think about -- the retrieval strategy for finding candidate completions from hundreds of millions of possible queries.
+    dialogue:
+      - speaker: interviewer
+        text: "How should we frame the autocomplete problem from an ML perspective?"
+      - speaker: candidate
+        text: "We need to decide whether to treat this as a retrieval problem with ranking on top, or as a generative sequence problem."
+      - speaker: interviewer
+        text: "What are the trade-offs between those approaches?"
+    choices:
+      - label: "Retrieve & Rank (trie/index retrieval + ML ranker)"
+        answer: |
+          I'd frame this as a **two-stage retrieve-and-rank** system:
+
+          **Stage 1 -- Retrieval:** Use a **prefix trie** or **inverted index** to quickly find all queries that match the user's prefix. This gives us a candidate set of, say, 100-1000 possible completions.
+
+          **Stage 2 -- Ranking:** Apply an ML model to rank these candidates by a combination of **popularity**, **relevance**, **personalization**, and **freshness**.
+
+          **Why retrieve-and-rank?**
+          - **Proven at scale**: This is what Google, Amazon, and Bing actually use in production
+          - **Interpretable**: Each stage is independently testable and debuggable
+          - **Low latency**: Trie lookup is O(prefix_length + k), ranker scores a small candidate set
+          - **Flexible**: Can swap ranking models without changing retrieval
+          - The candidate set acts as a **safety filter** -- we only suggest queries that have been seen/vetted
+
+          **Trade-off:** Limited to previously-seen queries. If a brand-new product launches (e.g., "Galaxy S25 Ultra"), it won't appear until query logs include it. We mitigate this with **query injection** from product catalog titles.
+
+          **Retrieval data structure comparison:**
+
+          | Structure | Lookup Time | Memory | Update Speed |
+          |-----------|------------|--------|-------------|
+          | **Trie** | O(L + k) | High | Slow (rebuild) |
+          | **Sorted array + binary search** | O(L log N) | Lower | Slow |
+          | **Inverted index (Elasticsearch)** | O(L) | Medium | Fast (near real-time) |
+        next: met_question
+      - label: "Generative (seq2seq / LLM-based completion)"
+        answer: |
+          I'd frame this as a **generative sequence modeling** problem -- given a prefix, generate the most likely completions character by character or token by token.
+
+          **Approach:** Train a **causal language model** (GPT-style) on Amazon search query logs. At inference time, feed the prefix and use **beam search** to generate top-k completions.
+
+          **Why generative?**
+          - Can produce **novel completions** never seen in logs -- crucial for new products
+          - Naturally handles **misspellings** and **partial words** (the model learns character-level patterns)
+          - Captures complex **semantic relationships** between query terms
+          - No need to maintain a massive trie or index -- the model IS the knowledge base
+
+          **Architecture:**
+          - **Model**: Character-level or BPE-tokenized Transformer decoder (~50M params)
+          - **Training data**: Billions of historical queries with frequency weights
+          - **Inference**: Prefix-constrained beam search with beam width 20, return top 10
+
+          **Trade-offs:**
+          - **Latency risk**: Autoregressive generation is inherently slower than a trie lookup -- need aggressive model optimization (quantization, speculative decoding)
+          - **Hallucination**: Model might generate plausible but nonexistent product queries
+          - **Control**: Harder to inject business rules (promoted products, blocked terms)
+          - **Cost**: GPU inference for every keystroke across 600M queries/day is expensive
+
+          We can mitigate latency with **prefix caching** (pre-compute completions for common prefixes) and **distilled models** (<10M params).
+        next: met_question
+
+  # ============ METRICS ============
+  - id: met_question
+    stage: metrics
+    type: question
+    label: "Success Metrics"
+    speaker: interviewer
+    content: |
+      How would you measure the success of this autocomplete system? We need both offline metrics for model development and online metrics for production evaluation.
+    dialogue:
+      - speaker: interviewer
+        text: "What metrics would you use to evaluate autocomplete quality?"
+      - speaker: candidate
+        text: "We need to balance relevance, engagement, and operational metrics."
+      - speaker: interviewer
+        text: "How do you handle the tension between showing popular queries vs. personalized ones?"
+    choices:
+      - label: "Engagement-focused (CTR, conversion, keystrokes saved)"
+        answer: |
+          I'd optimize primarily for **user engagement** and **search efficiency**:
+
+          **Primary online metrics:**
+          - **Suggestion Click-Through Rate (CTR)**: Fraction of autocomplete sessions where the user clicks a suggestion rather than typing the full query. Target: **>40%** (Google's autocomplete CTR is reportedly ~40-50%)
+          - **Keystrokes Saved**: Average number of characters the user didn't need to type because they selected a suggestion. Measures search efficiency directly
+          - **Mean Reciprocal Rank (MRR)**: 1/rank of the suggestion the user actually selected. Higher MRR means the "right" suggestion appears higher in the list
+
+          **Secondary metrics:**
+          - **Search-to-Purchase Conversion Rate**: Do autocomplete suggestions lead to purchases? This is the ultimate business metric for Amazon
+          - **Time to First Click**: How quickly users find and click a suggestion
+          - **Abandonment Rate**: Sessions where the user starts typing but leaves without searching
+
+          **Offline metrics:**
+          - **Recall@10**: What fraction of user-typed queries appear in the top 10 suggestions for that prefix?
+          - **NDCG@10**: Are the most-clicked completions ranked highest?
+
+          **Why engagement-focused?** For Amazon, autocomplete is a **revenue driver**. Every percentage point increase in suggestion CTR translates to millions more searches and purchases. Keystrokes saved also improves mobile experience where typing is painful.
+
+          **Guardrail:** Monitor **offensive suggestion rate** (must be <0.001%) and **diversity** (don't show 10 variations of the same query).
+        next: data_pipeline
+      - label: "Relevance-focused (NDCG, MRR, precision)"
+        answer: |
+          I'd optimize primarily for **relevance quality** with information retrieval metrics:
+
+          **Primary offline metrics:**
+          - **MRR (Mean Reciprocal Rank)**: The core metric -- where does the user's intended query appear in our suggestion list? Industry benchmark for autocomplete MRR is **0.3-0.5**
+          - **NDCG@10**: Measures the quality of the full ranked list, not just the top result. Accounts for graded relevance (exact match > partial match > related query)
+          - **Precision@k** (k=3, 5, 10): What fraction of our top-k suggestions are relevant to the user's intent?
+
+          **Complementary online metrics:**
+          - **Query Reformulation Rate**: How often users modify their query after seeing suggestions. Lower is better -- it means we're providing useful completions
+          - **Zero-Result Rate**: Do suggested queries actually return products? Suggestions leading to empty result pages are a failure
+          - **Prefix Coverage**: For what fraction of typed prefixes do we show any suggestions? Target: >95% for prefixes of length >= 3
+
+          **Offline evaluation setup:**
+          - Use last-7-days of query logs as ground truth
+          - For each (prefix, completed_query) pair, evaluate where completed_query ranks in suggestions
+          - Weight by query frequency (getting common queries right matters more)
+
+          **Why relevance-focused?** If suggestions aren't relevant, users stop trusting autocomplete and ignore it entirely. Relevance is the **foundation** -- engagement follows. Amazon's A/B tests show that a 5% improvement in MRR leads to ~2% CTR increase.
+
+          **Guardrail:** Track CTR alongside -- if MRR improves but CTR drops, our relevance labels might not match user preferences.
+        next: data_pipeline
+
+  # ============ DATA ============
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      Let's design the data pipeline. Autocomplete systems are **data-hungry** -- the quality of suggestions is directly proportional to the quality and freshness of query data.
+
+      **Primary data sources:**
+
+      | Source | Data | Volume | Freshness |
+      |--------|------|--------|-----------|
+      | **Search query logs** | Raw queries, timestamps, user IDs, click-through | ~600M queries/day | Real-time |
+      | **Product catalog** | Product titles, categories, brands | ~350M products | Near real-time |
+      | **Click/purchase logs** | Which products were clicked/bought after each query | ~200M clicks/day | Real-time |
+      | **Trending queries** | Spike-detected queries (viral products, events) | ~10K new trends/day | Minutes |
+      | **Blocklist** | Offensive, inappropriate, or legally problematic queries | ~100K entries | Manual + ML |
+
+      **Data processing pipeline:**
+      1. **Query normalization**: Lowercase, strip special characters, collapse whitespace, spelling correction
+      2. **Query deduplication**: "wireless earbuds" and "Wireless Earbuds" are the same; merge counts
+      3. **Frequency aggregation**: Count queries over rolling windows (1h, 24h, 7d, 30d) for freshness-weighted popularity
+      4. **Query-product mapping**: Link queries to the products users ultimately clicked/purchased
+      5. **Safety filtering**: Remove queries matching blocklist patterns, flag queries with low product coverage
+
+      **Freshness strategy:**
+      - **Hot tier**: Last 24h of queries, updated every 15 minutes
+      - **Warm tier**: Last 7 days, updated hourly
+      - **Cold tier**: Last 90 days, updated daily
+      - **Injected queries**: Product titles from new catalog additions (ensures "iPhone 16 case" appears on launch day)
+
+      **Data volume:** After deduplication, Amazon likely maintains **~500M unique query strings** with associated metadata.
+    dialogue:
+      - speaker: interviewer
+        text: "What data sources would you use for autocomplete?"
+      - speaker: candidate
+        text: "Query logs are the primary source, but we also need the product catalog for new products and a blocklist for safety."
+      - speaker: interviewer
+        text: "How do you handle freshness? New products need to appear quickly."
+      - speaker: candidate
+        text: "I'd use tiered aggregation windows -- hot, warm, cold -- with product title injection for brand new items."
+      - speaker: interviewer
+        text: "Good. What about data quality issues?"
+    next: feat_question
+
+  # ============ FEATURES ============
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Design"
+    speaker: interviewer
+    content: |
+      Now let's design the features for ranking autocomplete suggestions. Once we retrieve candidate completions for a prefix, we need features to rank them. What feature categories would you prioritize?
+    dialogue:
+      - speaker: interviewer
+        text: "What features would you use to rank autocomplete suggestions?"
+      - speaker: candidate
+        text: "We need query-level features, user-level features for personalization, and context features."
+      - speaker: interviewer
+        text: "Which features have the highest signal-to-noise ratio?"
+    choices:
+      - label: "Query popularity + context features (simpler, faster)"
+        answer: |
+          I'd focus on **query-level popularity signals** combined with **contextual features** -- this covers 80% of the signal with much lower complexity:
+
+          **Query-level features (per candidate completion):**
+          - **Frequency (multi-window)**: Query count in last 1h, 24h, 7d, 30d. The 24h window is typically the strongest single feature
+          - **Velocity**: Rate of change in frequency (detects trending queries). `velocity = freq_1h / avg_freq_1h_same_hour_last_7d`
+          - **Prefix match quality**: Does the query start with the exact prefix? Contains the prefix? Edit distance from prefix
+          - **Query length**: Shorter completions are generally preferred (less to read)
+          - **Product coverage**: Number of products matching this query in the catalog. Queries with 0 results should be demoted
+          - **Historical CTR**: Click-through rate when this suggestion was previously shown
+          - **Purchase rate**: Fraction of searches for this query that led to a purchase
+
+          **Context features:**
+          - **Time of day**: "coffee" queries spike in morning, "dinner" queries in evening
+          - **Day of week**: Weekend vs weekday patterns differ
+          - **Season/events**: "halloween costume" surges in October
+          - **Device type**: Mobile users prefer shorter suggestions
+          - **Marketplace/locale**: US vs UK vs JP have different query patterns
+
+          **Why this approach?**
+          - Query frequency is the **single most predictive feature** for autocomplete (~60% of ranking quality)
+          - Context features add another ~15% improvement
+          - This set can be pre-computed and cached, enabling <10ms ranking
+          - **No cold-start problem** for new users -- popularity-based ranking works for everyone
+
+          Total: ~20 features per candidate, all pre-computable.
+        next: mod_question
+      - label: "Deep personalization + semantic features (richer, more complex)"
+        answer: |
+          I'd invest heavily in **personalization** and **semantic understanding** to go beyond popularity:
+
+          **User-level features (personalization):**
+          - **User query history embedding**: Embed the user's last 50 queries using a trained embedding model, average into a 128-dim user vector
+          - **Category affinity**: Distribution over Amazon's ~30 top-level categories based on browsing/purchase history (e.g., user skews 40% Electronics, 25% Books)
+          - **Brand affinity**: Top 10 brands by purchase frequency
+          - **Price tier**: Average price of purchased items (budget/mid/premium)
+          - **Recency-weighted search history**: Queries from last 1h weighted 10x vs last 30d
+
+          **Semantic features:**
+          - **Query-prefix semantic similarity**: Cosine similarity between prefix embedding and candidate query embedding (using a fine-tuned BERT model)
+          - **Query intent classification**: Is this a navigational query ("amazon prime"), product query ("wireless mouse"), or informational query ("how to connect bluetooth")?
+          - **Entity recognition**: Extract brand, product type, attribute from the partial prefix
+          - **Spelling correction confidence**: If prefix appears misspelled, how confident are we in the correction?
+
+          **Query-user interaction features:**
+          - **User-query co-click score**: Has this user searched for related queries before?
+          - **Collaborative filtering score**: "Users who typed this prefix also searched for..."
+          - **Session context**: What did the user search in the current session? (e.g., if they just searched "laptop", "laptop stand" should rank higher for "lap")
+
+          **Why deep personalization?**
+          - A gamer typing "key" should see "keyboard mechanical RGB" while a parent sees "keychain kids"
+          - Amazon's internal data shows personalized autocomplete increases **CTR by 15-25%** over popularity-only
+          - Session context alone adds **~8% MRR improvement**
+
+          **Trade-off:** Requires real-time feature serving (user embeddings from a feature store), which adds ~5-10ms latency. Also creates cold-start for new users (fall back to popularity ranking).
+
+          Total: ~60+ features per candidate, requires real-time computation.
+        next: mod_question
+
+  # ============ MODEL ============
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Ranking Model"
+    speaker: interviewer
+    content: |
+      What model architecture would you use to rank autocomplete suggestions? Remember the constraints: <100ms total latency per keystroke, ranking ~100-1000 candidates.
+    dialogue:
+      - speaker: interviewer
+        text: "What model would you use to rank autocomplete candidates?"
+      - speaker: candidate
+        text: "The key constraint is latency. We need something that can score hundreds of candidates in under 10ms."
+      - speaker: interviewer
+        text: "How do you balance model expressiveness with latency requirements?"
+    choices:
+      - label: "LambdaMART / Gradient Boosted Trees (fast, interpretable)"
+        answer: |
+          I'd use **LambdaMART** (a learning-to-rank variant of gradient boosted trees) as the ranking model:
+
+          **Why LambdaMART?**
+          - **Speed**: Scores 1000 candidates in <1ms on CPU. No GPU needed
+          - **Learning-to-rank native**: Directly optimizes NDCG/MRR, unlike pointwise regression
+          - **Feature interactions**: Trees naturally capture non-linear interactions (e.g., "high frequency + trending + matches user history" = boost)
+          - **Battle-tested**: Used in Bing's autocomplete, Airbnb search, and many production ranking systems
+          - **Interpretable**: Feature importance and SHAP values explain every prediction
+
+          **Model details:**
+          - **Algorithm**: LightGBM with `lambdarank` objective
+          - **Trees**: 500 trees, max depth 8, learning rate 0.05
+          - **Training data**: (prefix, candidate_query, features, relevance_label) tuples from click logs
+          - **Label construction**: Click = 1, shown but not clicked = 0, purchased after click = 2 (graded relevance)
+          - **Evaluation groups**: Group by (user_session, prefix) for listwise evaluation
+
+          **Training pipeline:**
+          ```
+          Query logs (30 days) → Feature extraction → Label assignment → LambdaMART training → Offline eval → Deploy
+          ```
+
+          **Inference optimization:**
+          - Compile model to C++ using TreeLite → **10-50x speedup** over Python
+          - Pre-compute query-level features (frequency, coverage) in a lookup table
+          - Only compute user features at request time
+
+          | Model | NDCG@10 | Latency (1K docs) | Interpretable |
+          |-------|---------|-------------------|--------------|
+          | Popularity sort | 0.35 | <0.1ms | Yes |
+          | **LambdaMART** | **0.52** | **<1ms** | **Yes** |
+          | BERT reranker | 0.58 | ~50ms | No |
+        next: train_strategy
+      - label: "Two-tower neural model (embeddings, personalization-ready)"
+        answer: |
+          I'd use a **two-tower neural model** that separately encodes the query context and candidate completions:
+
+          **Architecture:**
+          ```
+          Query Tower:                    Candidate Tower:
+          [prefix + user features]        [candidate query + query features]
+               |                               |
+          FC(256) + ReLU                   FC(256) + ReLU
+          FC(128) + ReLU                   FC(128) + ReLU
+          FC(64) → query_emb              FC(64) → candidate_emb
+               |                               |
+               └──── dot product / cosine ─────┘
+                          |
+                      relevance score
+          ```
+
+          **Why two-tower?**
+          - **Candidate pre-computation**: Candidate tower outputs can be **pre-computed offline** for all 500M queries and stored in an ANN index. At inference time, only the query tower runs
+          - **Personalization-native**: User features feed into the query tower, enabling personalized ranking without extra latency
+          - **Semantic understanding**: Learned embeddings capture meaning -- "wireless earbuds" is close to "bluetooth headphones" in embedding space
+          - **Scalable retrieval**: Can replace the trie-based retrieval with ANN search over candidate embeddings
+
+          **Training:**
+          - **Loss**: Contrastive loss with in-batch negatives + hard negative mining
+          - **Positives**: (prefix, query the user actually selected)
+          - **Hard negatives**: Popular queries that match the prefix but were shown and not clicked
+          - **Training data**: ~1B (prefix, selected_query, shown_but_not_selected) triples from 30 days of logs
+
+          **Inference path:**
+          1. Encode prefix + user context through query tower → 64-dim vector (~2ms)
+          2. ANN search over pre-computed candidate embeddings using **FAISS HNSW** → top 100 (~3ms)
+          3. Re-rank with dot product scores + business rules → top 10 (~1ms)
+          Total: **~6ms** -- well within budget
+
+          **Trade-off:** Less interpretable than trees. Requires GPU for training (but CPU inference is fine). Two-tower architecture means query and candidate don't deeply interact -- for that, you'd need a cross-encoder (too slow for autocomplete).
+        next: train_strategy
+
+  # ============ TRAINING ============
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Pipeline"
+    speaker: interviewer
+    content: |
+      Let's design the training pipeline for the autocomplete ranking model.
+
+      **Training data construction:**
+      The most critical and nuanced part. We construct training examples from user interaction logs:
+
+      **Positive examples (user selected this suggestion):**
+      - User typed prefix "wire", suggestion "wireless earbuds" was shown at position 3, user clicked it
+      - Label: relevance = 1 (click) or 2 (click + purchase)
+
+      **Negative examples (shown but not selected):**
+      - "wireless charger" was shown at position 1 but user typed past it
+      - Label: relevance = 0
+
+      **Position bias correction:**
+      Users click higher-ranked suggestions more often regardless of relevance. We must correct for this:
+      - **Inverse Propensity Scoring (IPS)**: Weight each example by `1/P(click | position)`, estimated from randomized experiments
+      - **Position feature**: Include position as a feature during training, set to 0 at inference time (removes positional influence)
+      - Amazon and Google both use **result randomization experiments** (shuffle top 3 positions for 1% of traffic) to estimate position bias
+
+      **Training schedule:**
+      - **Daily retraining** with a sliding 30-day window of interaction data
+      - **Automated pipeline**: Data validation → Feature engineering (Spark) → Model training (LightGBM: ~20 min, Neural: ~2 hours on 8 GPUs) → Offline evaluation → Canary deployment
+      - **Evaluation gate**: New model must improve MRR by >0.5% on held-out test set and not degrade any guardrail metric
+
+      **Handling data quality issues:**
+      - **Bot filtering**: Remove automated/bot queries (>10 queries/sec from same session)
+      - **Impression deduplication**: Same suggestion shown across multiple keystrokes in one session counts as one impression
+      - **Seasonal adjustment**: Weight recent data higher but keep some historical data for seasonal queries ("Christmas gifts" should rank well in December even if trained on November data)
+
+      **Cold start for new queries:**
+      - Inject product catalog titles as synthetic queries with estimated relevance scores
+      - Use trending query detection to fast-track new queries into the candidate index
+    dialogue:
+      - speaker: interviewer
+        text: "How would you construct training data for the ranking model?"
+      - speaker: candidate
+        text: "I'd use click-through data from query logs, with position bias correction via inverse propensity scoring."
+      - speaker: interviewer
+        text: "Position bias is a great point. How do you estimate the propensity scores?"
+      - speaker: candidate
+        text: "Run randomization experiments where we shuffle suggestion positions for a small fraction of traffic. This gives us unbiased estimates of click probability per position."
+      - speaker: interviewer
+        text: "Good. What about training frequency?"
+    next: deploy_question
+
+  # ============ DEPLOYMENT ============
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Serving Architecture"
+    speaker: interviewer
+    content: |
+      How would you architect the serving system? Remember: <100ms latency per keystroke, hundreds of millions of queries per day, global deployment.
+    dialogue:
+      - speaker: interviewer
+        text: "Let's talk about serving. How do you achieve sub-100ms latency at Amazon's scale?"
+      - speaker: candidate
+        text: "The key insight is that most prefixes are repeated. We can cache aggressively and only compute on cache misses."
+      - speaker: interviewer
+        text: "How much of the traffic can you realistically cache?"
+    choices:
+      - label: "Multi-tier caching with precomputation"
+        answer: |
+          I'd use a **multi-tier caching architecture** that handles >95% of requests without model inference:
+
+          **Architecture:**
+          ```
+          Keystroke → CDN/Edge Cache (L1) → Application Cache (L2) → Live Ranking (L3)
+                        hit rate: ~60%        hit rate: ~30%        remaining: ~10%
+          ```
+
+          **Tier 1 -- Edge/CDN cache:**
+          - Pre-compute suggestions for the **top 1M most common prefixes** (covers ~60% of traffic)
+          - Cache at **CDN edge nodes** (CloudFront) near users → <10ms response
+          - Update every 15 minutes to capture trending queries
+          - Key: `{locale}:{prefix}` → Value: `[top 10 suggestions as JSON]`
+          - A 2-character prefix like "wi" serves millions of daily requests -- perfect for caching
+
+          **Tier 2 -- Application-level cache (Redis/Memcached):**
+          - Cache results for the **next 10M most common prefixes**
+          - Hosted in each AWS region → <20ms response
+          - TTL: 1 hour, with background refresh for hot keys
+          - Supports **personalization buckets**: cache per user segment (not per user) to increase hit rate while maintaining some personalization
+
+          **Tier 3 -- Live ranking (cache miss):**
+          - Full retrieval + ranking pipeline for uncommon prefixes
+          - Trie/index retrieval → feature computation → model scoring → post-processing
+          - Target: <80ms for this path
+          - Results are written back to L2 cache
+
+          **Prefix precomputation job (runs every 15 min):**
+          1. Take top 1M prefixes by frequency
+          2. For each: retrieve candidates, run ranking model, apply business rules
+          3. Write to CDN origin, which propagates to edge nodes
+
+          **Why this works:** Query frequency follows a **heavy-tailed distribution** -- the top 1M prefixes cover ~60% of all requests. With L1+L2, we serve >90% of traffic from cache at <20ms.
+        next: deploy_safety
+      - label: "Real-time serving with optimized retrieval"
+        answer: |
+          I'd build a **real-time serving pipeline** optimized for low latency at every stage:
+
+          **Architecture:**
+          ```
+          Keystroke
+             │
+             ▼
+          Load Balancer (regional)
+             │
+             ▼
+          Autocomplete Service (K8s pods)
+             │
+             ├── 1. Retrieve candidates (<5ms)
+             │   └── Sharded trie/index lookup
+             │
+             ├── 2. Feature enrichment (<5ms)
+             │   └── Batch fetch from Redis feature store
+             │
+             ├── 3. Model scoring (<3ms)
+             │   └── LightGBM/ONNX inference
+             │
+             ├── 4. Post-processing (<2ms)
+             │   └── Dedup, safety filter, business rules
+             │
+             └── 5. Response
+                  Total: <15ms P50, <30ms P99
+          ```
+
+          **Retrieval optimization:**
+          - **Sharded trie**: Partition the query space across 100 shards by prefix hash. Each shard fits in memory (~5GB)
+          - **Concurrent retrieval**: For multi-word prefixes ("wireless ea"), query both the prefix trie AND an inverted index on individual terms, merge results
+          - **Prefix expansion**: For very short prefixes (1-2 chars), return pre-computed top suggestions instead of trie lookup (too many results)
+
+          **Model serving optimization:**
+          - LightGBM compiled to **TreeLite C++** → scores 1000 candidates in <1ms
+          - Or ONNX-optimized neural model on CPU → <3ms for 1000 candidates
+          - **Request coalescing**: Batch multiple concurrent requests to the same model instance
+
+          **Scaling:**
+          - **Auto-scale** Kubernetes pods based on QPS (target: 80% CPU utilization)
+          - ~50 pods per region handles 10K QPS with headroom
+          - **Regional deployment**: US-East, US-West, EU, APAC -- route to nearest region
+
+          **Why real-time over caching?** Full personalization on every request. Every user gets suggestions tailored to their history, not cached generic results. The latency budget is tight but achievable with optimized retrieval and compiled models.
+        next: deploy_safety
+
+  - id: deploy_safety
+    stage: deployment
+    type: info
+    label: "Safety & Content Filtering"
+    speaker: interviewer
+    content: |
+      A critical aspect of autocomplete that's often overlooked in interviews: **content safety**.
+
+      Amazon's autocomplete has been in the news for suggesting offensive, misleading, or legally problematic completions. We need robust safety systems.
+
+      **Multi-layer safety filtering:**
+
+      **Layer 1 -- Blocklist (deterministic):**
+      - Maintain a curated list of ~100K blocked query patterns (exact matches + regex)
+      - Categories: hate speech, violence, illegal products, competitor names in certain contexts, CSAM-related terms
+      - Updated daily by Trust & Safety team + automated flagging
+      - Applied at both indexing time (don't add to trie) and serving time (filter results)
+
+      **Layer 2 -- ML classifier (learned):**
+      - Binary classifier trained on (query, safe/unsafe) labels from human annotation
+      - Fine-tuned DistilBERT (~66M params) → <5ms inference per query
+      - Applied to any query not in the explicit allow/blocklist
+      - Threshold tuned for **high recall** (catch 99.9% of unsafe queries, accept some false positives)
+
+      **Layer 3 -- Human review pipeline:**
+      - Queries flagged by ML but not in blocklist go to human review queue
+      - Reviewed within 24 hours; added to blocklist or allow-list permanently
+      - Weekly audit of top 10K suggestions across all markets
+
+      **Legal constraints:**
+      - No suggesting competitor brand names in certain markets (trademark law)
+      - No medical claims ("vitamin C cures...")
+      - Compliance with each marketplace's local regulations
+
+      **A/B testing safety:**
+      - Never A/B test safety features (no control group without safety filtering)
+      - Safety is a **guardrail**, not a metric to optimize
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle offensive or inappropriate suggestions?"
+      - speaker: candidate
+        text: "Three layers: a deterministic blocklist, an ML safety classifier, and human review for edge cases."
+      - speaker: interviewer
+        text: "What about new types of harmful content the blocklist doesn't cover?"
+      - speaker: candidate
+        text: "The ML classifier generalizes to unseen harmful patterns, and human review catches what the classifier misses. It's defense in depth."
+    next: mon_strategy
+
+  # ============ MONITORING ============
+  - id: mon_strategy
+    stage: monitoring
+    type: question
+    label: "Monitoring Strategy"
+    speaker: interviewer
+    content: |
+      What monitoring would you set up for the autocomplete system in production?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you monitor this system once it's live?"
+      - speaker: candidate
+        text: "We need system health metrics, model quality metrics, and business impact metrics."
+      - speaker: interviewer
+        text: "How do you detect model degradation early?"
+    choices:
+      - label: "Comprehensive alerting (system + model + business)"
+        answer: |
+          I'd set up **three layers of monitoring** with automated alerting:
+
+          **Layer 1 -- System Health:**
+
+          | Metric | Alert Threshold | Action |
+          |--------|----------------|--------|
+          | P99 latency | >100ms | Page on-call; scale infra |
+          | Cache hit rate | <85% | Investigate cache invalidation |
+          | Trie/index freshness | >30 min stale | Alert data pipeline team |
+          | Error rate (5xx) | >0.1% | Auto-restart failing pods |
+          | QPS per region | >2x normal | Verify auto-scaling |
+
+          **Layer 2 -- Model Quality:**
+
+          | Metric | Alert Threshold | Action |
+          |--------|----------------|--------|
+          | Suggestion CTR (hourly) | Drop >5% vs 7-day average | Investigate model/data issue |
+          | Empty suggestions rate | >5% for prefix length >= 3 | Check trie completeness |
+          | Safety filter trigger rate | Spike >2x normal | Check for new attack patterns |
+          | MRR (computed daily) | Drop >2% vs previous week | Trigger model investigation |
+          | Diversity score | Drop below threshold | Check for ranking collapse |
+
+          **Layer 3 -- Business Impact:**
+
+          | Metric | Alert Threshold | Action |
+          |--------|----------------|--------|
+          | Search-to-purchase conversion | Drop >1% | Cross-team investigation |
+          | Average keystrokes per search | Increase >10% | Autocomplete quality degrading |
+          | Autocomplete-initiated searches | Drop >5% | Users losing trust in suggestions |
+
+          **Dashboards:** Real-time per-marketplace view with suggestion CTR, latency heatmap, top trending queries, and safety incident log.
+
+          **On-call playbook:** Tiered response -- L1 (auto-scale/restart), L2 (model rollback), L3 (data pipeline investigation).
+        next: mon_terminal
+      - label: "A/B testing focused with continuous experimentation"
+        answer: |
+          I'd center monitoring around **continuous A/B testing** and experimentation:
+
+          **Always-on holdout experiment:**
+          - Reserve 2% of traffic for the **previous model version** as a permanent control
+          - Compare treatment (current model) vs control on all metrics weekly
+          - Catches slow degradation that absolute thresholds might miss
+
+          **Feature-level experiments:**
+          - Every new feature or model change goes through a rigorous A/B test
+          - **Primary metric**: MRR (must improve by >0.3% with p<0.05)
+          - **Guardrails**: CTR, safety rate, latency P99, empty suggestion rate
+          - Typical experiment duration: 7-14 days to capture weekly patterns
+          - **Interleaving experiments** for ranking changes: Show suggestions from both models interleaved, measure user preference
+
+          **Continuous quality sampling:**
+          - Sample 1000 random autocomplete sessions daily
+          - Send to **human raters** who evaluate: "Are these suggestions relevant and helpful?" (5-point scale)
+          - Track human rating scores over time as a "ground truth" quality signal
+          - This catches issues that click-based metrics miss (e.g., users clicking bad suggestions out of curiosity)
+
+          **Segment-level monitoring:**
+          - Break down metrics by: marketplace, device type, query length, user activity level, category
+          - Alert if any segment degrades >3% even if overall metrics are flat
+          - Example: Autocomplete might work great for English but degrade for Spanish queries after a model update
+
+          **Quarterly model review:**
+          - Deep dive into failure cases: queries where our top suggestion is never clicked
+          - Analyze competitive gap: What do Google/Bing suggest for the same prefixes?
+          - Feature importance drift: Are the same features still driving predictions?
+        next: mon_terminal
+
+  # ============ TERMINAL ============
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Design Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive **Amazon Search Autocomplete** system.
+
+      **Your design covers:**
+      - **Problem framing**: Retrieve-and-rank or generative approach for query completion
+      - **Metrics**: Engagement-focused (CTR, keystrokes saved) or relevance-focused (MRR, NDCG) evaluation
+      - **Data pipeline**: Multi-tiered freshness strategy with query normalization, trending detection, and safety filtering
+      - **Features**: Query popularity signals with context, or deep personalization with semantic embeddings
+      - **Model**: LambdaMART for speed and interpretability, or two-tower neural model for personalization
+      - **Training**: Position bias correction, daily retraining, cold start handling
+      - **Deployment**: Multi-tier caching (>90% hit rate) or real-time optimized serving (<15ms P50)
+      - **Safety**: Three-layer content filtering (blocklist + ML classifier + human review)
+      - **Monitoring**: System health, model quality, and business impact tracking
+
+      **Key design strengths:**
+      - Sub-100ms latency at Amazon's scale through caching and/or optimized retrieval
+      - Freshness strategy ensures new products appear within hours
+      - Safety-first approach with defense in depth
+      - Clear evaluation framework with both offline and online metrics
+
+      **Areas for further exploration:**
+      - Multilingual autocomplete across Amazon's 20+ marketplaces
+      - Multimodal suggestions (product images alongside text)
+      - Privacy-preserving personalization (federated learning for on-device models)
+
+      This demonstrates strong understanding of search systems, latency optimization, and the practical challenges of serving ML at Amazon's scale. Outstanding design!
+    dialogue:
+      - speaker: interviewer
+        text: "Great design! You covered scale, latency, safety, and personalization. Any final thoughts?"
+      - speaker: candidate
+        text: "I'd start with the retrieve-and-rank approach with caching for a quick win, then iterate toward personalization and potentially generative approaches."
+      - speaker: interviewer
+        text: "Solid pragmatic approach. Well done!"

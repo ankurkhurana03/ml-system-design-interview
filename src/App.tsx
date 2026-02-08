@@ -23,10 +23,12 @@ import { GalleryView } from '@/components/gallery/GalleryView';
 import { PublishModal } from '@/components/gallery/PublishModal';
 import { PracticeTimer } from '@/components/wizard/PracticeTimer';
 import { ModeSelector } from '@/components/wizard/ModeSelector';
+import { EditDraftModal } from '@/components/draft/EditDraftModal';
+import { getActiveProblemId, saveActiveProblemId, saveDraftProblem, isDraft } from '@/utils/draftStore';
 import type { Problem } from '@/types/tree';
 
 function AppContent() {
-  const { problemMetas, loading, getProblemById, addProblem } = useProblems();
+  const { problemMetas, loading, getProblemById, addProblem, updateProblemInState, deleteProblem } = useProblems();
   const { setProblem, updateProblem, problem } = useWizard();
   const progressiveGen = useProgressiveGeneration({ updateProblem });
   const { user } = useAuth();
@@ -51,13 +53,26 @@ function AppContent() {
   const [publishOpen, setPublishOpen] = useState(false);
   const [showLogin, setShowLogin] = useState(false);
   const [modeSelectOpen, setModeSelectOpen] = useState(false);
+  const [editDraftId, setEditDraftId] = useState<string | null>(null);
 
-  // Auto-load first problem
+  // Restore active problem from localStorage, or fall back to first builtin
   useEffect(() => {
     if (!loading && problemMetas.length > 0 && !activeProblemId) {
-      const firstId = problemMetas[0].id;
-      setActiveProblemId(firstId);
-      const p = getProblemById(firstId);
+      const saved = getActiveProblemId();
+      let targetId: string | null = null;
+
+      if (saved) {
+        // Verify the saved problem still exists
+        const exists = problemMetas.some((m) => m.id === saved.id);
+        if (exists) targetId = saved.id;
+      }
+
+      if (!targetId) {
+        targetId = problemMetas[0].id;
+      }
+
+      setActiveProblemId(targetId);
+      const p = getProblemById(targetId);
       if (p) setProblem(p);
     }
   }, [loading, problemMetas, activeProblemId, getProblemById, setProblem]);
@@ -68,8 +83,12 @@ function AppContent() {
       setActiveProblemId(id);
       const p = getProblemById(id);
       if (p) setProblem(p);
+
+      // Persist active problem selection
+      const meta = problemMetas.find((m) => m.id === id);
+      saveActiveProblemId(id, meta?.source || 'builtin');
     },
-    [getProblemById, setProblem, progressiveGen],
+    [getProblemById, setProblem, progressiveGen, problemMetas],
   );
 
   const handleGenerateNew = useCallback(() => {
@@ -86,6 +105,7 @@ function AppContent() {
       setActiveProblemId(newProblem.id);
       setProblem(newProblem);
       setGenerateOpen(false);
+      saveActiveProblemId(newProblem.id, 'draft');
     },
     [addProblem, setProblem],
   );
@@ -96,9 +116,49 @@ function AppContent() {
       addProblem(galleryProblem, 'gallery');
       setActiveProblemId(galleryProblem.id);
       setProblem(galleryProblem);
+      saveActiveProblemId(galleryProblem.id, 'gallery');
     },
     [addProblem, setProblem, progressiveGen],
   );
+
+  const handleDeleteProblem = useCallback(
+    (id: string) => {
+      deleteProblem(id);
+      // If the deleted problem was active, switch to first remaining
+      if (activeProblemId === id) {
+        const remaining = problemMetas.filter((m) => m.id !== id);
+        if (remaining.length > 0) {
+          const nextId = remaining[0].id;
+          setActiveProblemId(nextId);
+          const p = getProblemById(nextId);
+          if (p) setProblem(p);
+          saveActiveProblemId(nextId, remaining[0].source);
+        } else {
+          setActiveProblemId(null);
+        }
+      }
+    },
+    [activeProblemId, deleteProblem, getProblemById, problemMetas, setProblem],
+  );
+
+  const handleUpdateDraft = useCallback(
+    (updated: Problem) => {
+      updateProblemInState(updated);
+      saveDraftProblem(updated);
+      // If this is the active problem, update wizard state too
+      if (activeProblemId === updated.id) {
+        setProblem(updated);
+      }
+    },
+    [activeProblemId, setProblem, updateProblemInState],
+  );
+
+  const handleEditDraft = useCallback((id: string) => {
+    setEditDraftId(id);
+  }, []);
+
+  // Get the problem being edited (for EditDraftModal)
+  const editingProblem = editDraftId ? getProblemById(editDraftId) : undefined;
 
   if (showLogin) {
     return <LoginPage onSkip={() => setShowLogin(false)} />;
@@ -123,6 +183,8 @@ function AppContent() {
         onSelectProblem={handleSelectProblem}
         onGenerateNew={handleGenerateNew}
         onBrowseGallery={handleBrowseGallery}
+        onDeleteProblem={handleDeleteProblem}
+        onEditDraft={handleEditDraft}
         isCollapsed={sidebarCollapsed}
         onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
       />
@@ -132,9 +194,22 @@ function AppContent() {
         <div className="h-10 bg-white border-b border-gray-200 flex items-center justify-between px-4">
           <div className="flex items-center gap-2">
             {problem && (
-              <h2 className="text-sm font-semibold text-gray-700 truncate">
-                {problem.title}
-              </h2>
+              <>
+                <h2 className="text-sm font-semibold text-gray-700 truncate">
+                  {problem.title}
+                </h2>
+                {isDraft(problem.id) && (
+                  <button
+                    onClick={() => handleEditDraft(problem.id)}
+                    className="p-1 hover:bg-gray-100 rounded text-gray-400 hover:text-gray-600 transition-colors"
+                    title="Edit draft"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                    </svg>
+                  </button>
+                )}
+              </>
             )}
           </div>
           <div className="flex items-center gap-2">
@@ -291,6 +366,20 @@ function AppContent() {
         isOpen={modeSelectOpen}
         onClose={() => setModeSelectOpen(false)}
       />
+
+      {/* Edit Draft Modal */}
+      {editingProblem && (
+        <EditDraftModal
+          isOpen={!!editDraftId}
+          onClose={() => setEditDraftId(null)}
+          problem={editingProblem}
+          onSave={handleUpdateDraft}
+          onDelete={(id) => {
+            setEditDraftId(null);
+            handleDeleteProblem(id);
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -1,0 +1,1083 @@
+id: realtime-ad-auction
+title: "Real-time Ad Auction"
+description: "Design a framework for evaluating and selecting ads in a real-time auction."
+companies: ["Google", "Meta", "Amazon"]
+domains: ["Ranking/Search", "Tabular/Structured", "Real-time"]
+root: pd_start
+
+nodes:
+  # ============ PROBLEM DEFINITION ============
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we will design a **real-time ad auction system** -- the mechanism that decides which ads to show and how much to charge advertisers for every ad impression on the internet.
+
+      **Business context:**
+      - **Real-time bidding (RTB)** processes ~**500 billion ad auctions per day** globally across display, video, and native ad formats
+      - A single ad request triggers an auction that must complete in **<100ms end-to-end** (often <50ms for programmatic display)
+      - Google's Ad Exchange handles ~**11 million auctions per second** at peak
+      - The global programmatic ad market is worth ~**$550B** (2024), with the auction mechanism determining how every dollar flows
+      - Auction design directly impacts three stakeholders: **publishers** (who sell ad space), **advertisers** (who buy attention), and the **platform** (which takes a commission)
+
+      **What we are designing:**
+      An ML-powered auction system that:
+      1. Receives an ad request with user and page context
+      2. Solicits bids from eligible advertisers (demand-side platforms)
+      3. Scores each bid using ML models (predicted click/conversion probability)
+      4. Selects winning ads and determines pricing using auction rules
+      5. All within a **strict latency SLA** of 100ms including network round-trips
+
+      **The ML challenge:** The auction outcome depends on predicting **click probability (pCTR)**, **conversion probability (pCVR)**, and **ad quality** for each candidate. These predictions must be fast, accurate, and well-calibrated since they directly determine advertiser charges.
+
+      Let us start by defining the auction mechanism.
+    dialogue:
+      - speaker: interviewer
+        text: "Today we are designing a real-time ad auction. Why is the auction mechanism itself an ML problem, not just an economics problem?"
+      - speaker: candidate
+        text: "The auction determines winner selection and pricing based on expected value, which is pCTR times bid. The pCTR component is an ML prediction. But beyond that, the auction rules themselves can be optimized with ML -- for example, learning optimal reserve prices, predicting bid landscapes, and optimizing for long-term revenue rather than per-auction revenue. The intersection of mechanism design and ML is where the real value lies."
+      - speaker: interviewer
+        text: "What are the key constraints that make this different from a typical ML serving problem?"
+      - speaker: candidate
+        text: "Three things. First, extreme latency -- the entire auction including ML inference must complete in under 100ms. Second, the ML predictions directly affect pricing, so calibration errors literally cost money. Third, the system must be incentive-compatible -- advertisers should bid their true value, which requires careful auction design."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: info
+    label: "Auction Framework Scope"
+    speaker: interviewer
+    content: |
+      Let us define the auction framework and the ML components within it.
+
+      **Auction flow (end to end):**
+      ```
+      User visits page → Ad request to exchange (5ms)
+           │
+           ▼
+      Bid solicitation to DSPs in parallel (30ms timeout)
+           │
+           ▼
+      Bids received: [(advertiser, bid, creative, targeting)]
+           │
+           ▼
+      ML scoring: pCTR, pCVR, quality_score per bid (10ms)
+           │
+           ▼
+      Auction logic: rank by score, apply reserve, determine winner + price (2ms)
+           │
+           ▼
+      Ad response to publisher (remaining latency budget)
+      ```
+
+      **Auction types in practice:**
+
+      | Type | Mechanism | Used By |
+      |------|-----------|---------|
+      | **Second-price** | Winner pays second-highest bid (+$0.01) | Google (legacy), most SSPs |
+      | **First-price** | Winner pays their own bid | Industry standard since 2019 |
+      | **VCG (Vickrey-Clarke-Groves)** | Truthful multi-slot auction | Google Ads (modified) |
+      | **Header bidding** | Multiple exchanges bid simultaneously | Publishers, via Prebid.js |
+
+      **ML components we need to build:**
+      1. **pCTR model:** Probability of click given (user, ad, context)
+      2. **pCVR model:** Probability of conversion given click
+      3. **Quality model:** Ad creative quality, landing page quality, policy compliance
+      4. **Reserve price model:** Minimum acceptable bid (ML-optimized)
+      5. **Bid landscape model:** Predict competition intensity for budget pacing
+
+      **Score formula (for ranking bids):**
+      ```
+      auction_score = f(pCTR, pCVR, bid, quality_score, ad_format_weight)
+      ```
+      The exact formula varies. Google uses `quality_score * bid`. Meta uses `pCTR * bid + pCVR * conversion_value`. We will design this.
+
+      How should we formulate the core scoring objective?
+    dialogue:
+      - speaker: interviewer
+        text: "The industry shifted from second-price to first-price auctions around 2019. Why?"
+      - speaker: candidate
+        text: "In second-price auctions, the winner pays the second-highest bid, which incentivizes truthful bidding. But with header bidding, where publishers run multiple auctions simultaneously, second-price auctions were being gamed -- DSPs would bid in multiple auctions and win several at low prices. First-price auctions eliminated this arbitrage. The downside is that first-price requires bid shading -- advertisers must strategically bid below their true value, which is itself an ML problem."
+    next: met_question
+
+  # ============ METRICS ============
+  - id: met_question
+    stage: metrics
+    type: question
+    label: "Auction Optimization Objective"
+    speaker: interviewer
+    content: |
+      What should the auction optimize for? The scoring function determines which ad wins, so this is a fundamental design decision.
+    choices:
+      - label: "Expected revenue (eCPM maximization)"
+        answer: |
+          I would optimize for **expected CPM (eCPM)** -- the expected revenue per thousand impressions.
+
+          **Scoring formula:**
+          ```
+          eCPM = pCTR * bid * 1000   (for CPC campaigns)
+          eCPM = pCTR * pCVR * target_CPA * 1000   (for CPA campaigns)
+          eCPM = bid   (for CPM campaigns, bid is already per-1000)
+          ```
+
+          **Why eCPM:**
+          - Directly maximizes platform and publisher revenue
+          - Normalizes across different billing models (CPC, CPA, CPM) into a common currency
+          - Ensures that the highest-value ad wins, regardless of how the advertiser chooses to bid
+          - Simple, interpretable, and industry-standard
+
+          **Key metrics under this framework:**
+
+          | Metric | Description | Target |
+          |--------|------------|--------|
+          | **RPM** | Revenue per 1000 page views | Maximize |
+          | **Fill rate** | % of ad requests with a winning bid | > 90% |
+          | **Auction win price** | Average clearing price | Track, not optimize |
+          | **pCTR calibration** | ECE across bid segments | < 0.01 |
+          | **pCVR calibration** | ECE for conversion prediction | < 0.02 |
+          | **Auction latency P99** | End-to-end auction time | < 100ms |
+
+          **Reserve price optimization:**
+          Set a **dynamic reserve price** below which no ad is shown:
+          ```
+          reserve_price = ML_model(publisher, page_type, user_segment, time_of_day)
+          ```
+          This captures value from advertisers who would otherwise win cheaply. Google found that ML-optimized reserves increased revenue by **5-10%** compared to static reserves.
+
+          **Trade-off:** Pure eCPM maximization can degrade user experience by showing low-quality but high-bid ads. Need quality guardrails.
+        next: met_ecpm
+      - label: "Ecosystem value (revenue + quality + long-term)"
+        answer: |
+          I would optimize for **ecosystem value** -- a composite score that balances revenue, ad quality, and long-term platform health.
+
+          **Scoring formula:**
+          ```
+          ecosystem_score = eCPM * quality_multiplier * long_term_factor
+          ```
+          Where:
+          - `eCPM = pCTR * bid * 1000` (short-term revenue)
+          - `quality_multiplier = sigmoid(quality_score)` in range [0.5, 1.5] -- amplifies high-quality ads, penalizes low-quality
+          - `long_term_factor = f(advertiser_health, user_satisfaction)` -- incentivizes sustainable spending
+
+          **Why ecosystem value:**
+          - Pure eCPM leads to a **race to the bottom** where low-quality advertisers with high bids dominate
+          - Quality multiplier ensures good user experience, which keeps users on the platform (growing future inventory)
+          - Long-term factor prevents the "flash sale problem" where one advertiser with a massive budget displaces all others
+
+          **Metrics framework:**
+
+          | Category | Metric | Target |
+          |----------|--------|--------|
+          | **Revenue** | RPM, total daily revenue | Maximize |
+          | **Quality** | Avg ad quality score of winners, user complaint rate | Quality score > 0.7, complaints < 0.1% |
+          | **Ecosystem** | Active advertiser count, advertiser retention 30d | Retention > 85% |
+          | **User** | Ad engagement rate, session depth after ad | Engagement > 1%, no session depth drop |
+          | **Fairness** | Revenue Gini across advertisers, small advertiser win rate | Gini < 0.8 |
+
+          **Quality score components (learned):**
+          - **Creative quality:** Image/video quality, text clarity, landing page speed (0-10 scale, ML-scored)
+          - **Historical performance:** Ad's actual CTR vs predicted, conversion rate, bounce rate
+          - **Policy compliance:** Probability of violating ad policies (from a separate policy model)
+          - **User feedback:** Historical hide/report rate for this advertiser
+
+          **Trade-off:** More complex to implement and explain to advertisers. The quality_multiplier introduces subjectivity -- advertisers may complain that they bid more but lost the auction to a "better quality" ad. Transparency is critical.
+        next: met_ecosystem
+
+  - id: met_ecpm
+    stage: metrics
+    type: info
+    label: "eCPM Metrics Framework"
+    speaker: interviewer
+    content: |
+      Good. Let us detail the eCPM-based metrics framework and the ML models that feed into it.
+
+      **ML model accuracy requirements for auction integrity:**
+
+      | Model | Metric | Threshold | Business Impact of Error |
+      |-------|--------|-----------|------------------------|
+      | **pCTR** | AUC > 0.80, ECE < 0.01 | If pCTR is 20% too high → advertisers overpay 20% |
+      | **pCVR** | AUC > 0.75, ECE < 0.02 | If pCVR is off → CPA campaigns misallocated |
+      | **Reserve price** | Revenue lift > 5% vs static | If too high → lost auctions. If too low → lost revenue |
+      | **Bid landscape** | MAPE < 15% | If wrong → budget pacing breaks, spend is uneven |
+
+      **Auction-specific calibration challenge:**
+      In auctions, miscalibration has **asymmetric impact**:
+      - **Overestimating pCTR:** Advertiser wins more auctions but overpays → advertiser churns
+      - **Underestimating pCTR:** Advertiser loses auctions they should win → missed revenue
+      - The asymmetry depends on the auction mechanism (first-price vs second-price)
+
+      **First-price auction complication:**
+      In first-price auctions, advertisers use **bid shading** -- they bid below their true value to save money. The optimal shading depends on the competition landscape:
+      ```
+      optimal_bid = true_value * shading_factor
+      shading_factor = f(predicted_competition, historical_win_rate)
+      ```
+      This means the auction system needs not just pCTR but also a **bid landscape model** to help advertisers bid efficiently.
+
+      **Online evaluation (A/B testing auctions):**
+      - Cannot run standard A/B tests (showing different ads to different users affects the auction)
+      - Use **auction simulation:** Replay historical auctions with new scoring function, compute counterfactual revenue
+      - **Budget-constrained evaluation:** Simulate that advertisers would have adjusted bids based on new system
+
+      Let us design the data pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you A/B test auction changes without breaking the auction?"
+      - speaker: candidate
+        text: "This is one of the hardest problems in ad tech. You cannot simply split traffic because each auction involves multiple advertisers, and an advertiser's behavior in one auction affects their budget for the next. I use auction simulation with budget constraints: replay 30 days of auction logs with the new scoring function, simulating that each advertiser's budget is consumed according to the new system. This gives a realistic estimate of revenue impact without touching live traffic."
+    next: data_pipeline
+
+  - id: met_ecosystem
+    stage: metrics
+    type: info
+    label: "Ecosystem Metrics Framework"
+    speaker: interviewer
+    content: |
+      Let us flesh out the ecosystem value metrics and the quality scoring models.
+
+      **Quality score model (critical for ecosystem health):**
+      The quality score is itself an ML model combining multiple signals:
+      ```
+      quality_score = w1 * creative_quality + w2 * landing_page_score + w3 * historical_performance + w4 * policy_score
+      ```
+
+      | Component | How It Is Measured | Update Frequency |
+      |-----------|-------------------|-----------------|
+      | **Creative quality** | CNN on ad image + NLP on ad text + heuristic rules | At ad submission |
+      | **Landing page score** | PageSpeed Insights API + content relevance to ad | Daily |
+      | **Historical performance** | Actual CTR / predicted CTR over last 7 days | Hourly |
+      | **Policy score** | 1 - P(policy_violation) from policy classifier | At ad submission + periodic |
+
+      **Ecosystem health dashboard:**
+      - **Advertiser diversity:** Number of unique auction winners per day (healthy: growing)
+      - **Small advertiser success:** Win rate for bottom-50% of advertisers by budget (target: > 15%)
+      - **Publisher satisfaction:** RPM trend, fill rate, ad quality complaints
+      - **User satisfaction:** Session depth with ads vs without, ad engagement trajectory
+
+      **Long-term factor computation:**
+      ```python
+      def long_term_factor(advertiser):
+          health = advertiser.spend_trend_30d  # Growing, stable, or declining
+          loyalty = advertiser.months_active / 12  # Tenure
+          efficiency = advertiser.roi_vs_target  # Are they hitting their goals?
+          return 0.8 + 0.2 * sigmoid(health + loyalty + efficiency)
+      ```
+      This gives a slight boost (up to 1.0) to healthy, loyal advertisers, and a penalty (down to 0.8) for declining ones. The boost is capped to prevent gaming.
+
+      **Balancing act:**
+      The ecosystem value approach trades ~1-2% short-term revenue for ~5-10% long-term revenue growth by keeping advertiser and user satisfaction high. Google's quality score system has been shown to increase advertiser retention by 15% while maintaining revenue.
+
+      Let us design the data pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you prove that ecosystem value beats pure eCPM long-term?"
+      - speaker: candidate
+        text: "You need long-running A/B tests -- at least 3-6 months. Short tests will show ecosystem value slightly underperforming on revenue because it shows fewer high-bid low-quality ads. But over months, the ecosystem group retains more advertisers, attracts new ones, and maintains higher user engagement. Google published that their quality score system took over a year of data to conclusively demonstrate superiority over pure bid-based ranking."
+    next: data_pipeline
+
+  # ============ DATA ============
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Auction Data Pipeline"
+    speaker: interviewer
+    content: |
+      The data pipeline for an auction system is uniquely complex because it must capture multi-party interactions in real-time.
+
+      **Data sources:**
+
+      | Source | Volume | Latency Requirement |
+      |--------|--------|-------------------|
+      | **Bid requests** | ~500B/day globally | Real-time logging |
+      | **Bid responses** | ~50B/day (10% bid rate) | Real-time join with request |
+      | **Auction results** | ~50B/day | Immediate (synchronous) |
+      | **Impression events** | ~10B/day (rendered ads) | <5 min |
+      | **Click events** | ~100M/day | <30 min |
+      | **Conversion events** | ~10M/day | <24 hours (can be delayed) |
+
+      **Data join challenge (the "attribution join"):**
+      ```
+      Bid Request → Auction → Win → Impression → Click → Conversion
+      (0ms)         (50ms)   (50ms)  (100ms)      (seconds-hours)  (hours-days)
+      ```
+      Each stage has different latency. The full event chain must be joined on `auction_id + ad_id`:
+      - **Streaming join (Flink):** Bid → Auction → Impression → Click (within 1 hour window)
+      - **Batch join (Spark):** Click → Conversion (within 30-day attribution window)
+
+      **Training data construction:**
+      - **pCTR training:** (impression, click/no-click) pairs from the last 30 days. ~10B impressions, ~100M clicks.
+      - **pCVR training:** (click, conversion/no-conversion) pairs. ~100M clicks, ~10M conversions. Much sparser -- needs careful handling.
+      - **Reserve price training:** (auction_features, winning_bid, second_bid) tuples to learn optimal reserves.
+      - **Bid landscape training:** (auction_features, all_bids_received) to predict competition.
+
+      **Critical data issues:**
+      - **Survivorship bias:** We only observe outcomes for ads that won. The model never sees what would have happened if a different ad won.
+      - **Conversion delay:** Some conversions happen weeks after click (e.g., B2B). Use a **delay correction model** to estimate true conversion rates.
+      - **Bid shading artifacts:** In first-price auctions, bids are strategically shaded. Historical bids do not reflect true valuations.
+
+      Now let us design the features.
+    dialogue:
+      - speaker: interviewer
+        text: "What is the hardest data engineering challenge in ad auctions?"
+      - speaker: candidate
+        text: "The attribution join at scale. You have 500 billion bid requests per day, and you need to join each one with its downstream events -- did the ad render, was it clicked, did the user convert? These events arrive at very different latencies and through different systems. A single missed join means incorrect training labels. At Google's scale, even a 0.1% join failure rate means 500 million incorrect labels per day."
+    next: feat_question
+
+  # ============ FEATURES ============
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Strategy"
+    speaker: interviewer
+    content: |
+      What features would you design for the auction's ML models? Remember, these features serve multiple models (pCTR, pCVR, quality, reserve price).
+    choices:
+      - label: "Auction-context features (bid landscape + competition)"
+        answer: |
+          I would build **auction-context features** that capture the competitive dynamics unique to each auction.
+
+          **Why auction-context:**
+          - The same ad can have very different CTR depending on **what it is competing against**
+          - A user seeing a slate of 5 shoe ads has different click patterns than one seeing diverse ads
+          - **Reserve price and bid landscape models** specifically need competition features
+
+          **Feature groups:**
+
+          | Group | Features | Purpose |
+          |-------|---------|---------|
+          | **Bid features** | Bid amount, bid type (CPC/CPA/CPM), budget remaining (%), bid-to-reserve ratio | Advertiser intent |
+          | **Competition features** | Num bidders, avg bid, max bid, bid std deviation, num same-category bidders | Auction intensity |
+          | **Historical auction** | Avg winning bid for this (publisher, ad_slot, hour), win rate for this advertiser | Market benchmarks |
+          | **Ad features** | Creative type, category, quality score, ad age, historical CTR | Ad quality |
+          | **User features** | Segment IDs, device, geo, recent browsing categories, session depth | User context |
+          | **Page features** | Publisher tier, page category, ad slot position, viewability score | Inventory quality |
+
+          **Competition-specific features (novel for auction):**
+          ```python
+          num_bidders = len(bids)
+          bid_density = num_bidders / num_eligible_advertisers
+          price_pressure = this_bid / second_highest_bid
+          category_competition = count(bids_in_same_category) / num_bidders
+          budget_urgency = (daily_budget - spent_so_far) / hours_remaining
+          ```
+
+          **Bid landscape prediction features:**
+          - Historical bid distribution for this `(publisher, slot, hour, day_of_week)`
+          - Seasonal patterns: Q4 bids are 30-50% higher due to holiday advertising
+          - Market trend features: are bids trending up or down in this vertical?
+
+          **Trade-off:** Competition features require knowing all bids before scoring, adding latency. Pre-compute aggregated competition features from recent auctions as proxy.
+        next: feat_auction
+      - label: "User-ad matching features (relevance focus)"
+        answer: |
+          I would focus on **user-ad matching features** that predict relevance, since CTR prediction is the foundation of the auction.
+
+          **Why relevance features:**
+          - **pCTR is the highest-leverage model** -- a 1% AUC improvement translates to more revenue than any auction mechanism change
+          - User-ad relevance features have the most predictive power for CTR
+          - Competition features change per-auction but user-ad relevance is more stable and cacheable
+
+          **Feature groups:**
+
+          | Group | Features | Dim |
+          |-------|---------|-----|
+          | **User embeddings** | User interest vector (64-dim), behavioral segment IDs | 64 |
+          | **Ad embeddings** | Ad content vector (32-dim), advertiser embedding (16-dim) | 48 |
+          | **Matching signals** | User-ad cosine similarity, user-category affinity, historical engagement | 10 |
+          | **Behavioral features** | User's clicks in last 1h/24h/7d, ads seen in this session, category fatigue | 15 |
+          | **Context features** | Device, time, page type, scroll depth, referrer domain | 10 |
+          | **Ad quality** | Creative quality score, landing page speed, advertiser reputation | 5 |
+
+          **User-ad affinity computation:**
+          Pre-compute user-ad affinity using a two-tower architecture:
+          ```
+          User Tower:  user_features → MLP → user_embedding (64-dim)
+          Ad Tower:    ad_features → MLP → ad_embedding (64-dim)
+          Affinity = dot_product(user_embedding, ad_embedding)
+          ```
+          - User embeddings cached in Redis, updated hourly
+          - Ad embeddings cached, updated daily
+          - Affinity is a single float feature, pre-computed for top candidate pairs
+
+          **Real-time behavioral features (from feature store):**
+          - `user_recent_clicks`: Last 20 clicked ad categories (encoded as multi-hot vector)
+          - `session_ad_count`: Number of ads already seen in this session (fatigue signal)
+          - `category_saturation`: "User has already seen 3 shoe ads this session" → reduce shoe ad CTR prediction
+
+          **Trade-off:** Relevance features require maintaining large embedding tables and a real-time feature store. Infrastructure-intensive but directly improves the core ML model quality.
+        next: feat_relevance
+
+  - id: feat_auction
+    stage: features
+    type: info
+    label: "Auction Context Features"
+    speaker: interviewer
+    content: |
+      Let us detail the auction context feature pipeline.
+
+      **Real-time competition feature computation:**
+      During each auction, after bids arrive:
+      ```python
+      def compute_auction_features(bids: List[Bid]) -> AuctionFeatures:
+          amounts = [b.amount for b in bids]
+          return AuctionFeatures(
+              num_bidders=len(bids),
+              mean_bid=np.mean(amounts),
+              max_bid=np.max(amounts),
+              std_bid=np.std(amounts),
+              median_bid=np.median(amounts),
+              category_distribution=Counter(b.category for b in bids),
+              format_mix={f: sum(1 for b in bids if b.format==f) for f in formats},
+          )
+      ```
+      This takes ~0.1ms for 50 bids. The features are then appended to each bid's feature vector before ML scoring.
+
+      **Historical auction features (pre-computed):**
+
+      | Feature | Granularity | Update Frequency |
+      |---------|------------|-----------------|
+      | `slot_avg_winning_bid` | Per (publisher, slot, hour) | Hourly |
+      | `slot_fill_rate` | Per (publisher, slot) | Hourly |
+      | `vertical_bid_index` | Per (ad_vertical, geo) | Daily |
+      | `seasonal_multiplier` | Per (month, ad_vertical) | Monthly |
+      | `advertiser_win_rate` | Per advertiser | Hourly |
+      | `budget_burn_rate` | Per advertiser campaign | Real-time |
+
+      **Budget pacing features (critical for advertiser satisfaction):**
+      ```python
+      budget_ratio = spent_so_far / daily_budget
+      time_ratio = hours_elapsed / 24
+      pacing_index = budget_ratio / time_ratio  # >1 means overspending
+      budget_urgency = max(0, 1 - budget_ratio) * (24 - hours_elapsed) / 24
+      ```
+      These features help the reserve price model set appropriate floors -- an advertiser with 80% budget remaining at 6 PM should be more aggressive.
+
+      **Feature freshness requirements:**
+      - Bid-level features: computed per-auction (real-time)
+      - User/ad features: from feature store (< 5 min staleness)
+      - Historical auction features: hourly aggregation
+      - Budget features: real-time from campaign management system
+
+      Now let us design the core ML models.
+    dialogue:
+      - speaker: interviewer
+        text: "What happens if the competition features add too much latency?"
+      - speaker: candidate
+        text: "If computing per-auction competition features is too slow, we can use proxies. Instead of computing from the actual bids in this auction, use the historical average competition for this (publisher, slot, time) combination. This is slightly less accurate but eliminates the dependency on waiting for all bids before scoring. The historical features capture 90% of the signal -- auction-to-auction variation is relatively small for a given slot and time."
+    next: mod_question
+
+  - id: feat_relevance
+    stage: features
+    type: info
+    label: "Relevance Features Detail"
+    speaker: interviewer
+    content: |
+      Let us detail the user-ad relevance features and the two-tower pre-computation architecture.
+
+      **Two-tower model for pre-computed affinity:**
+      ```
+      User Tower:                          Ad Tower:
+      user_id → Embed(64)                  ad_id → Embed(32)
+      user_interests → Multi-hot → FC(64)  ad_category → Embed(8)
+      user_demographics → FC(16)           ad_text → BERT_tiny(64)
+      user_history → FC(32)                advertiser → Embed(16)
+           │                                     │
+      Concatenate → FC(128) → FC(64)       Concatenate → FC(64) → FC(64)
+           │                                     │
+      user_vector (64-dim)                 ad_vector (64-dim)
+      ```
+
+      **Affinity score:** `cosine_similarity(user_vector, ad_vector)`
+      - Pre-computed for top 1M users x top 100K ads = 100B pairs (impossible to store all)
+      - Instead, use **approximate nearest neighbor** (HNSW index) to find top-100 ads per user
+      - Store top-100 affinity scores per user in Redis. Updated hourly.
+      - For ads not in the pre-computed set, compute affinity on-the-fly using cached embeddings (~0.5ms)
+
+      **Behavioral sequence features:**
+      Recent user actions are powerful predictors of immediate intent:
+      ```
+      Last 20 clicked ads → category sequence → LSTM/GRU → intent_embedding (32-dim)
+      ```
+      - Updated in real-time via Kafka → Flink → Redis
+      - Captures patterns like: "user clicked running shoes, then running socks → likely interested in running gear"
+      - The LSTM is pre-trained offline; at serving time, the sequence embedding is simply looked up
+
+      **Ad fatigue modeling:**
+      ```python
+      def ad_fatigue_factor(user_session, ad):
+          same_category_seen = count(ad.category in [a.category for a in user_session.ads_seen])
+          same_advertiser_seen = count(ad.advertiser in [a.advertiser for a in user_session.ads_seen])
+          return {
+              'category_fatigue': 1.0 / (1.0 + 0.3 * same_category_seen),
+              'advertiser_fatigue': 1.0 / (1.0 + 0.5 * same_advertiser_seen),
+          }
+      ```
+      These factors reduce predicted CTR for ads similar to ones the user has already seen, preventing repetitive ad experiences.
+
+      Now let us design the core auction models.
+    dialogue:
+      - speaker: interviewer
+        text: "Why pre-compute affinity instead of computing it in real-time?"
+      - speaker: candidate
+        text: "Each auction processes 50-100 candidate ads. Computing a forward pass through the two-tower model for each candidate takes about 0.5ms per ad -- that is 25-50ms total, blowing our latency budget. By pre-computing and caching the affinity scores for likely (user, ad) pairs, we reduce this to a simple Redis lookup at < 1ms total. The cached scores are at most 1 hour stale, which is acceptable since user interests do not change minute-to-minute."
+    next: mod_question
+
+  # ============ MODEL ============
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Auction ML Models"
+    speaker: interviewer
+    content: |
+      What model architecture would you use for the core auction ML models (pCTR, pCVR, quality)?
+    choices:
+      - label: "Multi-task learning (shared backbone)"
+        answer: |
+          I would use a **multi-task learning (MTL) architecture** where pCTR, pCVR, and quality score share a common feature backbone.
+
+          **Why multi-task:**
+          - **Shared representation:** User-ad relevance features are useful for all tasks. Sharing a backbone avoids redundant computation and learns richer representations.
+          - **pCVR benefits from pCTR:** The ESMM (Entire Space Multi-task Model) formulation from Alibaba models `pCVR = P(conversion | click) = P(conversion | impression) / P(click | impression)`, using the pCTR task to regularize pCVR on the much sparser conversion data.
+          - **Single forward pass:** One model inference gives all three scores. At 50 ads, one forward pass is much faster than three separate models.
+
+          **Architecture (ESMM-inspired):**
+          ```
+          Input features
+               │
+          Shared Bottom Network: FC(256) → FC(128)
+               │
+          ┌────┴────┬────────────┐
+          │ pCTR    │ pCVR       │ Quality
+          │ Tower   │ Tower      │ Tower
+          │ FC(64)  │ FC(64)     │ FC(64)
+          │ FC(1)   │ FC(1)      │ FC(1)
+          │ sigmoid │ sigmoid    │ sigmoid
+          └────┬────┴────────────┘
+               │
+          pCTR  pCVR = pCTR * pConv   quality_score
+          ```
+
+          **ESMM formulation for pCVR:**
+          - Direct pCVR training suffers from **sample selection bias** (only trained on clicked ads) and **data sparsity** (few conversions)
+          - ESMM trains on the entire impression space: `pCVR = pCTCVR / pCTR` where pCTCVR = P(click AND convert | impression)
+          - The pCTR and pCTCVR towers share the bottom network, and pCTR acts as an implicit regularizer
+
+          **Training:**
+          ```
+          L = L_ctr(pCTR, click_label)
+            + alpha * L_ctcvr(pCTR * pConv, conversion_label)
+            + beta * L_quality(quality_score, quality_label)
+          ```
+
+          **Latency:** Single forward pass for 50 ads: ~3ms on CPU (ONNX optimized). This is much faster than running 3 separate models.
+
+          **Trade-off:** Task interference -- optimizing for one task can hurt another. Mitigate with gradient balancing techniques (e.g., GradNorm, PCGrad). Also, debugging is harder -- if pCVR degrades, is it the shared backbone or the pCVR tower?
+        next: mod_mtl
+      - label: "Separate specialized models"
+        answer: |
+          I would use **separate specialized models** for each auction component, optimized independently.
+
+          **Why separate models:**
+          - **Independence:** Each model can use different architectures, training data, and update cadences
+          - **Debuggability:** If pCVR degrades, we know exactly which model to investigate
+          - **Flexibility:** Can update pCTR daily but pCVR weekly (different data sparsity)
+          - **No task interference:** pCTR optimization never hurts quality score
+
+          **Model designs:**
+
+          | Model | Architecture | Input | Output | Training Data |
+          |-------|-------------|-------|--------|--------------|
+          | **pCTR** | DCN v2 (50M params) | User + ad + context features | P(click) | 30 days impressions |
+          | **pCVR** | Deep + Wide (20M params) | Click context features | P(convert given click) | 90 days clicks |
+          | **Quality** | LightGBM (500 trees) | Ad content + landing page features | Quality score [0-1] | Manual labels + signals |
+          | **Reserve** | Quantile regression | Auction context features | Reserve price | 30 days auction data |
+
+          **pCVR special handling:**
+          - Trained only on clicked impressions (avoid using non-clicked impressions as negatives for conversion)
+          - Uses **delayed feedback correction:** Many conversions arrive days after click. Apply a time-decay model to estimate the true conversion rate from partial data.
+          - **Multi-touch attribution:** If a user sees ads from 3 advertisers before converting, how to allocate credit? Use position-based attribution (40% first, 20% middle, 40% last).
+
+          **Quality model (separate pipeline):**
+          - Trained on human-labeled ad quality data (~1M labeled examples)
+          - Features: image quality (CNN features), text sentiment, landing page load time, historical user feedback
+          - Updated weekly (quality changes slowly)
+          - LightGBM chosen for interpretability -- advertisers can see why their quality score is low
+
+          **Serving:** Run all 4 models in parallel for each candidate ad. With proper batching and ONNX optimization, total inference for 50 ads: ~5ms.
+
+          **Trade-off:** Running 4 separate models in parallel is slower than a single MTL model, and misses potential synergies from shared representations. But the operational simplicity and debugging ease are often worth it, especially for large teams where different people own different models.
+        next: mod_separate
+
+  - id: mod_mtl
+    stage: model
+    type: info
+    label: "Multi-task Model Details"
+    speaker: interviewer
+    content: |
+      Let us detail the multi-task architecture and how to handle the key challenge of task balancing.
+
+      **Gradient balancing (preventing task interference):**
+      Without balancing, the pCTR task (10B training examples) dominates the shared backbone, and pCVR (10M examples) gets poor gradients.
+
+      **Methods:**
+      - **Uncertainty weighting (Kendall et al. 2018):** Weight each task loss by `1 / (2 * sigma_i^2)`, where sigma is a learned uncertainty parameter. Tasks with higher uncertainty get lower weight. This automatically balances tasks as training progresses.
+      - **GradNorm:** Normalize gradient magnitudes across tasks. If pCTR gradients are 10x larger than pCVR gradients, scale pCVR gradients up.
+      - **PCGrad (projecting conflicting gradients):** If pCTR and pCVR gradients conflict on a shared parameter, project them to remove the conflicting component.
+
+      **I recommend uncertainty weighting** for simplicity:
+      ```
+      L = (1 / 2*sigma_ctr^2) * L_ctr + (1 / 2*sigma_cvr^2) * L_cvr + log(sigma_ctr) + log(sigma_cvr)
+      ```
+      The log terms prevent sigma from growing unboundedly.
+
+      **Expert-based architecture (Mixture of Experts):**
+      For better handling of diverse tasks, use **MMoE (Multi-gate Mixture of Experts)**:
+      ```
+      Input → [Expert_1, Expert_2, Expert_3, Expert_4]  (4 shared expert networks)
+                    │
+              Gate_CTR (softmax attention over experts)
+              Gate_CVR (softmax attention over experts)
+              Gate_Quality (softmax attention over experts)
+                    │
+              Task-specific towers
+      ```
+      Each task has its own gate that learns which experts are most relevant. This allows task-specific feature utilization without full model separation.
+
+      **Serving the multi-task model:**
+      - Export to ONNX with all 3 output heads
+      - Single forward pass: batch 50 ads → [50 pCTR, 50 pCVR, 50 quality]
+      - Latency: ~3ms for 50 ads on optimized CPU
+      - **Cache optimization:** The shared bottom network's output can be cached and reused if only calibration parameters change
+
+      Now let us design the training pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you decide between shared-bottom MTL and MMoE?"
+      - speaker: candidate
+        text: "It depends on task relatedness. If tasks are closely related, such as pCTR and pCVR where both depend on user-ad relevance, shared-bottom works well. If tasks are diverse, such as pCTR and ad quality, where quality depends on different features, MMoE is better because each task can select different experts. Google's experiments showed MMoE consistently outperforms shared-bottom when task correlation is below 0.5."
+    next: train_strategy
+
+  - id: mod_separate
+    stage: model
+    type: info
+    label: "Separate Models Detail"
+    speaker: interviewer
+    content: |
+      Let us detail the separate model approach and the critical reserve price model.
+
+      **Reserve price model (unique to auction systems):**
+      The reserve price is the minimum bid to enter the auction. Setting it optimally is an ML problem:
+
+      **Formulation:** Maximize expected revenue:
+      ```
+      E[revenue | reserve] = P(any bid > reserve) * E[price | at_least_one_bid > reserve]
+      ```
+      Higher reserve → fewer winners but higher prices. Lower reserve → more winners but lower prices.
+
+      **Model:** Quantile regression (LightGBM)
+      ```
+      Input: (publisher_id, slot_position, page_category, hour, day_of_week, user_segment)
+      Output: Predicted 50th percentile of bid distribution
+      Reserve = 0.7 * predicted_median_bid  (conservative)
+      ```
+
+      **Why 0.7 * median?**
+      - Setting reserve at median would lose 50% of auctions (too aggressive)
+      - 70% of median captures price uplift while maintaining >80% fill rate
+      - The multiplier is tuned per publisher segment via A/B testing
+
+      **Bid landscape model (for advertisers):**
+      Helps advertisers optimize their bids in first-price auctions:
+      ```
+      Input: (ad_features, target_audience, time, publisher_category)
+      Output: Distribution of competing bids (10th, 25th, 50th, 75th, 90th percentiles)
+      ```
+      - Used for **bid shading:** Advertiser sees "to win 80% of auctions for this audience, bid $2.50"
+      - Updated hourly with recent auction data
+      - Shared via API to DSPs (demand-side platforms)
+
+      **Parallel model serving:**
+      ```
+      Ad candidate → [pCTR model, pCVR model, quality model, reserve model] → aggregate
+      ```
+      - Run all 4 models concurrently using thread pool
+      - Each model: ~1.5ms on CPU
+      - Total with parallelism: ~2ms (limited by slowest model)
+      - Aggregate results and compute auction score: ~0.5ms
+
+      **Model coordination:**
+      - All models share the same feature store but have independent training pipelines
+      - Model versions are tracked in MLflow
+      - A model cannot be deployed if it degrades any cross-model metric (e.g., new pCTR model must not break pCVR performance)
+
+      Let us discuss the training strategy.
+    dialogue:
+      - speaker: interviewer
+        text: "How does the reserve price interact with the quality score?"
+      - speaker: candidate
+        text: "The effective reserve is actually quality-adjusted: effective_reserve = base_reserve / quality_score. A high-quality ad with quality_score of 1.5 faces a lower effective reserve, so it is more likely to pass the threshold. This incentivizes advertisers to improve ad quality -- better quality means lower entry cost. Google calls this the 'quality-adjusted minimum bid' and it is a core part of their auction incentive structure."
+    next: train_strategy
+
+  # ============ TRAINING ============
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Pipeline"
+    speaker: interviewer
+    content: |
+      Let us design the training pipeline for the auction ML models.
+
+      **Training data flow:**
+      ```
+      Auction logs (Kafka) → Flink (streaming join) → S3 (training data)
+                                                            │
+      Labels:                                               ▼
+        - Click (within 1 hour of impression)         Feature Engineering
+        - Conversion (within 30 days of click)        (Spark, daily)
+        - Quality labels (manual + automated)               │
+                                                            ▼
+                                                     Model Training
+                                                     (PyTorch, daily)
+      ```
+
+      **Training cadence per model:**
+
+      | Model | Cadence | Window | Warm-start? | Duration |
+      |-------|---------|--------|------------|----------|
+      | pCTR | Daily | 30 days | Yes (fine-tune) | 2 hours |
+      | pCVR | Every 3 days | 90 days | Yes | 4 hours |
+      | Quality | Weekly | All-time | No (full retrain) | 1 hour |
+      | Reserve | Daily | 30 days | No | 30 min |
+      | Bid landscape | Hourly | 7 days | No (lightweight) | 5 min |
+
+      **Handling conversion delay (critical for pCVR):**
+      Many conversions arrive days after the click. If we train on the last 30 days, conversions from the last 7 days are incomplete.
+      - **Approach:** Apply a **delay correction factor** based on empirical conversion delay distribution:
+        ```
+        corrected_cvr = observed_cvr / P(conversion observed by now | will convert)
+        ```
+      - P(observed by day D) is estimated from historical conversion timing data
+      - Day 1 after click: ~40% of conversions observed → correction factor = 2.5
+      - Day 7: ~80% observed → correction factor = 1.25
+      - Day 30: ~95% observed → correction factor = 1.05
+
+      **Position bias correction in training:**
+      - Include position as a feature during training
+      - At inference time, set position to the candidate position (or a neutral value for scoring)
+      - Alternative: Use IPW (Inverse Propensity Weighting) with propensities from randomized experiments
+
+      **Model evaluation pipeline:**
+      ```
+      New model trained → Offline eval (AUC, ECE, revenue simulation)
+                      → If passed: Canary (5% traffic, 4 hours)
+                      → If canary passed: Gradual rollout (5% → 25% → 50% → 100%)
+                      → If any stage fails: Automatic rollback to previous version
+      ```
+
+      Let us design the deployment architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you validate that a new pCTR model will not break the auction?"
+      - speaker: candidate
+        text: "We run auction simulation on 7 days of historical data. For each auction, we replace the production pCTR with the new model's predictions and replay the auction logic. We measure: total revenue, advertiser cost stability, fill rate, and calibration. The new model must improve revenue by at least 0.1% without degrading any other metric by more than 0.5%. Only then does it proceed to canary deployment."
+    next: deploy_question
+
+  # ============ DEPLOYMENT ============
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Auction Serving Architecture"
+    speaker: interviewer
+    content: |
+      How should we architect the real-time auction serving system? This is among the most latency-critical ML serving problems in the industry.
+    choices:
+      - label: "Centralized auction server with GPU inference"
+        answer: |
+          I would use **centralized auction servers** with GPU-accelerated ML inference for maximum throughput.
+
+          **Architecture:**
+          ```
+          Publisher Ad Request
+               │
+               ▼
+          Load Balancer (L4)
+               │
+               ▼
+          Auction Server (C++ / Rust)
+          ┌─────────────────────────────────────────┐
+          │  1. Parse request, identify user (2ms)    │
+          │  2. Fan-out bid requests to DSPs (30ms)   │
+          │  3. Collect bids, filter invalid (2ms)     │
+          │  4. Feature assembly (3ms)                 │
+          │     - Redis lookup for user features       │
+          │     - Compute auction context features      │
+          │  5. ML inference on GPU (5ms)              │
+          │     - Batch all 50 ads into single pass    │
+          │     - pCTR + pCVR + quality in one MTL     │
+          │  6. Calibration (0.5ms)                    │
+          │  7. Auction logic + pricing (1ms)          │
+          │  8. Return winner(s) (1ms)                 │
+          └─────────────────────────────────────────┘
+          Total: ~45ms (well within 100ms budget)
+          ```
+
+          **GPU inference details:**
+          - NVIDIA T4 GPUs: best price/performance for inference
+          - TensorRT optimization: 3x throughput vs vanilla PyTorch
+          - Dynamic batching: accumulate requests for up to 2ms, then batch-process
+          - Each GPU handles ~10K auctions/second
+          - 100 GPU-equipped servers for 1M auctions/second
+
+          **Why centralized:**
+          - **Efficiency:** GPU batch inference is much cheaper per-prediction than distributed CPU
+          - **Consistency:** Single code path for auction logic ensures fair, deterministic outcomes
+          - **Iteration speed:** New models deployed to one fleet, not across thousands of edge nodes
+
+          **Trade-off:** Centralized architecture adds network hops. For users far from the data center, latency increases. Mitigate with geo-distributed auction server clusters (US-East, US-West, EU, APAC).
+        next: deploy_details
+      - label: "Edge-distributed with CPU inference"
+        answer: |
+          I would deploy **edge-distributed auction servers** with optimized CPU inference to minimize latency.
+
+          **Architecture:**
+          ```
+          Publisher Ad Request
+               │
+               ▼
+          Nearest Edge PoP (< 5ms network)
+               │
+               ▼
+          Edge Auction Server (C++)
+          ┌─────────────────────────────────────────┐
+          │  1. Parse request (1ms)                   │
+          │  2. Fan-out bid requests to DSPs (30ms)   │
+          │     (DSPs also have edge presence)        │
+          │  3. Collect bids (2ms)                     │
+          │  4. Feature lookup from local cache (2ms)  │
+          │  5. ML inference on CPU (5ms)             │
+          │     - ONNX Runtime, INT8 quantized        │
+          │     - Batch 50 ads per request             │
+          │  6. Calibration (0.3ms)                    │
+          │  7. Auction + pricing (1ms)                │
+          │  8. Return (0.5ms)                         │
+          └─────────────────────────────────────────┘
+          Total: ~42ms
+          ```
+
+          **Edge deployment details:**
+          - 50+ edge PoPs (Points of Presence) globally
+          - Each PoP: 20-50 high-CPU servers (no GPU needed)
+          - Models distributed via CDN, loaded at startup (~10MB model file)
+          - Feature cache: local Redis with TTL, populated from central feature store
+
+          **CPU optimization stack:**
+          - ONNX Runtime with CPU execution provider
+          - INT8 quantization via ONNX Quantization Tool (2-3x speedup)
+          - AVX-512 / VNNI instructions for vectorized inference
+          - Model pruning: remove 40% of weights with < 0.1% accuracy loss
+          - Thread-per-core model: each CPU core handles one auction independently
+
+          **Feature caching at edge:**
+          - User features: cached for 10 minutes after first request (most users issue multiple requests per session)
+          - Ad features: cached indefinitely, invalidated on ad update
+          - Auction history features: aggregated locally, synced to central every 5 minutes
+
+          **Trade-off:** Edge servers cannot have full GPU infrastructure, limiting model complexity. The model must be small enough for CPU inference. But the latency savings (eliminating data center round-trip) can save 20-40ms, which is substantial in a 100ms budget.
+        next: deploy_details
+
+  - id: deploy_details
+    stage: deployment
+    type: info
+    label: "Auction Integrity & Safety"
+    speaker: interviewer
+    content: |
+      Let us cover auction integrity, which is critical for trust in the ad marketplace.
+
+      **Auction determinism:**
+      - The same (user, page, bids) must always produce the same outcome
+      - No randomness in the auction logic (random tiebreaking uses deterministic hash of auction_id)
+      - This is legally required in some jurisdictions and essential for audit trails
+
+      **Anti-gaming protections:**
+      - **Click fraud detection:** Real-time model that flags suspicious clicks (bot patterns, click farms). ~15% of clicks are fraudulent.
+      - **Bid manipulation detection:** Alert if an advertiser's bidding pattern suggests they are probing the reserve price
+      - **Collusion detection:** Monitor if groups of advertisers appear to coordinate bidding to lower prices
+      - **Self-preferencing audit:** Ensure the platform's own ads do not receive preferential scoring
+
+      **Pricing verification (critical):**
+      In second-price auctions:
+      ```
+      price = min(winner_bid, second_bid + $0.01)
+      ```
+      In first-price auctions:
+      ```
+      price = winner_bid (but with bid shading, effective price < true value)
+      ```
+      - All prices must be logged and auditable
+      - Monthly audit: verify that no advertiser was overcharged (price never exceeds bid)
+      - Reconciliation: match charged amounts with advertiser billing systems
+
+      **Latency SLA enforcement:**
+      - If ML inference exceeds timeout (5ms), fall back to simple `bid * historical_CTR` scoring
+      - Fallback rate monitored: should be < 1%
+      - DSP bid responses that arrive after timeout (30ms) are dropped -- strict cutoff
+
+      **Disaster recovery:**
+      - If auction server cluster goes down, route to backup region
+      - If ML models are corrupted, fall back to previous version (always warm in memory)
+      - If feature store fails, use default features (global averages) -- degrades quality but maintains availability
+      - Availability target: 99.99% (< 53 minutes downtime per year)
+
+      Let us discuss monitoring.
+    dialogue:
+      - speaker: interviewer
+        text: "What is the most dangerous failure mode in an auction system?"
+      - speaker: candidate
+        text: "A silent calibration drift that goes undetected. If the pCTR model starts overestimating by 20%, the auction appears to function normally -- ads are shown, clicks happen, revenue flows. But advertisers are being systematically overcharged. By the time advertisers notice and complain, weeks may have passed, and the trust damage could cost millions in churned advertiser spend. This is why real-time calibration monitoring with tight alert thresholds is non-negotiable."
+    next: mon_strategy
+
+  # ============ MONITORING ============
+  - id: mon_strategy
+    stage: monitoring
+    type: question
+    label: "Monitoring Strategy"
+    speaker: interviewer
+    content: |
+      What monitoring would you set up for the real-time auction system?
+    choices:
+      - label: "Auction health + ML quality monitoring"
+        answer: |
+          I would build **dual-layer monitoring** covering both auction mechanism health and ML model quality.
+
+          **Layer 1: Auction mechanism health (real-time)**
+
+          | Metric | Alert Threshold | Action |
+          |--------|----------------|--------|
+          | **Auction latency P99** | > 80ms | Scale servers, investigate bottleneck |
+          | **Fill rate** | < 85% | Check reserve prices, bidder connectivity |
+          | **ML fallback rate** | > 1% | Investigate model serving issues |
+          | **Invalid auction rate** | > 0.01% | Audit auction logic for bugs |
+          | **Bid timeout rate** | > 5% of DSPs | Alert DSP connectivity team |
+          | **Revenue anomaly** | > 10% deviation from forecast | Investigate across all models |
+
+          **Layer 2: ML model quality (per-model)**
+
+          | Model | Key Metric | Alert | Cadence |
+          |-------|-----------|-------|---------|
+          | **pCTR** | ECE, AUC, calibration ratio | ECE > 0.01 | Hourly |
+          | **pCVR** | AUC, conversion prediction accuracy | AUC drop > 2% | Daily |
+          | **Quality** | Agreement with human labels | Accuracy < 85% | Weekly |
+          | **Reserve** | Fill rate vs revenue trade-off | Revenue drop > 3% | Hourly |
+
+          **Cross-model monitoring:**
+          - **Score distribution:** Monitor the distribution of `pCTR * bid` scores. If it shifts suddenly, something is wrong with pCTR or bid patterns.
+          - **Winner profile:** Track the characteristics of winning ads (category, quality, advertiser size). Sudden shifts indicate model or market changes.
+          - **Price/CTR consistency:** If average CPC rises but actual CTR falls, the pCTR model is overestimating.
+
+          **Automated remediation:**
+          - pCTR ECE > 0.015: auto-trigger recalibration
+          - Auction latency P99 > 100ms: auto-scale server fleet
+          - Fill rate < 80%: auto-reduce reserve prices by 10%
+          - ML fallback rate > 5%: auto-rollback to previous model version
+        next: mon_terminal_health
+      - label: "Stakeholder impact monitoring"
+        answer: |
+          I would build **stakeholder-centric monitoring** that tracks impact on each participant in the auction ecosystem.
+
+          **Publisher monitoring:**
+
+          | Metric | What It Shows | Alert |
+          |--------|--------------|-------|
+          | **RPM by publisher tier** | Revenue health per publisher | > 10% drop for tier-1 |
+          | **Fill rate by slot** | Are ad slots being utilized? | < 80% for premium slots |
+          | **Ad quality score** | Quality of ads shown to users | Avg quality < 0.6 |
+          | **Viewability rate** | Are ads actually seen? | < 50% |
+
+          **Advertiser monitoring:**
+
+          | Metric | What It Shows | Alert |
+          |--------|--------------|-------|
+          | **CPA stability** | Cost per acquisition consistency | > 20% week-over-week change |
+          | **Win rate trend** | Is the advertiser winning fairly? | Sudden drop > 30% |
+          | **Budget pacing** | Spending evenly through the day | Exhaustion before 3 PM |
+          | **Impression quality** | Are impressions on relevant pages? | Quality drop > 15% |
+
+          **Platform monitoring:**
+          - **Total daily revenue** with hourly granularity and day-over-day comparison
+          - **Auction efficiency:** Revenue / (compute cost + infrastructure cost)
+          - **Market liquidity:** Average number of bidders per auction (healthy: 5+)
+          - **New advertiser activation:** Time from signup to first winning auction
+
+          **Long-term health indicators (weekly):**
+          - Advertiser retention: 30-day active rate
+          - Publisher retention: Monthly churn rate
+          - Market concentration: HHI (Herfindahl-Hirschman Index) of advertiser spend
+          - Innovation metric: % of auctions with new ad formats
+
+          **Quarterly business review:**
+          ML team presents: model improvements, revenue attribution, market health trends, planned changes. Stakeholder feedback incorporated into next quarter's roadmap.
+        next: mon_terminal_stake
+
+  - id: mon_terminal_health
+    stage: monitoring
+    type: terminal
+    label: "Auction Health Path Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You have designed a comprehensive **real-time ad auction system**.
+
+      **Your design summary:**
+      - **Problem:** Evaluate and select ads in real-time auctions processing 500B+ auctions/day globally within 100ms latency
+      - **Metrics:** eCPM or ecosystem value as scoring objective, with strict calibration requirements (ECE < 0.01)
+      - **Data:** Multi-source pipeline with streaming joins, conversion delay correction, and position bias handling
+      - **Features:** Auction-context features or user-ad relevance features with pre-computed affinity scores
+      - **Model:** Multi-task learning (ESMM) or separate specialized models for pCTR, pCVR, quality, and reserve pricing
+      - **Training:** Daily pCTR, periodic pCVR with delay correction, auction simulation for validation
+      - **Deployment:** Centralized GPU or edge-distributed CPU serving with strict latency budgets
+      - **Monitoring:** Dual-layer auction health + ML quality with automated remediation
+
+      **Key strengths:**
+      - Understanding of auction mechanism design and its ML dependencies
+      - Practical handling of conversion delay and position bias
+      - Automated remediation prevents silent degradation
+
+      **Areas for further exploration:**
+      - Privacy-preserving auctions (differential privacy for bid data)
+      - Reinforcement learning for dynamic reserve price optimization
+      - Auction design for emerging formats (CTV, audio, AR/VR ads)
+      - Multi-slot auction optimization (jointly selecting N ads for N positions)
+
+      This design demonstrates mastery of one of the highest-scale ML systems in production. Outstanding work!
+
+  - id: mon_terminal_stake
+    stage: monitoring
+    type: terminal
+    label: "Stakeholder Impact Path Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You have designed a comprehensive **real-time ad auction system**.
+
+      **Your design summary:**
+      - **Problem:** Build the ML-powered auction that determines ad selection, pricing, and allocation for every impression
+      - **Metrics:** Revenue or ecosystem value scoring with per-model calibration and stakeholder satisfaction tracking
+      - **Data:** Massive-scale streaming joins with attribution, delay correction, and survivorship bias handling
+      - **Features:** Competition-aware or relevance-focused features with real-time and pre-computed components
+      - **Model:** MTL shared backbone or independent specialized models for each auction component
+      - **Training:** Per-model cadence with auction simulation validation before deployment
+      - **Deployment:** Centralized or edge-distributed with strict latency SLAs and fallback strategies
+      - **Monitoring:** Stakeholder-centric dashboards tracking publisher, advertiser, and platform health
+
+      **Key strengths:**
+      - Ecosystem thinking -- balancing three stakeholders (publisher, advertiser, platform)
+      - Practical reserve price and bid landscape modeling
+      - Long-term health tracking alongside real-time alerting
+
+      **Areas for further exploration:**
+      - Header bidding optimization (coordinating multiple exchanges)
+      - Causal inference for measuring true auction impact
+      - Fairness constraints across advertiser sizes and categories
+      - Green computing: reducing the carbon footprint of 500B daily auctions
+
+      This design shows the breadth needed for architecting a marketplace that is simultaneously an ML system, an economics mechanism, and a business platform. Excellent work!

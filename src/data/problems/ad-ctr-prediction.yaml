@@ -1,0 +1,964 @@
+id: ad-ctr-prediction
+title: "Ad CTR Prediction"
+description: "Design a system to predict Ad Click-Through Rate (CTR)."
+companies: ["Google", "Meta", "Amazon"]
+domains: ["Ranking/Search", "Tabular/Structured"]
+root: pd_start
+
+nodes:
+  # ============ PROBLEM DEFINITION ============
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we will design a **Click-Through Rate (CTR) prediction system** for online advertising.
+
+      **Business context:**
+      - The global digital advertising market exceeded **$600B in 2024**, with CTR prediction at the heart of ad ranking and pricing
+      - Google processes ~**8.5 billion searches per day** with ads shown on roughly 80% of commercial queries
+      - Meta serves ~**10 billion ad impressions daily** across Facebook, Instagram, and Audience Network
+      - A typical display ad CTR is **0.1--0.5%**, while search ads achieve **2--5%** on average
+      - Even a **0.1% improvement** in CTR prediction accuracy can translate into **hundreds of millions of dollars** in annual revenue
+
+      **Goal:** Given a user, an ad, and a context (page, position, device), predict the probability that the user will click the ad. This probability is used for:
+      - **Ad ranking:** `rank_score = pCTR * bid`
+      - **Pricing:** Generalized Second Price auction uses predicted CTR to charge advertisers
+      - **Budget pacing:** Allocate advertiser budgets across impressions efficiently
+
+      The prediction must be served in **<10ms** at **millions of QPS** with high calibration -- the predicted probability should closely match the actual click rate.
+
+      Let us start by scoping the problem.
+    dialogue:
+      - speaker: interviewer
+        text: "Today we're going to design a CTR prediction system for online ads. Can you tell me why this is such a critical ML problem?"
+      - speaker: candidate
+        text: "CTR prediction is the backbone of ad monetization. It directly feeds into the auction mechanism -- ads are ranked by expected revenue, which is pCTR times bid. Even tiny improvements in prediction quality translate to massive revenue gains."
+      - speaker: interviewer
+        text: "Exactly. And what makes it technically challenging?"
+      - speaker: candidate
+        text: "The combination of scale, latency, and accuracy requirements. We need sub-10ms predictions at millions of QPS, while dealing with extremely sparse positive labels -- typical CTR is well under 1%. Plus, the feature space is enormous with billions of ad-user combinations."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: info
+    label: "Problem Scope"
+    speaker: interviewer
+    content: |
+      Let us clarify the scope and constraints for our CTR prediction system.
+
+      **System requirements:**
+      - **Latency:** P99 < 10ms for a single ad scoring, but we score **hundreds of candidate ads** per request
+      - **Throughput:** ~500K ad requests/second at peak (translates to ~50M ad scorings/second)
+      - **Freshness:** Model should reflect user behavior from the **last few hours** -- a user who just searched for "running shoes" should see relevant shoe ads immediately
+      - **Calibration:** The predicted probability must be well-calibrated -- if we predict 2% CTR, roughly 2 out of 100 shown ads should be clicked
+
+      **Key distinctions to keep in mind:**
+      - **Pointwise vs pairwise vs listwise:** We will focus on pointwise prediction (probability of click for a single ad) -- this is the industry standard because the score feeds directly into the auction formula
+      - **Click vs conversion:** We predict click probability, not purchase/conversion -- conversion prediction is a separate model in most systems
+      - **Position bias:** Ads in higher positions get more clicks regardless of relevance. We must either debias training data or model position explicitly
+
+      Now, how should we frame the core optimization objective?
+    dialogue:
+      - speaker: interviewer
+        text: "Before we dive into the model, what is the key constraint that shapes our architecture?"
+      - speaker: candidate
+        text: "Latency is the dominant constraint. We need to score hundreds of ads in under 10ms total. This means we can spend at most about 50 microseconds per ad, which rules out very large models unless we use clever caching or two-stage architectures."
+      - speaker: interviewer
+        text: "Good. And why is calibration specifically important here, not just AUC?"
+      - speaker: candidate
+        text: "Because the predicted CTR is multiplied by the bid price to determine ad rank and the advertiser's charge. If our predictions are systematically too high, advertisers overpay and lose trust. If too low, we leave revenue on the table. Calibration directly impacts the health of the ad marketplace."
+    next: met_question
+
+  # ============ METRICS ============
+  - id: met_question
+    stage: metrics
+    type: question
+    label: "Optimization Objective"
+    speaker: interviewer
+    content: |
+      What should be our primary optimization objective for the CTR model? This choice will shape the loss function, evaluation strategy, and how we think about model quality.
+    choices:
+      - label: "Revenue-focused (maximize ad revenue)"
+        answer: |
+          I would optimize primarily for **ad revenue**, since CTR prediction is ultimately a revenue optimization problem.
+
+          **Why revenue-focused:**
+          - The ad platform's primary KPI is **revenue per mille (RPM)** -- revenue per 1000 impressions
+          - A CTR model that is slightly less accurate but better calibrated on **high-bid ads** will generate more revenue than one that is uniformly accurate
+          - Advertisers with larger budgets subsidize the ecosystem -- getting their predictions right matters more
+
+          **Primary metric: Normalized Cross-Entropy (NCE)**
+          ```
+          NCE = LogLoss(model) / LogLoss(baseline)
+          ```
+          Where baseline predicts the global average CTR for every impression. NCE < 1 means the model beats the baseline. Facebook's seminal 2014 paper reported **NCE improvements of 0.001 being significant** at their scale.
+
+          **Revenue-aligned secondary metrics:**
+          - **Revenue per session** in online A/B tests (the ultimate metric)
+          - **AUC-ROC** on high-value ad segments (top 20% by bid)
+          - **Expected Calibration Error (ECE)** -- critical because `revenue = pCTR * bid`
+          - **Revenue lift** in counterfactual evaluation vs the current production model
+
+          **Trade-off:** Optimizing purely for revenue can degrade user experience -- showing too many high-bid but low-relevance ads. We need guardrail metrics on user engagement (session length, return rate).
+        next: met_revenue
+      - label: "User experience (maximize engagement quality)"
+        answer: |
+          I would optimize for **user experience quality**, measured by overall engagement metrics, with revenue as a secondary objective.
+
+          **Why user-first:**
+          - Short-term revenue maximization leads to **ad blindness** and user churn -- a classic tragedy of the commons
+          - Google's research shows that improving ad relevance by **1% increases long-term revenue by 2-3%** because users search more and engage more
+          - Users who have a good ad experience return more often, growing the total addressable market
+
+          **Primary metric: AUC-ROC with stratified evaluation**
+          - **Overall AUC** across all impressions -- measures ranking quality
+          - **Per-query AUC** -- does the model correctly rank ads within a single query? This matters more than global ranking
+          - **NDCG@k** -- normalized discounted cumulative gain for the top-k ad positions actually shown
+
+          **User experience guardrails:**
+          - **Ad load quality score:** Fraction of shown ads with pCTR > threshold (e.g., 0.5% for display)
+          - **Bad ad rate:** Fraction of impressions where user provides negative feedback
+          - **Session depth:** Users should not leave the page because of poor ad quality
+          - **Long-term user retention:** 7-day and 30-day return rates
+
+          **Trade-off:** A pure engagement-focused model might favor clickbait ads that have high CTR but low conversion. We need conversion-rate guardrails to ensure the clicks are valuable to advertisers too.
+        next: met_experience
+
+  - id: met_revenue
+    stage: metrics
+    type: info
+    label: "Revenue Metrics Deep Dive"
+    speaker: interviewer
+    content: |
+      Good choice. Let us flesh out the complete metrics framework for a revenue-focused approach.
+
+      **Offline metrics (evaluated on held-out data):**
+
+      | Metric | Formula | Target |
+      |--------|---------|--------|
+      | **NCE** | `LogLoss / LogLoss_baseline` | < 0.96 (4%+ improvement) |
+      | **AUC-ROC** | Area under ROC curve | > 0.80 |
+      | **Calibration** | `avg(pCTR) / avg(actual_CTR)` per decile | Within 0.95--1.05 |
+      | **ECE** | Expected Calibration Error across 20 bins | < 0.01 |
+      | **Logloss on high-value** | LogLoss on top-20% bid impressions | Lower than baseline |
+
+      **Online metrics (A/B test):**
+      - **Revenue per 1000 queries (RPM)** -- primary business metric
+      - **Click yield** -- clicks per 1000 impressions
+      - **Advertiser ROI** -- do advertisers get more clicks per dollar?
+      - **Defection rate** -- are advertisers reducing spend?
+
+      **Calibration deep dive:**
+      Calibration is non-negotiable in ads because `expected_revenue = pCTR * bid`. If pCTR is systematically 20% too high, advertisers are effectively overcharged. Facebook found that recalibrating their model post-training improved revenue by **reducing advertiser churn** rather than increasing short-term CPM.
+
+      **Evaluation cadence:** Offline metrics daily, online A/B tests run for 1--2 weeks with at least 1M impressions per variant for statistical power.
+
+      Now let us design the data pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "You mentioned NCE. Why is that preferred over raw log loss?"
+      - speaker: candidate
+        text: "NCE normalizes by the baseline entropy, so it is comparable across different traffic slices with different base CTR rates. A search ad slice with 3% base CTR and a display slice with 0.1% base CTR can both be evaluated on the same NCE scale. Raw log loss would make the display slice look much better simply because the baseline is easier to predict."
+      - speaker: interviewer
+        text: "Makes sense. How would you handle the fact that calibration and AUC can conflict?"
+      - speaker: candidate
+        text: "They measure different things. AUC measures ranking quality -- can the model distinguish clicks from non-clicks? Calibration measures absolute probability accuracy. A model can have perfect AUC but terrible calibration. In practice, I would optimize the model for AUC during training, then apply post-hoc calibration like Platt scaling or isotonic regression to fix the absolute probabilities."
+    next: data_pipeline
+
+  - id: met_experience
+    stage: metrics
+    type: info
+    label: "User Experience Metrics"
+    speaker: interviewer
+    content: |
+      Great perspective. Let us define the complete metrics suite for a user-experience-focused approach.
+
+      **Offline metrics:**
+
+      | Metric | What It Measures | Target |
+      |--------|-----------------|--------|
+      | **Per-query AUC** | Within-query ranking quality | > 0.75 |
+      | **NDCG@3** | Top-3 ad relevance quality | > 0.65 |
+      | **AUC-ROC** | Global discrimination | > 0.80 |
+      | **Calibration** | Probability accuracy | ECE < 0.01 |
+      | **Negative feedback prediction** | Can we predict user dislike? | AUC > 0.70 |
+
+      **Online metrics -- user engagement:**
+      - **Clicks per session** -- are users clicking more (relevant) ads?
+      - **Post-click engagement** -- dwell time on landing page (proxy for relevance)
+      - **Ad hide/report rate** -- should decrease with better relevance
+      - **Organic engagement** -- do users interact more with non-ad content too? (indicates overall experience improvement)
+      - **Session length** -- longer sessions mean users are not driven away by ads
+
+      **Balancing user experience with revenue:**
+      The key insight is that these are **not truly in conflict long-term**. LinkedIn's ad team found that improving ad relevance (measured by CTR lift) led to a **12% increase in revenue over 6 months** despite initially showing fewer but more relevant ads. The mechanism: happier users return more often, expanding the total impression volume.
+
+      **Guardrails on advertiser side:**
+      - Advertiser spend should not drop more than 2% in A/B test
+      - Top-100 advertiser satisfaction scores monitored weekly
+      - Fill rate (fraction of ad slots filled) must stay above 90%
+
+      Let us move to the data pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you prevent optimizing for user experience from becoming 'show fewer ads'?"
+      - speaker: candidate
+        text: "The key is to improve relevance, not reduce ad load. We are not showing fewer ads -- we are showing better-matched ads. We keep the fill rate guardrail above 90% and ensure total impression volume does not drop. If the model is good at ranking, the user sees the same number of ads but they are more relevant, leading to higher CTR and actually more revenue."
+    next: data_pipeline
+
+  # ============ DATA ============
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      Now let us design the data pipeline. CTR prediction requires massive-scale data processing with strict freshness requirements.
+
+      **Data sources and volumes:**
+
+      | Source | Data | Volume |
+      |--------|------|--------|
+      | **Impression logs** | Ad shown events with features | ~10B/day |
+      | **Click logs** | Click events with timestamps | ~50M/day (0.5% CTR) |
+      | **User profiles** | Demographics, interests, history | ~2B profiles |
+      | **Ad metadata** | Creative, landing page, advertiser, category | ~100M active ads |
+      | **Context signals** | Query, page content, device, location | Per-request |
+
+      **Label construction:**
+      - **Positive:** User clicked the ad within 30 seconds of impression (avoid accidental clicks)
+      - **Negative:** Ad was shown, no click within the attribution window
+      - **Class imbalance:** 200:1 negative-to-positive ratio for display ads, 20:1 for search ads
+
+      **Data freshness pipeline:**
+      ```
+      Real-time (Kafka) → Flink streaming → Feature store update (< 5 min)
+      Batch (HDFS)     → Spark ETL       → Training data (daily)
+      ```
+
+      **Critical data quality issues:**
+      - **Click fraud:** ~15% of clicks are fraudulent (bots, click farms). Must filter before training.
+      - **Position bias:** Ads in position 1 get 5-10x more clicks than position 5 regardless of quality. Need debiasing.
+      - **Selection bias:** We only observe clicks on ads that were shown -- the model never learns about ads it filtered out.
+      - **Delayed feedback:** Some clicks arrive late (user scrolls back up). Use a 1-hour join window.
+
+      How should we handle the training data construction?
+    dialogue:
+      - speaker: interviewer
+        text: "What is the biggest data quality challenge for CTR prediction?"
+      - speaker: candidate
+        text: "Position bias is the most insidious. Users are much more likely to click ads in the top position simply because they see them first, not because they are more relevant. If we train on raw click data, the model learns to predict position, not relevance. We need to either train on randomized data or explicitly model position as a feature and remove it at serving time."
+      - speaker: interviewer
+        text: "How would you handle the extreme class imbalance?"
+      - speaker: candidate
+        text: "For display ads with 0.1-0.5% CTR, I would use negative downsampling -- keep all positive examples but sample only 10% of negatives. This gives a 20:1 ratio instead of 200:1, which is much more tractable. Crucially, we must then recalibrate the predictions to account for the sampling: p_corrected = p_sampled / (p_sampled + (1-p_sampled)/sampling_rate)."
+    next: feat_question
+
+  # ============ FEATURES ============
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Engineering Strategy"
+    speaker: interviewer
+    content: |
+      What feature engineering strategy would you prioritize? CTR prediction is famously a feature engineering problem -- the right features matter more than the model architecture in many cases.
+    choices:
+      - label: "Dense features: embeddings + cross features"
+        answer: |
+          I would focus on **dense learned embeddings** with automatic cross-feature learning, minimizing manual feature engineering.
+
+          **Why dense embeddings:**
+          - Ad and user IDs are extremely high-cardinality (billions of values). One-hot encoding is impractical.
+          - **Embedding tables** map each ID to a dense vector (dimension 16-64), learned end-to-end with the CTR model.
+          - Similar ads/users cluster in embedding space, enabling generalization to rare combinations.
+
+          **Key embedding features:**
+
+          | Feature | Cardinality | Embedding Dim |
+          |---------|------------|---------------|
+          | User ID | ~2B | 64 |
+          | Ad ID | ~100M | 32 |
+          | Advertiser ID | ~5M | 16 |
+          | Ad category | ~5K | 8 |
+          | Query (hashed) | ~10M | 32 |
+          | User location | ~50K | 16 |
+
+          **Cross features via interaction:**
+          Rather than manually defining crosses like `(user_age_bucket, ad_category)`, let the model learn interactions through:
+          - **Factorization Machines** -- learn pairwise feature interactions as dot products of embeddings
+          - **Deep Cross Network (DCN)** -- explicit cross layers that learn bounded-degree feature crosses
+          - These replace the manual feature engineering that consumed 80% of an ML engineer's time at older ad systems
+
+          **Real-time features (from feature store):**
+          - User's click history in last 1 hour (recency-weighted)
+          - Ad's CTR in last 4 hours (freshness signal)
+          - Query-ad semantic similarity (precomputed dense vector)
+
+          **Trade-off:** Dense embeddings require more training data to learn good representations, especially for rare ads/users. Cold-start items get random embeddings initially.
+        next: feat_dense
+      - label: "Sparse features: hand-crafted + statistical"
+        answer: |
+          I would invest heavily in **hand-crafted sparse features** combined with statistical aggregations -- this is proven to be the highest-ROI approach at scale.
+
+          **Why sparse features work:**
+          - Google's original CTR system relied primarily on sparse features with logistic regression and served billions of predictions
+          - Sparse features like `(query="running shoes", ad_category="sports")` are **directly interpretable** and debuggable
+          - **Feature crosses** capture the exact context: `user_age_25_34 AND ad_category_finance` has a very different CTR than the individual features suggest
+
+          **Key feature groups:**
+
+          | Group | Example Features | Count |
+          |-------|-----------------|-------|
+          | **Ad features** | Ad ID, advertiser, category, creative type, landing page domain, ad age | ~20 |
+          | **User features** | Age bucket, gender, interest segments, device, OS, browser, location tier | ~30 |
+          | **Context features** | Query tokens, page category, time of day, day of week, position | ~15 |
+          | **Cross features** | query x ad_category, user_segment x ad_vertical, device x creative_type | ~50 |
+          | **Statistical features** | Historical CTR of ad (7d, 30d), user's click rate, advertiser avg CTR | ~20 |
+
+          **Statistical aggregation features (very powerful):**
+          - `ad_historical_ctr_7d`: The ad's actual CTR over the last 7 days (smoothed with Bayesian prior)
+          - `user_category_ctr`: User's historical CTR on this ad category
+          - `query_advertiser_ctr`: How well this query converts for this advertiser
+          - These features carry enormous predictive signal -- they are essentially "what has happened before in similar situations"
+
+          **Trade-off:** Manual feature engineering is labor-intensive and requires deep domain expertise. Feature crosses grow combinatorially. But the resulting model is fast (sparse dot product) and highly interpretable.
+        next: feat_sparse
+
+  - id: feat_dense
+    stage: features
+    type: info
+    label: "Dense Feature Pipeline"
+    speaker: interviewer
+    content: |
+      Let us design the dense feature pipeline in detail.
+
+      **Embedding management at scale:**
+      - Total embedding parameters: ~2B user embeddings * 64 dim + 100M ad embeddings * 32 dim = **~131B parameters** just for embeddings
+      - This exceeds single-machine memory. Solutions:
+        - **Distributed embedding tables** across parameter servers (Meta's approach with DLRM)
+        - **Hash trick:** Reduce user embedding table to 10M buckets using hash(user_id) % 10M. Accepts collisions.
+        - **Mixed-dimension embeddings:** Frequent users get 64-dim, rare users get 16-dim (saves 4x memory)
+
+      **Feature store architecture:**
+      ```
+      Online features (Redis/Memcached):
+        - User embedding (precomputed, updated hourly)
+        - User recent clicks (last 50, updated real-time via Kafka)
+        - Ad statistics (CTR, impressions, updated every 15 min)
+
+      Batch features (Hive → daily):
+        - User interest profiles (from browsing/click history)
+        - Ad quality scores (landing page quality, creative quality)
+        - Cross-feature aggregations
+      ```
+
+      **Handling cold-start (new ads/users):**
+      - **New ads:** Use advertiser embedding + ad category embedding + creative-type embedding as proxy. The ad's own embedding is learned within the first few thousand impressions.
+      - **New users:** Use device + location + referrer embeddings. First-session predictions rely heavily on contextual features.
+      - **Warm-up period:** New ad embeddings are highly uncertain for the first ~10K impressions. Consider a separate "cold-start model" or confidence-weighted blending.
+
+      Now let us choose the model architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle the fact that embedding tables are too large for a single machine?"
+      - speaker: candidate
+        text: "At Meta's scale, they use model parallelism for embedding tables -- each parameter server shard holds a subset of the embedding table. When a training example needs user embedding for ID 12345, it fetches from the appropriate shard. For serving, they precompute and cache the most frequently accessed embeddings in a fast key-value store, with a fallback to the full table for rare IDs."
+    next: mod_question
+
+  - id: feat_sparse
+    stage: features
+    type: info
+    label: "Sparse Feature Pipeline"
+    speaker: interviewer
+    content: |
+      Let us detail the sparse feature pipeline and the critical statistical features.
+
+      **Feature hashing at scale:**
+      - Raw feature space: billions of possible feature values
+      - **Hashing trick:** Map all features to a fixed-size hash space (e.g., 2^24 = 16M buckets)
+      - Collision rate is manageable: at 16M buckets with 1M active features, collision probability is ~6%
+      - Google's original ad system used **feature hashing with per-coordinate learning rates** (FTRL optimizer)
+
+      **Statistical feature computation:**
+      ```python
+      # Bayesian-smoothed historical CTR
+      def smoothed_ctr(clicks, impressions, global_ctr=0.005, strength=100):
+          return (clicks + strength * global_ctr) / (impressions + strength)
+      ```
+      - The `strength` parameter controls how much we trust the prior vs observed data
+      - For a new ad with 0 clicks and 0 impressions: `smoothed_ctr = global_ctr = 0.5%`
+      - For an established ad with 500 clicks and 10K impressions: `smoothed_ctr = 5.25%` (mostly observed)
+
+      **Cross-feature construction (critical for sparse models):**
+
+      | Cross Feature | Why It Matters |
+      |--------------|----------------|
+      | `query_token x ad_category` | "shoes" + "apparel" has very different signal than "shoes" + "electronics" |
+      | `user_segment x time_of_day` | Business users click B2B ads during work hours, not evenings |
+      | `device x creative_type` | Video ads perform 3x better on mobile vs desktop |
+      | `geo_region x ad_vertical` | Local service ads perform very differently by region |
+
+      **Feature selection:**
+      - Start with ~10K raw features + crosses
+      - Use **mutual information** to rank feature importance
+      - Prune features that add < 0.001 NCE improvement (noise reduction)
+      - Final model typically uses 500-2000 active features after selection
+
+      Now let us select the model architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you decide which cross features to include?"
+      - speaker: candidate
+        text: "I start with domain knowledge -- features that naturally interact, like user demographics with ad categories. Then I use a data-driven approach: compute the conditional mutual information of each candidate cross with the label, controlling for the individual features. Only crosses that add significant information beyond their components are worth the complexity. At Google, this process was partially automated with tools that test thousands of candidate crosses."
+    next: mod_question
+
+  # ============ MODEL ============
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Model Architecture"
+    speaker: interviewer
+    content: |
+      Now for the core modeling decision. What architecture would you use for CTR prediction?
+    choices:
+      - label: "Logistic Regression / GBDT (traditional)"
+        answer: |
+          I would start with **Logistic Regression (LR)** enhanced with GBDT-generated features -- the approach that powered most ad systems until ~2018 and remains a strong baseline.
+
+          **Why LR + GBDT:**
+          - **Proven at scale:** Google's ad system used LR with billions of sparse features, serving millions of QPS for over a decade
+          - **Ultra-fast inference:** Sparse dot product is ~100 nanoseconds. Can score 1000 ads in <1ms
+          - **Interpretable:** Each feature weight directly indicates impact on CTR
+          - **Online learning:** FTRL (Follow The Regularized Leader) updates the model with every click/no-click event in real-time
+
+          **Architecture: Two-stage GBDT → LR**
+          ```
+          Raw Features → GBDT (500 trees) → Leaf indices as features → LR model → pCTR
+          ```
+          - GBDT converts raw features into high-quality non-linear feature crosses
+          - Each tree's leaf index becomes a binary feature for LR
+          - 500 trees × average 8 leaves = 4000 new binary features that capture complex interactions
+          - Facebook published this architecture in their **2014 KDD paper** and showed it improved over pure LR by 3% NCE
+
+          **Online learning with FTRL:**
+          ```
+          For each impression:
+            1. Score with current model weights
+            2. Observe click/no-click
+            3. Update weights: w_t+1 = FTRL_update(w_t, gradient)
+          ```
+          - Model stays fresh without full retraining
+          - Per-coordinate learning rates handle sparse features well
+          - L1 regularization keeps the model sparse (most weights are exactly 0)
+
+          **Trade-off:** LR cannot learn complex feature interactions that are not explicitly encoded. GBDT features help but are static (not updated online). Modern deep models can learn interactions end-to-end.
+        next: mod_lr
+      - label: "Deep Learning (Wide & Deep / DCN / DLRM)"
+        answer: |
+          I would use a **deep learning architecture** -- specifically either Wide & Deep, DCN v2, or DLRM depending on the infrastructure constraints.
+
+          **Why deep learning for CTR:**
+          - Deep models learn **automatic feature interactions** that would take years to engineer manually
+          - **Embedding-based** representations generalize to unseen feature combinations
+          - State-of-the-art results: Meta reported **0.1% NCE improvement** over traditional models using DLRM, worth ~$100M+/year at their scale
+
+          **Architecture comparison:**
+
+          | Model | Key Innovation | Pros | Cons |
+          |-------|---------------|------|------|
+          | **Wide & Deep** (Google 2016) | Wide LR + Deep MLP | Simple, proven | Manual wide features |
+          | **DCN v2** (Google 2021) | Cross network learns explicit crosses | Better than W&D, automatic crosses | More complex training |
+          | **DLRM** (Meta 2019) | Bottom MLP + embedding interaction + top MLP | Best for sparse + dense mix | Huge embedding tables |
+          | **DeepFM** | FM layer replaces wide component | End-to-end feature crosses | Less effective than DCN v2 |
+
+          **I would choose DCN v2 (Deep & Cross Network v2):**
+          ```
+          Input features
+               ├── Dense features → Bottom MLP (256, 128)
+               └── Sparse features → Embedding lookup
+                        │
+                   Concatenate
+                        │
+               ┌────────┴────────┐
+               │  Cross Network   │  Deep Network
+               │  (3 cross layers)│  (512, 256, 128)
+               └────────┬────────┘      │
+                    Concatenate          │
+                        │────────────────┘
+                        ▼
+                   Output MLP → sigmoid → pCTR
+          ```
+
+          The cross network learns **bounded-degree feature crosses** explicitly, while the deep network captures higher-order interactions. This combination consistently outperforms either alone.
+
+          **Trade-off:** Deep models require GPU serving (or heavily optimized CPU inference), are harder to debug, and need more training data. But the accuracy gains at scale justify the infrastructure investment.
+        next: mod_deep
+
+  - id: mod_lr
+    stage: model
+    type: info
+    label: "LR/GBDT Architecture Details"
+    speaker: interviewer
+    content: |
+      Let us detail the LR + GBDT architecture and its online learning capabilities.
+
+      **FTRL optimizer (industry standard for online LR):**
+      FTRL (Follow The Regularized Leader) is the optimizer of choice for CTR at Google, introduced by McMahan et al. (2013). Key properties:
+      - **Per-coordinate learning rates:** Frequent features get smaller updates, rare features get larger updates. This is critical for sparse data.
+      - **L1 regularization path:** Naturally produces sparse solutions -- most weights are exactly zero, leading to compact models.
+      - **Memory efficient:** Only stores non-zero weights. A model with 10B potential features might have only 100M non-zero weights.
+
+      **GBDT feature transformation details:**
+      ```
+      Example: 3 trees with leaves [A1,A2,A3], [B1,B2,B3,B4], [C1,C2]
+      Input falls into leaves: A2, B4, C1
+      Generated features: [0,1,0, 0,0,0,1, 1,0] → fed into LR
+      ```
+
+      **Model serving optimization:**
+      - Store weights in a **hash map** (feature_hash → weight)
+      - Scoring = sum of weights for active features. No matrix multiply needed.
+      - Typical model size: ~500MB (100M non-zero float32 weights)
+      - Single-threaded scoring of 1 ad: ~100 nanoseconds
+      - Can score 10K ads in ~1ms on a single CPU core
+
+      **Calibration for LR:**
+      LR outputs are naturally calibrated (log-odds), but GBDT transformation can break calibration. Apply **isotonic regression** as a post-hoc calibration layer:
+      ```
+      raw_score → LR → isotonic_regression → calibrated_pCTR
+      ```
+
+      This architecture is the **safest starting point** -- fast, debuggable, and competitive. Now let us discuss training.
+    dialogue:
+      - speaker: interviewer
+        text: "What is the biggest limitation of the LR approach?"
+      - speaker: candidate
+        text: "The biggest limitation is that LR fundamentally cannot learn feature interactions that are not explicitly provided. Even with GBDT-generated features, those interactions are static -- computed once from a batch of data. If user behavior changes, the GBDT trees become stale. Deep models learn interactions continuously from fresh data, adapting much faster to distribution shifts."
+    next: train_strategy
+
+  - id: mod_deep
+    stage: model
+    type: info
+    label: "Deep CTR Model Details"
+    speaker: interviewer
+    content: |
+      Let us detail the deep learning architecture, focusing on DCN v2 and practical deployment considerations.
+
+      **DCN v2 Cross Layer mechanics:**
+      ```
+      x_{l+1} = x_0 ⊙ (W_l · x_l + b_l) + x_l
+      ```
+      - Each cross layer computes an explicit feature cross with the original input `x_0`
+      - After L layers, the model captures up to (L+1)-degree feature crosses
+      - **Key advantage over MLP:** Cross layers model interactions *explicitly* with fewer parameters. An MLP needs exponentially more neurons to approximate the same crosses.
+
+      **Embedding interaction layer (from DLRM):**
+      For N sparse features with embeddings `e_1, ..., e_N`, compute all pairwise dot products:
+      ```
+      interactions = [e_i · e_j for i < j]  → N*(N-1)/2 interaction features
+      ```
+      This is the **factorization machine** approach -- each pairwise interaction is a single dot product. With 20 embedding features, that is 190 interaction terms.
+
+      **Practical serving optimizations:**
+      - **Quantization:** INT8 weights reduce memory 4x and speed up inference 2-3x with < 0.1% NCE degradation
+      - **Pruning:** Remove neurons with low activation variance. Meta prunes DLRM by 50% with < 0.01% NCE loss.
+      - **Embedding caching:** Top 1% of users/ads (by traffic) account for 50% of lookups. Cache their embeddings in L1/L2 cache.
+      - **Operator fusion:** Fuse embedding lookup + interaction + MLP into a single GPU kernel using TorchRec or HugeCTR.
+
+      **Latency budget breakdown:**
+      | Component | Latency |
+      |-----------|---------|
+      | Feature fetch (Redis) | 2 ms |
+      | Embedding lookup | 1 ms |
+      | Model inference (GPU) | 2 ms |
+      | Post-processing | 0.5 ms |
+      | Network overhead | 1.5 ms |
+      | **Total** | **~7 ms** |
+
+      Now let us design the training pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "DCN v2 vs the original DCN -- what changed?"
+      - speaker: candidate
+        text: "The original DCN used a vector-based cross layer where the weight W was a vector, making it rank-1. DCN v2 uses a full matrix W, giving each cross layer much more expressive power. The paper showed this is critical for learning meaningful higher-order crosses. They also introduced a mix of experts variant where multiple cross networks specialize on different feature subsets."
+      - speaker: interviewer
+        text: "What about training cost?"
+      - speaker: candidate
+        text: "Training is expensive -- Meta trains DLRM on hundreds of GPUs using data parallelism for dense parameters and model parallelism for embedding tables. A full training run takes 1-3 days on a cluster. But the model only needs full retraining weekly, with daily fine-tuning on recent data to capture distribution shifts."
+    next: train_strategy
+
+  # ============ TRAINING ============
+  - id: train_strategy
+    stage: training
+    type: question
+    label: "Training Strategy"
+    speaker: interviewer
+    content: |
+      How should we train the CTR model? The key tension is between **freshness** (model reflects recent behavior) and **stability** (model does not overfit to noise).
+    choices:
+      - label: "Online learning with streaming updates"
+        answer: |
+          I would use **online learning** -- updating the model continuously as new impression/click events arrive.
+
+          **Why online learning:**
+          - User interests change rapidly. A user who searched "flights to Paris" this morning should see travel ads immediately, not after tomorrow's batch retrain.
+          - **Google's FTRL paper** showed that online-updated models outperformed daily-retrained models by **0.5-1% NCE** -- enormous at scale.
+          - Ad inventory changes constantly -- new ads launch hourly. Online learning adapts to new ads within minutes.
+
+          **Online training pipeline:**
+          ```
+          Click/No-click event (Kafka)
+               │
+               ▼
+          Join with impression features (Flink, < 5 min delay)
+               │
+               ▼
+          Compute gradient on this example
+               │
+               ▼
+          Update model weights (FTRL or streaming SGD)
+               │
+               ▼
+          Push updated model to serving (every 15 min)
+          ```
+
+          **Safeguards against instability:**
+          - **Learning rate decay:** New updates have diminishing impact, preventing catastrophic forgetting
+          - **Gradient clipping:** Clip individual gradients to prevent outlier events from distorting the model
+          - **Validation holdout:** Continuously evaluate on a 1% held-out stream. If NCE degrades > 0.5%, pause updates and investigate.
+          - **Snapshot rollback:** Keep the last 24 hourly snapshots. Can roll back within minutes if a bad update propagates.
+
+          **For deep models:** Full online training of deep networks is unstable. Instead, use a **hybrid approach:**
+          - Deep model retrained daily (batch)
+          - Lightweight online layer (logistic regression on top of deep features) updated in real-time
+          - This gives freshness from the online layer and expressiveness from the deep model
+
+          **Trade-off:** Online learning adds significant infrastructure complexity -- streaming joins, model versioning, rollback mechanisms. But the freshness advantage is substantial.
+        next: deploy_question
+      - label: "Batch retraining with daily cadence"
+        answer: |
+          I would use **daily batch retraining** with incremental fine-tuning on the most recent data.
+
+          **Why batch training:**
+          - **Simpler infrastructure:** Standard Spark/PyTorch training pipeline, no streaming complexity
+          - **Reproducible:** Every training run produces a versioned, testable model artifact
+          - **Thorough evaluation:** Can run comprehensive offline evaluation before deployment
+          - **Stability:** Model quality is predictable; no risk of bad real-time updates corrupting production
+
+          **Training pipeline:**
+          ```
+          Day N:
+            1. Extract training data: days [N-30, N-1] (30-day window)
+            2. Negative downsample to 10:1 ratio
+            3. Shuffle within each day, maintain day order across days
+            4. Train model (fine-tune from yesterday's checkpoint)
+            5. Evaluate on Day N holdout
+            6. Run calibration (isotonic regression on Day N data)
+            7. Compare metrics vs production model
+            8. Deploy if metrics improve (automated gating)
+          ```
+
+          **Incremental training (critical for efficiency):**
+          - Do NOT retrain from scratch daily -- too expensive for deep models
+          - Instead, **warm-start** from yesterday's model and fine-tune for 1 epoch on the last 3 days of data
+          - This takes ~2 hours instead of ~24 hours for full retraining
+          - Full retraining from scratch weekly as a "refresh"
+
+          **Freshness mitigation:**
+          - Use **real-time features** (user's recent clicks, ad's recent CTR) to capture short-term behavior changes
+          - These features are updated in the feature store every 5-15 minutes, even though the model weights are daily
+          - A user searching for "flights" gets relevant travel ads because the real-time features capture this, not the model weights
+
+          **Trade-off:** Daily models are always 12-24 hours stale on average. For time-sensitive signals (trending topics, breaking news), this can mean missed revenue. Real-time features partially compensate but not fully.
+        next: deploy_question
+    dialogue:
+      - speaker: interviewer
+        text: "Can you have the best of both worlds?"
+      - speaker: candidate
+        text: "Yes -- the hybrid approach is actually what most large ad systems use. You have a deep model retrained daily or weekly for long-term patterns, plus a lightweight online model (often LR) that captures real-time signals. The final prediction combines both. Google, Meta, and TikTok all use variations of this hybrid approach."
+
+  # ============ DEPLOYMENT ============
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Serving Architecture"
+    speaker: interviewer
+    content: |
+      How should we serve the CTR model at production scale? We need to score hundreds of candidate ads per request at millions of QPS.
+    choices:
+      - label: "Two-stage: lightweight filter + precise ranker"
+        answer: |
+          I would use a **two-stage cascade architecture** -- a fast first-pass filter followed by a precise deep ranker.
+
+          **Architecture:**
+          ```
+          Ad Request (1000 candidate ads)
+               │
+               ▼
+          Stage 1: Lightweight ranker (LR or small GBDT)
+            - Scores all 1000 ads in ~1ms
+            - Keeps top 100 candidates
+               │
+               ▼
+          Stage 2: Precise ranker (DCN v2 / DLRM)
+            - Scores 100 ads with full feature set
+            - ~5ms on GPU with batching
+               │
+               ▼
+          Post-ranking: Business rules, diversity, pacing
+            - Apply frequency caps, budget constraints
+            - ~1ms
+               │
+               ▼
+          Top-K ads served to user
+          ```
+
+          **Why two stages:**
+          - Scoring 1000 ads with a deep model would take ~50ms -- too slow
+          - The lightweight Stage 1 eliminates 90% of clearly irrelevant candidates
+          - Stage 2 only needs to distinguish among the competitive top candidates
+
+          **Stage 1 model:** Logistic regression with ~1000 sparse features
+          - Pre-computed user-ad affinity scores cached in Redis
+          - Model size: ~200MB, runs on CPU
+          - Can use **WAND (Weak AND)** algorithm for even faster approximate top-K retrieval
+
+          **Stage 2 model:** DCN v2 with full feature set
+          - Served on GPU (NVIDIA T4 or A10) with batch inference
+          - Batch the 100 candidates into a single forward pass
+          - INT8 quantized for 2-3x throughput
+
+          **Latency budget:**
+          | Stage | Latency | Ads Scored |
+          |-------|---------|-----------|
+          | Candidate retrieval | 2 ms | 10K → 1K |
+          | Stage 1 ranking | 1 ms | 1K → 100 |
+          | Feature fetch | 2 ms | 100 ads |
+          | Stage 2 ranking | 3 ms | 100 → 10 |
+          | Post-ranking | 1 ms | 10 → 3-5 |
+          | **Total** | **~9 ms** | |
+
+          **Trade-off:** The two-stage approach risks filtering out a good ad in Stage 1 that would have ranked well in Stage 2. Mitigate by being generous in Stage 1 (keep top 200 instead of top 100).
+        next: deploy_serving
+      - label: "Single-stage with model optimization"
+        answer: |
+          I would use a **single optimized model** that scores all candidates directly, relying on aggressive model optimization to meet latency requirements.
+
+          **Why single-stage:**
+          - Two-stage cascades introduce **information loss** -- the Stage 1 model might filter out ads that a more sophisticated model would rank highly
+          - With modern model optimization techniques, a single model can be fast enough
+          - Simpler architecture: one model to train, deploy, and monitor instead of two
+
+          **Optimization techniques to achieve <10ms:**
+
+          | Technique | Speedup | NCE Impact |
+          |-----------|---------|------------|
+          | INT8 quantization | 2-3x | < 0.05% degradation |
+          | Knowledge distillation | 3-5x (smaller student) | < 0.1% degradation |
+          | Pruning (50% weights) | 2x | < 0.05% degradation |
+          | ONNX Runtime / TensorRT | 2x | None |
+          | Embedding caching (top 1% IDs) | 50% latency reduction | None |
+
+          **Knowledge distillation approach:**
+          - Train a large **teacher model** (DCN v2, 100M params) offline with no latency constraint
+          - Distill into a **student model** (15M params) that mimics the teacher's predictions
+          - Student achieves 95% of teacher's accuracy at 5x faster inference
+          - Hinton et al. showed soft labels from the teacher transfer "dark knowledge" about feature interactions
+
+          **Serving infrastructure:**
+          - **GPU serving** with NVIDIA Triton Inference Server
+          - Batch requests: accumulate ads for 2ms, then batch-process
+          - Dynamic batching: if fewer than 100 ads, process immediately; if more, split into GPU batches
+          - Auto-scaling: Kubernetes HPA with GPU utilization target of 70%
+
+          **Latency profile (single model, 500 ads):**
+          - Feature assembly: 2ms
+          - Model inference (INT8, batched): 4ms
+          - Post-processing: 1ms
+          - Overhead: 1ms
+          - **Total: ~8ms**
+
+          **Trade-off:** Requires more expensive GPU infrastructure, and the optimization pipeline (distillation + quantization) adds engineering complexity. But the simplicity of a single model is valuable for debugging and iteration speed.
+        next: deploy_serving
+
+  - id: deploy_serving
+    stage: deployment
+    type: info
+    label: "Production Serving Details"
+    speaker: interviewer
+    content: |
+      Let us cover the critical production serving details that make or break a CTR system.
+
+      **A/B testing framework:**
+      - **Traffic splitting:** Hash(user_id) % 100 assigns users to buckets. Each experiment gets a range of buckets.
+      - **Minimum experiment duration:** 1 week for CTR experiments, 2 weeks for revenue experiments (need more data for revenue to converge statistically)
+      - **Statistical rigor:** Use sequential testing (not fixed-horizon p-values) to detect improvements early without inflating false positive rates
+      - **Guardrail metrics:** Revenue, user session length, advertiser satisfaction scores must not regress > 1%
+
+      **Model versioning and rollback:**
+      ```
+      Model Registry:
+        v42 (production) ← current serving model
+        v43 (canary)     ← new model, serving 5% traffic
+        v41 (rollback)   ← previous version, ready if needed
+      ```
+      - Canary deployment: new model serves 5% of traffic for 4 hours
+      - Automated promotion: if canary NCE and revenue both improve, promote to 100%
+      - Automated rollback: if any guardrail degrades > 0.5%, revert within 5 minutes
+
+      **Feature store reliability:**
+      - **Fallback values:** If Redis feature lookup fails, use default values (global averages) rather than dropping the ad
+      - **Feature freshness monitoring:** Alert if any feature is > 30 minutes stale
+      - **Graceful degradation:** If the deep model times out, fall back to the lightweight Stage 1 model's scores
+
+      **Cache strategy for embeddings:**
+      - User embeddings for the top 10% most active users (covers ~60% of traffic) cached in local memory on serving pods
+      - Cache refresh every 30 minutes via background thread
+      - Cache miss: fetch from distributed Redis, add ~1ms latency
+
+      Now let us discuss monitoring in production.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle the scenario where a model deployment goes wrong?"
+      - speaker: candidate
+        text: "We have three layers of protection. First, the canary catches most issues -- a bad model will show degraded NCE or revenue within 1-2 hours on the 5% canary traffic. Second, automated guardrail monitoring will trigger rollback if any critical metric degrades beyond threshold. Third, there is always a one-click manual rollback to the previous version. The entire rollback process takes under 5 minutes."
+    next: mon_strategy
+
+  # ============ MONITORING ============
+  - id: mon_strategy
+    stage: monitoring
+    type: question
+    label: "Monitoring Strategy"
+    speaker: interviewer
+    content: |
+      What monitoring would you set up for the CTR prediction system in production?
+    choices:
+      - label: "Model-centric monitoring (prediction quality focus)"
+        answer: |
+          I would set up **model-centric monitoring** focused on prediction quality and calibration drift.
+
+          **Layer 1: Real-time prediction monitoring**
+
+          | Metric | Alert Condition | Action |
+          |--------|----------------|--------|
+          | **Mean pCTR** | Deviates > 10% from 24h rolling avg | Investigate feature pipeline |
+          | **pCTR distribution** | KL divergence > threshold | Check for feature drift |
+          | **Actual vs predicted CTR** | Calibration ratio outside [0.9, 1.1] for 1 hour | Trigger recalibration |
+          | **Prediction latency P99** | > 15ms | Scale serving, check feature store |
+          | **Model error rate** | > 0.1% of predictions fail | Investigate serving infra |
+
+          **Layer 2: Daily offline evaluation**
+          - Recompute NCE, AUC, calibration on yesterday's data
+          - Compare against the model version that was serving
+          - Detect slow degradation trends (NCE creeping up over weeks)
+          - **Slice analysis:** Break down metrics by ad vertical, user segment, device type, geo. A model might degrade on mobile while improving on desktop -- aggregate metrics would miss this.
+
+          **Layer 3: Feature monitoring**
+          - **Feature drift:** PSI (Population Stability Index) for each top-50 feature, computed daily
+          - **Feature coverage:** What % of predictions are missing each feature? Alert if > 5%
+          - **Feature importance shift:** If SHAP-based importance ranking changes significantly, the data distribution may have shifted
+
+          **Calibration dashboard:**
+          - Real-time reliability diagram: predicted CTR (x-axis) vs actual CTR (y-axis) across 20 bins
+          - Per-vertical calibration: Some verticals (e.g., finance) may be systematically miscalibrated
+          - Automatic recalibration trigger: Retrain isotonic regression if ECE > 0.02
+
+          The key insight is that CTR models degrade gradually, not catastrophically. Daily monitoring catches the slow drift that real-time alerts miss.
+        next: mon_terminal_model
+      - label: "Business-centric monitoring (revenue + ecosystem)"
+        answer: |
+          I would set up **business-centric monitoring** that connects model quality to business outcomes and ecosystem health.
+
+          **Revenue monitoring (real-time):**
+
+          | Metric | Granularity | Alert Condition |
+          |--------|------------|----------------|
+          | **RPM (Revenue per mille)** | Per ad format, per geo | > 5% drop sustained 2 hours |
+          | **Fill rate** | Per ad slot type | Drops below 85% |
+          | **eCPM** | Per vertical | > 10% deviation from forecast |
+          | **Click yield** | Overall and per-position | > 3% drop |
+
+          **Advertiser ecosystem health:**
+          - **Advertiser ROI tracking:** Are advertisers getting the click volume they expect for their spend?
+          - **Budget utilization:** Are budgets being spent smoothly throughout the day, or are they exhausted by noon?
+          - **New advertiser onboarding:** How quickly do new advertisers' ads start receiving clicks? (Cold-start indicator)
+          - **Advertiser churn prediction:** If an advertiser's ROI drops 20% week-over-week, flag for account team review
+
+          **User experience signals:**
+          - **Ad engagement rate trend:** 7-day rolling average of CTR by user cohort
+          - **Ad complaint rate:** Users hiding or reporting ads (should trend downward)
+          - **Organic engagement impact:** Does showing more/different ads reduce time on page for organic content?
+
+          **Cross-system monitoring:**
+          - CTR model feeds into the **auction mechanism**. Monitor that auction outcomes are sane: second-price payments are non-negative, winning bids are reasonable
+          - **Budget pacing correctness:** Advertisers spending evenly across the day, not in bursts
+          - **Ad quality → CTR feedback loop:** If the ad quality model changes, our CTR predictions may need recalibration
+
+          **Weekly business review dashboard:**
+          Automated report showing: Revenue trend, top advertiser performance, model freshness, feature drift summary, A/B test results. Sent to ML team + ads business team every Monday.
+        next: mon_terminal_biz
+
+  - id: mon_terminal_model
+    stage: monitoring
+    type: terminal
+    label: "Model-Centric Path Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You have designed a comprehensive **CTR prediction system** with model-centric monitoring.
+
+      **Your design summary:**
+      - **Problem:** Predict click probability for ranking and pricing ads, serving at millions of QPS with <10ms latency
+      - **Metrics:** NCE as primary offline metric, with calibration (ECE) and AUC as complements; revenue and user engagement online
+      - **Data:** Billions of impression/click events with careful handling of position bias, click fraud, and class imbalance
+      - **Features:** Rich feature engineering combining ad, user, and context signals with either learned embeddings or hand-crafted crosses
+      - **Model:** Either LR + GBDT for maximum speed and simplicity, or DCN v2 / DLRM for maximum accuracy
+      - **Training:** Online learning for freshness or batch retraining for stability (ideally hybrid)
+      - **Deployment:** Two-stage cascade or single optimized model with canary rollouts
+      - **Monitoring:** Real-time prediction quality, daily calibration checks, feature drift detection
+
+      **Key strengths of your design:**
+      - Strong understanding of the revenue-calibration connection
+      - Practical serving architecture that meets latency constraints
+      - Comprehensive monitoring that catches both sudden failures and gradual degradation
+
+      **Areas for further exploration:**
+      - Multi-task learning (predicting CTR, conversion rate, and engagement jointly)
+      - Sequence modeling for user behavior (Transformer-based user history encoding)
+      - Causal inference for debiasing position effects
+      - Privacy-preserving techniques (differential privacy, federated learning) for user features
+
+      Outstanding end-to-end design for one of the most impactful ML systems in industry!
+
+  - id: mon_terminal_biz
+    stage: monitoring
+    type: terminal
+    label: "Business-Centric Path Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You have designed a comprehensive **CTR prediction system** with business-centric monitoring.
+
+      **Your design summary:**
+      - **Problem:** Predict click probability for ad ranking and auction pricing at massive scale
+      - **Metrics:** Revenue-aligned or user-experience-aligned evaluation with comprehensive A/B testing
+      - **Data:** Multi-source data pipeline with freshness requirements and quality safeguards
+      - **Features:** Dense embeddings or sparse hand-crafted features with statistical aggregations
+      - **Model:** Traditional LR/GBDT stack or modern deep architectures (DCN v2, DLRM)
+      - **Training:** Online or batch pipeline with hybrid approach for best of both worlds
+      - **Deployment:** Multi-stage cascade or single optimized model with canary deployment
+      - **Monitoring:** Revenue dashboards, advertiser ecosystem health, user experience signals, and cross-system integrity checks
+
+      **Key strengths of your design:**
+      - Holistic view connecting model quality to business outcomes
+      - Attention to ecosystem health (advertisers AND users)
+      - Practical awareness of cross-system dependencies (auction, pacing, quality)
+
+      **Areas for further exploration:**
+      - Counterfactual evaluation for comparing models without A/B tests
+      - Explore-exploit strategies for new ads (contextual bandits)
+      - Cross-device user matching for better personalization
+      - Real-time auction design changes (from second-price to VCG or first-price)
+
+      This design demonstrates the maturity needed for building ML systems that drive real business impact. Great job!

@@ -1,0 +1,713 @@
+id: demand-forecasting
+title: "E-commerce Demand Forecasting"
+description: "Create a demand forecasting system for an e-commerce supply chain."
+companies: ["Amazon", "Walmart", "Shopify"]
+domains: ["Time Series", "Tabular/Structured"]
+root: pd_start
+
+nodes:
+  # ============ PROBLEM DEFINITION ============
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design a **demand forecasting system** for an e-commerce supply chain.
+
+      **Business context:**
+      - The retailer manages **~10M SKUs** across 200+ fulfillment centers
+      - Accurate demand forecasts drive: **inventory purchasing** (what to buy), **warehouse allocation** (where to store), **logistics planning** (how to ship), and **promotional planning** (when to discount)
+      - Forecast horizons: **1-day** (same-day delivery), **7-day** (replenishment), **30-day** (purchasing), **90-day** (capacity planning)
+      - Amazon reportedly saves **$1B+/year** from improved demand forecasting accuracy
+
+      **The challenge at scale:**
+      - **Intermittent demand**: 60-70% of SKUs sell <1 unit/day. Many days have zero sales (sparse data)
+      - **Product lifecycle**: New products launch weekly with no history. Old products get discontinued
+      - **Promotions**: Flash sales, Prime Day, Black Friday cause 5-50x demand spikes
+      - **External shocks**: Weather, pandemics, viral social media, competitor actions
+      - **Cannibalization**: Promoting Product A may reduce demand for similar Product B
+      - **Long tail**: The top 1% of SKUs drive 50% of revenue, but the long tail of 10M SKUs collectively matters
+
+      Let's scope the ML problem.
+    dialogue:
+      - speaker: interviewer
+        text: "Today we'll design a demand forecasting system for an e-commerce supply chain managing about 10 million SKUs."
+      - speaker: candidate
+        text: "That's a massive scale. Intermittent demand for the long tail of SKUs is going to be a major challenge."
+      - speaker: interviewer
+        text: "Exactly. 60-70% of SKUs sell less than 1 unit per day. And promotions can cause 5 to 50x demand spikes."
+      - speaker: candidate
+        text: "So we need to handle both the steady-state forecasting and the extreme promotional events."
+      - speaker: interviewer
+        text: "Right. And the business impact is enormous -- Amazon attributes over $1 billion in annual savings to forecasting improvements. Let's scope this."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: info
+    label: "Problem Scope"
+    speaker: interviewer
+    content: |
+      **Refined scope:**
+      - **Input**: SKU ID, fulfillment center, forecast date, forecast horizon, promotional calendar
+      - **Output**: Point forecast (expected units) + prediction intervals (P10, P50, P90)
+      - **Granularity**: Per-SKU, per-fulfillment-center, per-day
+      - **Update frequency**: Daily batch refresh with intra-day adjustments for fast-moving items
+
+      **Downstream consumers and their needs:**
+
+      | Consumer | Horizon | Key Requirement |
+      |----------|---------|----------------|
+      | Same-day delivery | 1 day | High accuracy on top 10K SKUs |
+      | Replenishment | 7 days | Total units needed per warehouse |
+      | Purchasing | 30 days | Lead time for supplier orders |
+      | Capacity planning | 90 days | Warehouse space and staffing |
+      | Promotions | 1-30 days | Uplift estimation for discounts |
+
+      **Available data:**
+      - **Transaction history**: 3 years of daily sales per SKU per fulfillment center
+      - **Product catalog**: Category hierarchy, brand, price, weight, dimensions, description
+      - **Promotional calendar**: Past and planned promotions (discount %, visibility, duration)
+      - **Pricing data**: Current and historical prices, competitor prices (where available)
+      - **Inventory levels**: Current stock per SKU per warehouse (stockouts = censored demand!)
+      - **External data**: Weather, holidays, economic indicators, social media mentions
+      - **Web traffic**: Page views, add-to-cart, search queries per SKU
+
+      Let's decide on the forecasting approach.
+    dialogue:
+      - speaker: interviewer
+        text: "We're forecasting per-SKU, per-fulfillment-center, per-day demand with prediction intervals. Both point forecasts and uncertainty matter."
+      - speaker: candidate
+        text: "Prediction intervals are critical for supply chain -- if P90 demand is 100 units, we need at least 100 in stock to avoid 90% of stockouts."
+      - speaker: interviewer
+        text: "Exactly. The P10-P90 range directly maps to inventory safety stock calculations."
+    next: pd_formulation
+
+  - id: pd_formulation
+    stage: problem_definition
+    type: question
+    label: "Forecasting Approach"
+    speaker: interviewer
+    content: |
+      How should we approach demand forecasting at this scale? The choice of framework drives everything from data preparation to serving.
+    dialogue:
+      - speaker: interviewer
+        text: "How would you approach demand forecasting for 10 million SKUs? The framework choice drives the entire system."
+      - speaker: candidate
+        text: "The two main paradigms are building a global deep learning model that shares patterns across SKUs, or using a hierarchical approach with statistical baselines and ML adjustments."
+      - speaker: interviewer
+        text: "Walk me through each approach."
+    choices:
+      - label: "Global deep learning: One model learns patterns across all SKUs"
+        answer: |
+          I'd use a **global deep learning model** that learns shared demand patterns across all SKUs simultaneously.
+
+          **Why global?**
+          - With 10M SKUs, most individual SKUs have sparse data (<1 sale/day). A global model can learn that "electronics accessories in the $10-20 range follow similar seasonal patterns" and transfer this knowledge to sparse SKUs
+          - **Cross-learning**: The model learns that when a new iPhone launches, demand for all iPhone cases spikes. This kind of category-level pattern is impossible to learn from individual SKU histories
+          - **Amazon's approach**: Amazon's published research on DeepAR (2019) demonstrates that global models significantly outperform per-SKU models, especially for intermittent demand
+
+          **Architecture choice: DeepAR or Temporal Fusion Transformer (TFT)**
+          - DeepAR: Autoregressive RNN that generates probabilistic forecasts. Trained on all SKUs jointly. Each SKU is a separate time series with shared model parameters
+          - TFT: Attention-based model that handles static (product attributes) and dynamic (price, promotions) covariates naturally. Better interpretability via attention weights
+
+          **Training data**: Concatenate all SKU time series into one dataset. Each training example is a (history_window, future_window) pair from one SKU. The model learns a global mapping from history+covariates to future demand.
+
+          **Key advantage**: Zero-shot forecasting for new products -- provide product attributes and the model generates forecasts using learned patterns from similar products.
+        next: met_point
+      - label: "Hierarchical: Statistical baselines + ML uplift adjustment"
+        answer: |
+          I'd use a **hierarchical approach** combining statistical baselines with ML adjustments for promotions and events.
+
+          **Why hierarchical?**
+          - **Proven in industry**: Walmart, Target, and most traditional retailers use hierarchical forecasting. Battle-tested over decades
+          - **Interpretable**: Stakeholders understand "base demand = 100, promotional uplift = +50, seasonal factor = 1.2, forecast = 180"
+          - **Robust**: Statistical baselines are stable. ML adjustments can be turned off if they misbehave, falling back to solid baselines
+          - **Modular**: Each component can be improved independently
+
+          **Three-layer architecture:**
+
+          1. **Base forecast (statistical)**: For each SKU, fit exponential smoothing (ETS) or Prophet to capture level, trend, and seasonality. Simple but captures 70-80% of the signal
+          2. **ML adjustment layer**: XGBoost model that predicts the residual (actual - baseline). Uses promotional features, pricing, competitor data, events, weather. Captures what statistics miss
+          3. **Reconciliation layer**: Ensure forecasts are coherent across the hierarchy (SKU < subcategory < category < department < total). Use MinT or OLS reconciliation
+
+          **Hierarchy structure:**
+          ```
+          Total demand
+          └── Department (Electronics, Home, Fashion, ...)
+              └── Category (Phones, Accessories, ...)
+                  └── Subcategory (iPhone cases, Samsung cases, ...)
+                      └── SKU (iPhone 15 Pro Max Clear Case)
+          ```
+
+          **Key advantage**: Hierarchical reconciliation ensures that SKU-level forecasts sum to category-level forecasts, which sum to department-level. This consistency is critical for purchasing and capacity planning.
+
+          **Cold start**: New SKUs inherit the baseline from their subcategory or similar products. The ML layer adjusts based on product attributes.
+        next: met_business
+
+  # ============ METRICS ============
+  - id: met_point
+    stage: metrics
+    type: info
+    label: "Point & Probabilistic Metrics"
+    speaker: interviewer
+    content: |
+      For the global deep learning approach, we need both point forecast and probabilistic metrics.
+
+      **Point forecast metrics:**
+      - **WAPE (Weighted Absolute Percentage Error)**: `sum(|actual - predicted|) / sum(actual)`. Better than MAPE for intermittent demand because MAPE blows up when actual = 0. Target: <20% for top 10K SKUs, <35% for long tail
+      - **RMSSE (Root Mean Squared Scaled Error)**: From M5 competition. Scales error by the in-sample naive forecast error, making it comparable across SKUs with different scales
+      - **Bias**: `sum(predicted - actual) / sum(actual)`. Must be near 0 -- systematic over-forecasting wastes inventory, under-forecasting causes stockouts
+
+      **Probabilistic metrics:**
+      - **CRPS (Continuous Ranked Probability Score)**: Evaluates the full predicted distribution. Lower is better. The gold standard for probabilistic forecasting evaluation
+      - **Quantile loss**: For P10, P50, P90 predictions, compute pinball loss at each quantile. Directly measures the quality of prediction intervals
+      - **Prediction interval coverage**: Do 80% of actuals fall within the P10-P90 interval? If coverage is <80%, intervals are too narrow (underestimating uncertainty)
+
+      **Stratified evaluation (critical for 10M SKUs):**
+      - By **demand volume**: High-volume (>10/day), medium (1-10/day), intermittent (<1/day), near-zero (<1/week)
+      - By **category**: Electronics vs groceries vs fashion have different patterns
+      - By **lifecycle stage**: Growing, mature, declining, new launch
+      - By **horizon**: 1-day accuracy should be much better than 90-day
+
+      **Business metrics:**
+
+      | Metric | Target | Why It Matters |
+      |--------|--------|---------------|
+      | **Stockout rate** | <2% | Lost sales and customer dissatisfaction |
+      | **Overstock rate** | <15% | Inventory carrying cost (~25% of value/year) |
+      | **Inventory turns** | Improve by 5% | Capital efficiency |
+      | **Forecast value added (FVA)** | >0 vs naive baseline | Is ML better than simple rules? |
+    dialogue:
+      - speaker: interviewer
+        text: "WAPE is our primary point metric because MAPE blows up on intermittent demand. CRPS is the gold standard for probabilistic forecasting."
+      - speaker: candidate
+        text: "Right, and we need to stratify by demand volume. The long tail of intermittent SKUs needs special attention."
+      - speaker: interviewer
+        text: "Exactly. The business metrics -- stockout rate, overstock rate, inventory turns -- are what supply chain teams actually care about."
+    next: data_pipeline
+
+  - id: met_business
+    stage: metrics
+    type: info
+    label: "Business-Aligned Metrics"
+    speaker: interviewer
+    content: |
+      For the hierarchical approach, let's define metrics that align with supply chain operations.
+
+      **Forecast accuracy metrics:**
+      - **WAPE by hierarchy level**: Measure at SKU, subcategory, category, and department levels. Higher levels should have lower error (aggregation smooths noise)
+      - **Bias by department**: Supply chain planners care deeply about systematic bias. Over-forecasting by 10% across all electronics = $100M in excess inventory
+      - **Forecast Value Added (FVA)**: Compare ML-adjusted forecast vs statistical baseline. If ML doesn't improve on the baseline, remove it. FVA target: >5% WAPE improvement
+
+      **Supply chain operational metrics:**
+
+      | Metric | Current | Target | Impact |
+      |--------|---------|--------|--------|
+      | **Stockout rate** | 3.5% | <2% | +$500M revenue recovery |
+      | **Days of supply** | 45 days | 38 days | -$2B inventory investment |
+      | **Markdown rate** | 12% | 9% | +$300M margin improvement |
+      | **Perfect order rate** | 88% | 93% | Customer satisfaction |
+
+      **Promotional forecast metrics:**
+      - **Promotional uplift accuracy**: For items on promotion, what's the MAPE of the predicted uplift over baseline?
+      - **Cannibalization estimation**: When Product A is promoted, how accurately do we predict the demand decrease for similar Product B?
+      - **Post-promotion dip**: After promotions end, demand often drops below baseline (pull-forward effect). Do we predict this correctly?
+
+      **Hierarchical coherence metric:**
+      - Sum of SKU forecasts must equal category forecast (within 1% tolerance)
+      - If reconciliation changes individual SKU forecasts by >20%, the bottom-up forecasts are unreliable for that category
+
+      **Weekly business review**: Present forecast accuracy trends to supply chain leadership, highlighting top improvement opportunities and worst-performing segments.
+    dialogue:
+      - speaker: interviewer
+        text: "For hierarchical forecasting, FVA -- forecast value added -- is critical. If the ML layer doesn't improve on the statistical baseline, remove it."
+      - speaker: candidate
+        text: "And the supply chain metrics are what matter most. Reducing stockout rate from 3.5% to 2% could recover $500 million in revenue."
+      - speaker: interviewer
+        text: "Exactly. And promotional forecast accuracy is its own challenge -- uplift estimation, cannibalization, and post-promotion dips."
+    next: data_pipeline
+
+  # ============ DATA (CONVERGED) ============
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      Let's design the data pipeline for demand forecasting.
+
+      **Data sources:**
+
+      | Source | Key Fields | Volume | Challenge |
+      |--------|-----------|--------|-----------|
+      | Transactions | SKU, qty, price, timestamp, warehouse | ~500M orders/day | Huge scale |
+      | Product catalog | Category, brand, attributes, weight, price | ~10M SKUs | Hierarchy management |
+      | Promotions | SKU, discount %, type, start/end, visibility | ~100K active promos | Lead time encoding |
+      | Inventory | SKU, warehouse, stock_level, reorder_point | Real-time | Stockout censoring |
+      | Web traffic | SKU, page_views, add_to_cart, search_rank | Hourly | Leading indicator |
+      | External | Weather, holidays, CPI, social media | Daily | Sparse, noisy |
+
+      **Critical data challenge -- Stockout censoring:**
+      - When a SKU is out of stock, sales = 0 but demand != 0. Using raw sales as training labels **underestimates** true demand
+      - **Mitigation strategies**:
+        1. **Flag stockout periods**: Mark days where inventory = 0. Exclude from training or impute demand
+        2. **Demand imputation**: Use search queries and page views as proxies. If a SKU gets 500 views but 0 sales, demand is not zero
+        3. **Tobit regression**: Statistical model designed for censored data -- models demand as latent variable
+      - This is one of the most important data issues in demand forecasting!
+
+      **Data processing pipeline:**
+      1. **Daily aggregation**: Sum transactions to (SKU, warehouse, date, units_sold, revenue)
+      2. **Stockout flagging**: Join with inventory snapshots. If ending inventory = 0 and no replenishment, flag as potential stockout
+      3. **Promotion encoding**: For each (SKU, date), encode active promotions (discount %, type, days since start, days until end)
+      4. **Feature materialization**: Compute rolling aggregates (7d, 30d, 90d sales), seasonal indices, trend components
+      5. **Hierarchy alignment**: Ensure product hierarchy is up-to-date (new products mapped, discontinued products flagged)
+
+      **Data quality monitoring:** Alert on: sudden zero-sales clusters (supply chain issue?), price data gaps, missing promotional calendars, hierarchy mismatches.
+    dialogue:
+      - speaker: interviewer
+        text: "The most critical data challenge is stockout censoring. When a product is out of stock, sales are zero but demand is not zero."
+      - speaker: candidate
+        text: "Right. If we train on raw sales, we systematically underestimate demand for popular items that frequently stock out."
+      - speaker: interviewer
+        text: "Exactly. We use search queries and page views as demand proxies, and flag stockout periods in the training data."
+    next: feat_question
+
+  # ============ FEATURES ============
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Strategy"
+    speaker: interviewer
+    content: |
+      What features would you engineer for demand forecasting? The right features capture both regular patterns and exceptional events.
+    dialogue:
+      - speaker: interviewer
+        text: "What features capture demand patterns effectively? We need to handle both regular seasonality and promotional spikes."
+      - speaker: candidate
+        text: "I see two strategies: focusing on temporal patterns in the sales history, or emphasizing external signals and promotional features."
+      - speaker: interviewer
+        text: "Tell me about the trade-offs."
+    choices:
+      - label: "Historical patterns: Lags, seasonality, trend decomposition"
+        answer: |
+          I'd prioritize **time series features** that capture each SKU's demand patterns.
+
+          **Lag features:**
+          - Sales at lag 1, 7, 14, 28, 364 days (same day last week, last year)
+          - Rolling mean and standard deviation: 7-day, 30-day, 90-day windows
+          - Rolling min/max (captures demand range)
+          - **Exponentially weighted moving average** (EWMA) with alpha=0.1 (smoothed trend)
+
+          **Seasonality features:**
+          - Day of week (one-hot or embedding) -- most products have strong weekly patterns
+          - Month (sinusoidal encoding) -- captures annual seasonality
+          - Week of year -- more granular than month
+          - **Seasonal index**: For each SKU, compute the average demand ratio for each day-of-week and month. A seasonal index of 1.3 on Mondays means this SKU sells 30% more on Mondays
+
+          **Trend features:**
+          - Linear trend slope over last 30, 90, 365 days (is demand growing or declining?)
+          - Lifecycle stage classifier: new/growth/mature/declining (derived from trend analysis)
+          - **Year-over-year growth rate**: This SKU is growing 20% vs last year
+
+          **Demand level features:**
+          - Average daily demand (ADU) -- determines which forecasting tier the SKU belongs to
+          - Coefficient of variation (CV = std/mean) -- high CV = lumpy demand, needs different treatment
+          - Zero-demand frequency: What fraction of days have zero sales?
+
+          **Cross-SKU features:**
+          - Category-level demand trend (is the whole category growing?)
+          - Relative demand within category (is this SKU gaining or losing share?)
+
+          These features capture the **predictable component** of demand. For 60-70% of SKUs with sparse data, lag-based features are especially important because they encode what little signal exists.
+        next: mod_question
+      - label: "External signals: Promotions, pricing, events, web traffic"
+        answer: |
+          I'd emphasize **external and forward-looking features** that capture demand drivers beyond historical patterns.
+
+          **Promotional features (highest impact for e-commerce):**
+          - Is the SKU on promotion today? What type (Lightning Deal, Coupon, Subscribe & Save)?
+          - Discount depth (10%, 25%, 50%) -- deeper discounts create larger spikes
+          - Promotion visibility (homepage banner, category page, email campaign)
+          - Days since promotion start, days until promotion end
+          - **Historical promotional lift**: Average demand multiplier when this SKU (or similar SKUs) were on this type of promotion before
+          - **Cross-promotion effects**: Is a complementary product on promotion? (Printer on sale -> ink cartridge demand rises)
+
+          **Pricing features:**
+          - Current price vs 30-day average price (relative discount even without "promotion")
+          - Price rank within category (cheapest, mid-range, premium)
+          - Competitor price (where available from scraping or price comparison APIs)
+          - Price elasticity estimate: For this SKU, a 10% price drop historically increases demand by X%
+
+          **Web traffic features (leading indicators):**
+          - Page views yesterday (1-2 day lead time on purchases)
+          - Add-to-cart count (strong purchase intent signal)
+          - Search query volume for this product's keywords
+          - Wishlist additions (signals future demand, especially pre-holiday)
+
+          **External events:**
+          - Weather (umbrellas when rain forecast, sunscreen for heat waves)
+          - Holidays (Mother's Day, Back-to-School, Prime Day)
+          - Cultural events (Super Bowl for TVs, new iPhone launch for accessories)
+          - Social media virality: Product mentions on TikTok/Instagram (early signal for demand spikes)
+
+          These features capture **why demand changes**, not just that it changed historically. Critical for promotional forecasting and new product launches.
+        next: mod_question
+
+  # ============ MODEL ============
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Model Architecture"
+    speaker: interviewer
+    content: |
+      What model architecture would you choose for demand forecasting at this scale?
+    dialogue:
+      - speaker: interviewer
+        text: "What model architecture works best for 10 million SKUs with highly varied demand patterns?"
+      - speaker: candidate
+        text: "The main trade-off is between deep learning models that share patterns across SKUs and tree-based models that are faster to train and more interpretable."
+      - speaker: interviewer
+        text: "Walk me through your recommendation."
+    choices:
+      - label: "DeepAR: Probabilistic autoregressive RNN across all SKUs"
+        answer: |
+          I'd use **Amazon's DeepAR** as the primary forecasting model.
+
+          **Why DeepAR for demand forecasting?**
+          - **Designed for this problem**: Amazon built DeepAR specifically for retail demand forecasting at scale. Published at NeurIPS 2019.
+          - **Global model**: One model trained on all 10M SKU time series simultaneously. The autoregressive RNN shares parameters across SKUs, learning universal demand patterns
+          - **Probabilistic output**: Produces full predictive distributions (not just point forecasts). Directly outputs P10, P50, P90 quantiles needed for inventory optimization
+          - **Handles intermittent demand**: Uses a negative binomial output distribution for count data, naturally handling zero-inflated demand
+
+          **Architecture:**
+          ```
+          For each SKU at time t:
+          Input: [historical_demand_{t-k:t}, covariates_{t-k:t+h}]
+               -> LSTM encoder (hidden_size=128, 2 layers)
+               -> LSTM decoder (autoregressive, teacher forcing during training)
+               -> Distribution head: μ(t+h), α(t+h) for Negative Binomial
+          ```
+
+          **Key design choices:**
+          - **Negative binomial likelihood**: Better than Gaussian for count data with overdispersion (variance > mean). Most SKUs have this property
+          - **Covariates**: Static (product attributes, category) and dynamic (price, promotions, day-of-week). Dynamic covariates known in the future (promotions calendar) are fed directly to the decoder
+          - **Scaling**: Normalize each SKU's history by its mean. The model learns relative patterns, then rescales at output
+
+          **Training**: All SKUs in one model. Batch = random SKU-window pairs. ~100K training steps on 8 GPUs takes ~12 hours.
+          **Cold start**: For new SKUs, provide static covariates only. The model generates forecasts using learned patterns from similar product categories.
+        next: train_strategy
+      - label: "LightGBM per demand tier with ensemble"
+        answer: |
+          I'd use **LightGBM** with tier-based modeling and ensemble strategies.
+
+          **Tier-based approach (10M SKUs are not homogeneous):**
+
+          | Tier | Criteria | SKU Count | Model Strategy |
+          |------|----------|-----------|---------------|
+          | **A (High)** | >10 units/day | ~100K | Per-SKU LightGBM with rich features |
+          | **B (Medium)** | 1-10 units/day | ~1M | Category-level LightGBM with SKU features |
+          | **C (Intermittent)** | <1 unit/day | ~5M | Croston's method + ML adjustment |
+          | **D (Near-zero)** | <1 unit/week | ~4M | Simple rules (last 90d avg) |
+
+          **Tier A model (top 100K SKUs):**
+          - Individual LightGBM per SKU (enough data to learn SKU-specific patterns)
+          - ~200 features: lags, seasonality, promotions, pricing, web traffic, weather
+          - Quantile regression for P10, P50, P90
+          - Retrain weekly with last 2 years of data
+
+          **Tier B model (1M SKUs):**
+          - One LightGBM per product category (~500 categories)
+          - SKU-level features (historical demand level, price tier) plus category-level patterns
+          - Cross-learning within category improves sparse SKU forecasts
+
+          **Tier C model (5M intermittent SKUs):**
+          - **Croston's method** as baseline: Separately forecast inter-demand intervals and demand size
+          - ML adjustment: XGBoost predicts residual from Croston's, using product attributes and category signals
+          - Focus on getting the demand probability right (will any units sell?) rather than exact count
+
+          **Ensemble for Tier A**: Blend LightGBM with simple exponential smoothing (ETS). LightGBM captures promotion/event effects; ETS captures smooth trends. Weighted average: 0.6*LightGBM + 0.4*ETS (calibrated on validation set).
+        next: train_strategy
+      - label: "Temporal Fusion Transformer for multi-horizon forecasting"
+        answer: |
+          I'd use the **Temporal Fusion Transformer (TFT)** for multi-horizon probabilistic forecasting.
+
+          **Why TFT for demand forecasting?**
+          - **Multi-horizon**: Produces all forecast horizons (1, 7, 30, 90 days) in a single forward pass. No separate models needed
+          - **Variable selection**: Automatically learns which features matter for each SKU and horizon. Promotions may matter for 7-day forecasts but not 90-day
+          - **Attention interpretability**: Shows which historical time steps and future events the model focuses on -- "this forecast is driven by the planned Prime Day promotion"
+          - **Outperforms DeepAR**: Google's TFT paper shows 4-7% improvement over DeepAR on retail demand forecasting benchmarks
+
+          **Architecture for demand forecasting:**
+          ```
+          Static inputs (product attributes) -> Variable Selection -> Static Enrichment
+          Past inputs (historical sales, prices) -> LSTM Encoder -> Temporal Self-Attention
+          Known future inputs (promotions, holidays, day-of-week) -> LSTM Decoder
+          All -> Gated Residual Networks -> Quantile outputs (P10, P25, P50, P75, P90)
+          ```
+
+          **Key design decisions:**
+          - **5 quantile outputs**: P10, P25, P50, P75, P90. More granular uncertainty estimation than just P10/P50/P90
+          - **Static covariates**: Product category embedding, brand embedding, price tier, demand volume tier
+          - **Known future covariates**: Promotional calendar, holiday indicators, day-of-week, price plan
+          - **Past covariates**: Historical sales, historical prices, stockout flags, web traffic
+
+          **Handling intermittent demand**: Add a **zero-inflation head** alongside quantile outputs. First predict P(demand > 0), then predict quantiles of demand given demand > 0. This two-stage approach handles the many zeros in sparse SKU data.
+
+          **Training**: Global model on all SKUs. ~24 hours on 8 A100 GPUs. Larger than LightGBM investment but better accuracy.
+        next: train_strategy
+
+  # ============ TRAINING ============
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: interviewer
+    content: |
+      Let's discuss training strategy for demand forecasting.
+
+      **Time-based validation (critical):**
+      - Train: 2 years of data (captures full seasonality cycles)
+      - Validation: Next 3 months (recent patterns)
+      - Test: Most recent 3 months (never seen during development)
+      - **Walk-forward backtesting**: Simulate production by training on [month 1..T] and forecasting [T+1..T+3], sliding forward. Compute metrics across all windows
+
+      **Handling promotions in training:**
+      - **Feature engineering**: Encode promotional events as features (discount %, type, visibility)
+      - **Promotional uplift isolation**: To learn baseline demand separately from promotional effects, need periods with and without promotions for similar SKUs
+      - **Caution**: Don't train on promotional demand and expect the model to predict non-promotional demand. The model needs to see both conditions
+
+      **Intermittent demand strategies:**
+      - For SKUs selling <1 unit/day, standard regression loss (MSE) is dominated by zeros
+      - **Tweedie loss**: Naturally handles zero-inflated count data. The Tweedie distribution has a point mass at zero
+      - **Zero-inflated models**: Two-stage: P(demand > 0) classifier + demand magnitude regressor
+      - **Temporal aggregation**: If daily is too sparse, forecast at weekly level and disaggregate
+
+      **Computational budget:**
+      - Deep learning (DeepAR/TFT): 12-24 hours on GPU cluster. Weekly retraining
+      - LightGBM tiers: Tier A (100K SKUs) ~2 hours, Tier B (1M) ~4 hours, Tier C (5M) ~6 hours. Daily retraining feasible
+      - **Ensemble**: If budget allows, train both approaches and blend
+
+      **Experiment tracking**: MLflow or Weights & Biases for experiment management. Track WAPE, CRPS, bias by tier and category across all experiments. Maintain a leaderboard of model versions.
+    dialogue:
+      - speaker: interviewer
+        text: "Walk-forward backtesting is essential -- it simulates production conditions by training on historical data and forecasting the next period."
+      - speaker: candidate
+        text: "And Tweedie loss is much better than MSE for intermittent demand. The standard loss is dominated by the zeros."
+      - speaker: interviewer
+        text: "Good insight. For deep models, we retrain weekly on GPU. For LightGBM, daily retraining is feasible given the smaller compute cost."
+      - speaker: candidate
+        text: "What about promotional periods in training? We need the model to see both promotional and non-promotional conditions."
+      - speaker: interviewer
+        text: "Exactly. Encode promotions as features, and ensure training data includes both states. Let's move to deployment."
+    next: deploy_question
+
+  # ============ DEPLOYMENT ============
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Deployment Architecture"
+    speaker: interviewer
+    content: |
+      How would you deploy the forecasting system to serve 10M SKUs across multiple horizons?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you deploy forecasts for 10 million SKUs? Different consumers need different update frequencies."
+      - speaker: candidate
+        text: "The key architectural decision is how to handle the different update cadences -- some consumers need daily refreshes, others need weekly."
+      - speaker: interviewer
+        text: "Consider both the batch forecasting pipeline and how downstream systems consume predictions."
+    choices:
+      - label: "Nightly batch pipeline with forecast store"
+        answer: |
+          I'd build a **nightly batch pipeline** writing to a centralized forecast store.
+
+          **Architecture:**
+          ```
+          Nightly at 1 AM:
+          Data Warehouse -> Feature Assembly (Spark) -> Model Inference -> Post-Processing -> Forecast Store
+
+          Consumers:
+          Replenishment system -> Forecast Store API -> SKU-level daily forecasts
+          Capacity planning -> Forecast Store API -> Aggregated market forecasts
+          Purchasing -> Forecast Store API -> 30-day horizon with confidence intervals
+          ```
+
+          **Nightly pipeline steps:**
+          1. **Data freshness check** (10 min): Verify all data sources updated. Abort if critical data missing
+          2. **Feature assembly** (2 hours): Spark job computing features for all 10M SKUs x 90 days = 900M feature vectors
+          3. **Model inference** (1-3 hours): Score all 900M predictions. For deep models, use GPU cluster; for LightGBM, Spark + TreeLite
+          4. **Post-processing** (30 min): Apply business rules (minimum 0, round to integers for units), reconcile hierarchy, compute confidence intervals
+          5. **Quality validation** (15 min): Compare vs yesterday's forecast. Flag SKUs with >50% change for review. Validate hierarchy coherence
+          6. **Write to forecast store** (15 min): Atomic swap to new forecast tables
+
+          **Forecast store schema:**
+          ```
+          sku_id | warehouse_id | date | p10 | p50 | p90 | model_version | computed_at
+          ```
+
+          **Intra-day adjustments:**
+          - For top 10K SKUs (high-value, fast-moving), run a lightweight refresh every 4 hours using latest web traffic and order signals
+          - **Anomaly-triggered refresh**: If a SKU's actual sales exceed P90 forecast by 2x (viral event?), trigger immediate re-forecast
+
+          **Fallback**: If nightly pipeline fails, use yesterday's forecast shifted by 1 day. Alert operations team immediately.
+        next: mon_question
+      - label: "Event-driven forecasting with real-time adjustments"
+        answer: |
+          I'd build an **event-driven system** that adjusts forecasts in response to real-time signals.
+
+          **Hybrid architecture:**
+          ```
+          Base forecast (nightly batch):
+          All 10M SKUs -> Deep model -> Base forecasts for 90 days
+
+          Real-time adjustments (streaming):
+          Event stream (Kafka) -> Adjustment engine -> Updated forecast = base * adjustment_factor
+          ```
+
+          **Events that trigger forecast adjustments:**
+
+          | Event | Adjustment Logic | Latency |
+          |-------|-----------------|---------|
+          | Promotion starts | Apply historical uplift curve for this promo type | <5 min |
+          | Competitor price drop | Increase forecast by cross-elasticity estimate | <1 hour |
+          | Viral social media | Detect spike in mentions -> increase forecast 2-5x | <30 min |
+          | Stockout at competitor | Increase forecast by estimated share shift | <1 hour |
+          | Weather forecast change | Apply weather-demand elasticity per category | <1 hour |
+          | Actual sales anomaly | If actuals >> forecast, revise upward | <1 hour |
+
+          **Adjustment engine (Flink):**
+          - Consumes events from Kafka
+          - For each relevant SKU, computes an **adjustment multiplier** based on event type and historical response patterns
+          - Writes `adjusted_forecast = base_forecast * multiplier` to forecast store
+          - Multipliers are bounded (0.5x to 5.0x) to prevent runaway adjustments
+
+          **Why event-driven?**
+          - Supply chain agility: "A TikTok influencer just featured our product -- increase forecast and trigger emergency replenishment"
+          - Promotions: Apply uplift curves immediately when promotions go live, not next morning
+          - Reduces forecast lag from 12-24 hours (batch) to <1 hour (event-driven)
+
+          **Trade-off**: More complex infrastructure (Kafka, Flink, event detection). But for a retailer doing $100B+ in sales, even a 1% improvement in forecast responsiveness = $1B impact.
+        next: mon_question
+
+  # ============ MONITORING ============
+  - id: mon_question
+    stage: monitoring
+    type: question
+    label: "Monitoring Strategy"
+    speaker: interviewer
+    content: |
+      What monitoring would you implement for the demand forecasting system?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you monitor a forecasting system that drives billions of dollars in inventory decisions?"
+      - speaker: candidate
+        text: "We need both forecast accuracy monitoring and downstream business impact tracking."
+      - speaker: interviewer
+        text: "Tell me your approach."
+    choices:
+      - label: "Forecast accuracy monitoring with automated retraining triggers"
+        answer: |
+          I'd implement **continuous accuracy monitoring** with automated remediation.
+
+          **Daily accuracy tracking (as actuals become available):**
+          - Compute WAPE, bias, and CRPS for forecasts made 1, 7, 30, 90 days ago
+          - Segment by: demand tier (A/B/C/D), category, warehouse, promotional vs non-promotional
+          - **Automated alerting**:
+            - Category-level WAPE degrades >5% vs 30-day rolling average -> Alert demand planning team
+            - Systematic bias (>10% over or under for a category for >3 consecutive days) -> Trigger investigation
+            - Prediction interval coverage drops below 70% (should be ~80%) -> Model uncertainty is miscalibrated
+
+          **Forecast Stability Index:**
+          - Track how much forecasts change between daily refreshes: `|forecast_today - forecast_yesterday| / forecast_yesterday`
+          - High instability = model is noisy. Supply chain teams lose trust in unstable forecasts
+          - Target: <10% average daily change for 30-day horizon forecasts
+
+          **Automated retraining triggers:**
+          - WAPE degrades >10% for any demand tier -> Trigger immediate retraining
+          - Feature drift detected (PSI > 0.25 on key features) -> Retrain with refreshed features
+          - Major event (new product category launch, acquisition) -> Retrain with expanded data
+
+          **Model comparison dashboard:**
+          - Track current production model vs challenger models on a held-out set
+          - If a challenger consistently outperforms by >2% WAPE for 2+ weeks, flag for promotion to production
+          - Maintain leaderboard showing all model versions' performance over time
+
+          **Root cause analysis:** When accuracy degrades, automated drill-down identifies: Is it a specific category? A specific warehouse? A promotional event? A data quality issue?
+        next: mon_terminal
+      - label: "Business impact tracking with supply chain integration"
+        answer: |
+          I'd focus monitoring on **supply chain outcomes** -- the real measure of forecasting value.
+
+          **Inventory outcome metrics:**
+
+          | Metric | Measurement | Target | Alert Threshold |
+          |--------|------------|--------|----------------|
+          | **Stockout rate** | SKUs with zero inventory / total active SKUs | <2% | >3% triggers investigation |
+          | **Overstock days** | SKUs with >60 days of supply | <10% of SKUs | >15% triggers review |
+          | **Inventory turns** | Annual COGS / average inventory value | Improve 5% YoY | Degradation >2% |
+          | **Write-off rate** | Expired/obsolete inventory / total inventory | <1% | >2% |
+          | **Service level** | Orders fulfilled on time / total orders | >97% | <95% |
+
+          **Forecast-to-action tracking:**
+          - What percentage of forecasts are actually used by planners? (Adoption metric)
+          - When planners override forecasts, are they right or wrong? (Override accuracy)
+          - If planners consistently override upward for a category, the model may be systematically under-forecasting
+
+          **A/B testing with inventory decisions:**
+          - Split SKUs into treatment (ML forecasts drive replenishment) and control (legacy forecasting)
+          - Compare stockout rates, inventory levels, and write-offs after 3 months
+          - Require statistical significance before scaling
+
+          **Financial impact attribution:**
+          - Every quarter, compute: "What would inventory costs have been with naive forecasting vs ML forecasting?"
+          - Track: Inventory carrying cost savings, stockout revenue recovery, markdown reduction
+          - Present to leadership: "ML forecasting saved $X million this quarter"
+
+          **Planner feedback loop:**
+          - Weekly surveys: "How useful were this week's forecasts?" (1-5 scale)
+          - Monthly review: Top 10 worst forecasts -- root cause analysis and model improvement
+          - Annual: Planner satisfaction trend (are they trusting the system more over time?)
+
+          This ensures forecasting is measured by **what matters** -- supply chain performance, not just statistical accuracy.
+        next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Demand Forecasting Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive **demand forecasting system** for e-commerce.
+
+      **Your key design decisions:**
+      - Chose global deep learning or hierarchical statistical+ML approach
+      - Defined WAPE/CRPS metrics with demand tier stratification and supply chain KPIs
+      - Addressed stockout censoring, intermittent demand, and promotional effects in data pipeline
+      - Engineered historical patterns (lags, seasonality, trend) or external signals (promotions, pricing, web traffic, events)
+      - Selected DeepAR, LightGBM tiers, or Temporal Fusion Transformer
+      - Deployed via nightly batch pipeline or event-driven real-time adjustments
+      - Monitored with automated accuracy tracking or supply chain business impact
+
+      **What makes demand forecasting uniquely challenging:**
+      - **Scale**: 10M SKUs with vastly different demand patterns
+      - **Intermittent demand**: Majority of SKUs sell <1 unit/day -- standard methods fail
+      - **Promotions**: 5-50x demand spikes that must be forecasted, not just detected
+      - **Censored data**: Stockouts hide true demand -- a fundamental data issue
+      - **Multi-stakeholder**: Purchasing, logistics, marketing all consume forecasts differently
+
+      **Evolution path:**
+      1. **v1 (Month 0-3)**: LightGBM for Tier A + simple rules for long tail. Nightly batch
+      2. **v2 (Month 3-6)**: Add Tier B/C models. Promotional uplift features. Hierarchy reconciliation
+      3. **v3 (Month 6-12)**: DeepAR/TFT global model. Probabilistic intervals. Event-driven adjustments
+      4. **v4 (Year 2+)**: Causal promotional modeling. Cannibalization estimation. Automated planner override
+
+      The $1B+ impact potential of demand forecasting makes this one of the highest-ROI ML systems a retailer can build. Great job!
+    dialogue:
+      - speaker: interviewer
+        text: "Excellent work! You've addressed the unique challenges of demand forecasting at scale -- intermittent demand, promotional spikes, and censored data."
+      - speaker: candidate
+        text: "Thanks! The key insight is that demand forecasting is really a supply chain optimization problem. Accuracy only matters if it drives better inventory decisions."
+      - speaker: interviewer
+        text: "Exactly. Connecting forecast accuracy to business outcomes -- stockout rates, inventory turns, write-offs -- is what makes this a production system, not an academic exercise. Great job!"

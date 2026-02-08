@@ -1,0 +1,1435 @@
+id: bot-detection
+title: "Bot Detection"
+description: "Design a system to detect and block bots on a social media platform."
+companies: ["X/Twitter", "Meta", "Reddit"]
+domains: ["Tabular/Structured", "Anomaly Detection", "Graph/Network"]
+category: "Security, Safety & Fraud"
+root: pd_start
+
+nodes:
+  # ============ PROBLEM DEFINITION ============
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design a **bot detection system** for a major social media platform.
+
+      **Business context:**
+      - X/Twitter estimates that **~5% of its monthly active users** (mDAU) are bots -- roughly 15-20 million accounts
+      - Meta removes **~1.5 billion fake accounts per quarter**, most within minutes of creation
+      - Reddit faces coordinated bot campaigns that manipulate voting, spread spam, and push propaganda
+      - Bots range from simple spammers to sophisticated **state-sponsored influence operations** using GPT-generated content
+
+      **Types of bots to detect:**
+      - **Spam bots**: Promote products, scams, or phishing links
+      - **Astroturfing bots**: Fake grassroots support for political movements or products
+      - **Follower/engagement bots**: Inflate metrics for purchase (follower farms)
+      - **Influence operation bots**: Coordinated campaigns to manipulate public opinion
+      - **Scraper bots**: Harvest data from the platform
+      - **LLM-powered bots**: Use ChatGPT/Claude to generate human-like content at scale
+
+      **Goal:** Design an ML system that identifies bot accounts and bot-like behavior in near-real-time, enabling automated enforcement (suspension, rate limiting, CAPTCHA challenges) while minimizing impact on legitimate users.
+
+      **Key challenge:** The bot-human boundary is increasingly blurred. Legitimate users use scheduling tools, automated posting, and even AI assistants. The system must distinguish malicious automation from legitimate tool usage.
+    dialogue:
+      - speaker: interviewer
+        text: "Let's design a bot detection system for a social media platform. What's the first thing you'd think about?"
+      - speaker: candidate
+        text: "I'd want to understand what we mean by 'bot.' There's a spectrum from clearly automated spam accounts to sophisticated AI-generated content that's nearly indistinguishable from human posts."
+      - speaker: interviewer
+        text: "Good distinction. We care about malicious automation -- accounts that deceive other users about their nature or manipulate the platform."
+      - speaker: candidate
+        text: "So the key is intent and deception, not just automation. A legitimate scheduling tool is fine, but an account pretending to be a real person while running automated campaigns is not."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: info
+    label: "Problem Scoping"
+    speaker: interviewer
+    content: |
+      Let's scope the system.
+
+      **What we're building:**
+      - An **account scoring service** that assigns a bot probability (0-1) to every account
+      - A **behavior monitoring system** that detects bot-like activity patterns in real-time
+      - An **enforcement engine** that maps scores to actions: flag, rate limit, CAPTCHA challenge, shadow ban, or suspend
+
+      **Detection approach:**
+      - **Account-level classification**: Is this account a bot? (Profile features, historical behavior)
+      - **Activity-level detection**: Is this specific action bot-like? (Timing, content, coordination)
+      - **Network-level analysis**: Is this account part of a coordinated bot network? (Graph features)
+
+      **ML formulation:**
+      - **Binary classification** at account level: bot (1) or human (0)
+      - **Anomaly detection** at behavior level: How unusual is this activity pattern?
+      - **Community detection** at network level: Identify clusters of coordinated accounts
+
+      **Scale considerations:**
+      - ~500M monthly active accounts to monitor
+      - ~2B actions per day (posts, likes, follows, retweets)
+      - New accounts: ~1M created per day (many are bots)
+      - Bot detection must not add perceptible latency to user actions
+
+      Let's discuss the metrics.
+    dialogue:
+      - speaker: interviewer
+        text: "How would you formulate the ML problem?"
+      - speaker: candidate
+        text: "I'd use three complementary approaches: account-level classification, behavior anomaly detection, and network community detection. Each catches different types of bots that the others might miss."
+      - speaker: interviewer
+        text: "Why not just one model?"
+      - speaker: candidate
+        text: "Because bot types vary enormously. Spam bots have obvious behavioral signals, but sophisticated influence operation bots look normal individually -- they're only detectable through their coordinated network behavior."
+    next: met_question
+
+  # ============ METRICS ============
+  - id: met_question
+    stage: metrics
+    type: question
+    label: "Detection Priority"
+    speaker: interviewer
+    content: |
+      Bot detection faces a precision-recall tension similar to other security systems:
+
+      - **False positives** (flagging real humans as bots) causes user outrage, media backlash, and potential discrimination against users who post in patterns that happen to look automated
+      - **False negatives** (missing real bots) allows manipulation, degrades platform quality, and erodes advertiser trust
+
+      The Elon Musk/Twitter acquisition dispute highlighted how controversial bot estimates can be. How would you optimize the system?
+    choices:
+      - label: "Precision-focused: Minimize false suspensions"
+        answer: |
+          I'd optimize for **high precision** -- only take action when we're very confident an account is a bot:
+
+          **Why precision matters:**
+          - **User trust**: Falsely suspending a real user's account destroys trust and generates negative PR
+          - **Legal risk**: Users have sued platforms for wrongful account suspension
+          - **Diverse posting patterns**: Journalists live-tweeting events, marketing accounts, power users -- all look "bot-like" by simple heuristics
+          - **Political sensitivity**: Accusations of suppressing real users (especially during elections) create enormous backlash
+
+          **Target metrics:**
+
+          | Metric | Target | Rationale |
+          |--------|--------|-----------|
+          | Precision (account-level) | >99% | Only 1 in 100 suspended accounts should be human |
+          | Recall (account-level) | >80% | Catch majority of bots over time |
+          | False suspension rate | <0.01% | <50K real users affected out of 500M |
+          | Time-to-detect (spam bots) | <1 hour | Fast for obvious bots |
+          | Time-to-detect (sophisticated bots) | <7 days | Accept slower detection for complex cases |
+
+          **Graduated enforcement:**
+          - Score 0.5-0.7: Rate limit (reduce posting frequency)
+          - Score 0.7-0.9: CAPTCHA challenge (let humans prove themselves)
+          - Score 0.9-0.95: Shadow ban (content not shown to others)
+          - Score >0.95: Suspend account
+          - Only the highest confidence triggers hard suspension
+        next: met_precision
+      - label: "Recall-focused: Catch maximum bots"
+        answer: |
+          I'd optimize for **high recall** -- aggressively detecting bots to maintain platform integrity:
+
+          **Why recall matters:**
+          - **Platform quality**: Bots degrade the experience for real users -- spam, fake engagement, manipulation
+          - **Advertiser confidence**: Advertisers pay based on real engagement; bot-inflated metrics are fraud
+          - **Election integrity**: Missing influence operation bots can affect democratic processes
+          - **Network effects**: Bots that aren't caught recruit more bots (follower farms, coordinated campaigns grow exponentially)
+
+          **Target metrics:**
+
+          | Metric | Target | Rationale |
+          |--------|--------|-----------|
+          | Recall (account-level) | >95% | Catch nearly all bots |
+          | Precision (account-level) | >90% | Accept up to 10% false positives |
+          | Bot prevalence on platform | <1% | Down from estimated 5% |
+          | Coordinated campaign detection | >90% recall | Critical for influence operations |
+          | New bot account survival time | <24 hours | Catch bots quickly after creation |
+
+          **Handling false positives:**
+          - **Easy appeals process**: Verified phone number + CAPTCHA = instant reinstatement
+          - **Graduated enforcement**: Start with soft actions (rate limiting), escalate if behavior continues
+          - **Human review queue**: Top 1% uncertain cases reviewed by Trust & Safety team
+          - **VIP exceptions**: Verified accounts, accounts >1 year old, accounts with verified email + phone get higher thresholds
+
+          **Key insight:** It's better to temporarily inconvenience a real user with a CAPTCHA than to let a bot network manipulate the platform unchecked. Most false positives can be resolved within minutes.
+        next: met_recall
+
+  - id: met_precision
+    stage: metrics
+    type: info
+    label: "Precision-Focused Metrics"
+    speaker: interviewer
+    content: |
+      Good reasoning. High precision is important for user trust.
+
+      **Complete metrics framework:**
+
+      | Category | Metric | Target | Measurement |
+      |----------|--------|--------|-------------|
+      | **Model Quality** | Precision at 80% recall | >99% | Labeled test set + manual audit |
+      | **Model Quality** | AUC-PR | >0.95 | Temporal holdout evaluation |
+      | **Business Impact** | User-reported bots | Decreasing trend | User report volume |
+      | **Business Impact** | Spam complaint rate | <0.1% of impressions | Content reports |
+      | **User Safety** | False suspension rate | <0.01% of MAU | Appeals analysis |
+      | **User Safety** | Appeal resolution time | <4 hours | Queue monitoring |
+      | **Operational** | Detection latency | <1h (spam), <7d (sophisticated) | End-to-end tracking |
+
+      **Evaluation methodology:**
+      - **Labeled evaluation set**: 50K accounts manually labeled by Trust & Safety analysts (refreshed quarterly)
+      - **Honeypot accounts**: Create decoy accounts to attract bot interactions -- measure detection rate
+      - **Adversarial testing**: Red team creates bot accounts using latest evasion techniques
+      - **User perception survey**: Quarterly survey on perceived bot presence (user trust metric)
+
+      Let's design the data pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you get labeled data for bot detection?"
+      - speaker: candidate
+        text: "Multiple sources: Trust & Safety team manual investigations, honeypot accounts that attract bot interactions, coordinated takedown campaigns with full account lists, and user reports that are verified by analysts."
+      - speaker: interviewer
+        text: "What about the adversarial nature -- bots that are designed to evade detection?"
+      - speaker: candidate
+        text: "Regular red team exercises where we create the most sophisticated bots we can and test our system. This keeps the detection model current with evolving evasion techniques."
+    next: data_collection
+
+  - id: met_recall
+    stage: metrics
+    type: info
+    label: "Recall-Focused Metrics"
+    speaker: interviewer
+    content: |
+      Good approach. Aggressive bot detection protects platform integrity.
+
+      **Complete metrics framework:**
+
+      | Category | Metric | Target | Measurement |
+      |----------|--------|--------|-------------|
+      | **Model Quality** | Recall at 90% precision | >95% | Labeled test set |
+      | **Model Quality** | Network detection recall | >90% | Coordinated campaign analysis |
+      | **Business Impact** | Bot prevalence estimate | <1% of MAU | Sampled manual review |
+      | **Business Impact** | Fake engagement rate | <2% of total | Statistical estimation |
+      | **User Safety** | False positive recovery time | <30 min | CAPTCHA + appeal stats |
+      | **User Safety** | Wrongful suspension rate | <1% of actions | Appeals overturn rate |
+      | **Operational** | New bot survival time | <24 hours | Median time to suspension |
+
+      **Evaluation methodology:**
+      - **Random sample audit**: Weekly review of 5K random accounts to estimate platform-wide bot prevalence
+      - **Engagement authenticity audit**: Sample popular posts and estimate fraction of bot engagement
+      - **Coordinated campaign discovery**: Proactive investigation team identifies campaigns, measures model recall
+      - **Comparative benchmarking**: Compare detection rates with external bot detection tools (Botometer, etc.)
+
+      Let's design the data pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you estimate the true bot prevalence?"
+      - speaker: candidate
+        text: "Random sampling with expert review. Take a random sample of 5K-10K accounts, have Trust & Safety analysts manually classify each one. This gives an unbiased prevalence estimate with confidence intervals."
+      - speaker: interviewer
+        text: "That's essentially what Twitter was asked to do during the Musk acquisition. It's expensive but the gold standard."
+    next: data_collection
+
+  # ============ DATA ============
+  - id: data_collection
+    stage: data
+    type: info
+    label: "Data Sources & Collection"
+    speaker: interviewer
+    content: |
+      Before designing the pipeline, let's understand the data landscape for bot detection.
+
+      **Primary data sources:**
+
+      | Source | Description | Volume | Signal Value |
+      |--------|-------------|--------|-------------|
+      | **Account creation events** | Registration method, email/phone, IP, device, timing | ~1M/day | Very high for new bot detection |
+      | **User action streams** | Posts, likes, follows, retweets, DMs (metadata) | ~2B actions/day | Core behavioral signal |
+      | **Login/session data** | IP addresses, user agents, session duration, location | ~1B sessions/day | Device/network fingerprinting |
+      | **Social graph snapshots** | Follow/follower edges, mutual connections, community membership | ~500B edges | Coordinated network detection |
+      | **Content metadata** | Post timing, hashtags, URLs, media type, language | ~500M posts/day | Content pattern analysis |
+      | **External intelligence** | Known bot lists, IP reputation feeds, device fingerprint databases | Per-lookup enrichment | Contextual signals |
+
+      **Label acquisition challenges:**
+      - **Ground truth is incomplete**: The most sophisticated bots may never be detected, creating systematic bias in labels
+      - **Label delay**: Coordinated campaigns may operate for weeks before discovery
+      - **False labels**: Some legitimate accounts exhibit bot-like behavior (power users, automated tools, accessibility tools)
+      - **Temporal decay**: A bot labeled 6 months ago may have adapted, making old labels less reliable
+
+      **Positive-Unlabeled (PU) learning:**
+      - Bot detection is fundamentally a PU learning problem: We have confirmed bots (positives) and unlabeled accounts (mix of bots and humans)
+      - Standard binary classification underestimates bot prevalence because many bots hide in the "negative" (unlabeled) class
+      - Techniques: Two-step approach (identify reliable negatives, then train classifier), or direct PU learning with modified loss functions
+
+      **Data ethics considerations:**
+      - Behavioral analysis must not profile users based on protected characteristics
+      - IP and device data must comply with GDPR and regional privacy laws
+      - Detection criteria should be transparent enough for meaningful appeals
+
+      Let's now design the data pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "What makes bot detection data unique?"
+      - speaker: candidate
+        text: "Two things: it's a positive-unlabeled learning problem -- we know some accounts are bots but can't be sure any account isn't a bot. And the adversarial nature means our labels are always lagging behind bot evolution."
+      - speaker: interviewer
+        text: "How would you handle the PU learning challenge?"
+      - speaker: candidate
+        text: "A two-step approach: first, identify highly reliable negatives -- long-standing accounts with strong verification and natural engagement patterns. Then train a standard classifier on confirmed bots vs reliable negatives. The remaining unlabeled accounts are scored by the model."
+      - speaker: interviewer
+        text: "Good. That's a practical approach to an inherently uncertain labeling problem."
+    next: data_pipeline
+
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      Let's design the data pipeline. Bot detection requires diverse data sources.
+
+      **Data sources:**
+
+      | Source | Data Type | Volume | Signal Strength |
+      |--------|-----------|--------|----------------|
+      | Account metadata | Profile creation, email/phone verification, bio | 500M accounts | Medium |
+      | User actions | Posts, likes, follows, retweets, DMs (metadata only) | 2B actions/day | High |
+      | Login/session data | IP addresses, user agents, session patterns | 1B sessions/day | High |
+      | Content features | Text similarity, hashtag usage, URL sharing | 500M posts/day | Medium |
+      | Social graph | Follow/follower relationships, mutual connections | Billions of edges | Very High |
+      | External signals | Known bot lists, IP reputation, device fingerprints | Enrichment | Medium |
+
+      **Label sources:**
+      - **Manual investigation**: Trust & Safety team investigations (~50K labeled accounts/quarter)
+      - **Coordinated takedowns**: Bulk bot network removals provide large labeled sets
+      - **Honeypot interactions**: Accounts that interact with decoy content labeled as likely bots
+      - **Self-identified bots**: Accounts flagged via API as automated (partial signal)
+      - **Recidivism**: Accounts that are suspended, recreated, and re-suspended (strong positive signal)
+
+      **Data freshness requirements:**
+      - Account features: Updated on every action
+      - Behavioral features: Real-time streaming aggregation (Flink)
+      - Graph features: Batch computation (daily) with incremental updates
+      - Content features: Computed per post, aggregated hourly
+
+      **Key challenge: Adversarial label noise**
+      - Some sophisticated bots are never caught (false negatives in labels)
+      - Some legitimate accounts are wrongly labeled as bots
+      - Use **label confidence weighting** in training: high-confidence labels (manual review) weighted more than low-confidence (automated flags)
+
+      Let's decide on the feature engineering approach.
+    dialogue:
+      - speaker: interviewer
+        text: "What's unique about bot detection data compared to other ML problems?"
+      - speaker: candidate
+        text: "The adversarial nature. Bot operators actively study detection systems and adapt. Also, the labels are noisy -- we never have perfect ground truth because the most sophisticated bots may never be caught."
+      - speaker: interviewer
+        text: "How does that affect your training strategy?"
+      - speaker: candidate
+        text: "Label confidence weighting is essential. Manually investigated accounts get high weight, automated flags get lower weight. We also use positive-unlabeled (PU) learning techniques since many positives are hidden in the unlabeled data."
+    next: feat_overview
+
+  # ============ FEATURES ============
+  - id: feat_overview
+    stage: features
+    type: info
+    label: "Feature Engineering Overview"
+    speaker: interviewer
+    content: |
+      Feature engineering for bot detection is an arms race. As we develop new features, bot operators adapt. The key is building features that capture **fundamental behavioral differences** between humans and bots.
+
+      **Feature categories for bot detection:**
+
+      1. **Account profile features**: Account age, profile completeness, verification status, bio content, profile image analysis
+      2. **Temporal behavior features**: Action timing patterns, inter-event intervals, circadian rhythm, burst detection
+      3. **Content features**: Text diversity, hashtag patterns, URL sharing frequency, content originality
+      4. **Social graph features**: Follow/follower ratio, clustering coefficient, community membership, connection patterns
+      5. **Network/device features**: IP diversity, device fingerprint stability, VPN/proxy detection, geolocation patterns
+      6. **Coordination features**: Temporal correlation with other accounts, content similarity clusters, synchronized actions
+
+      **The arms race dynamic:**
+      - **Gen 1 bots**: Random names, no profile pic, spam content -- caught by simple profile features
+      - **Gen 2 bots**: Stolen profile pics, bio text, some organic activity -- caught by behavioral features
+      - **Gen 3 bots**: GPT-generated content, mimicked human timing, partial real engagement -- caught by graph features
+      - **Gen 4 bots**: Hybrid human-bot (real person with automated amplification) -- requires coordination detection
+
+      **Feature serving requirements:**
+      - Account-level features: Pre-computed, updated per action (~500M accounts x 50 features)
+      - Real-time behavioral features: Streaming computation via Flink
+      - Graph features: Batch computation (daily) with critical 1-hop features in Redis
+      - Coordination features: Batch analysis of temporal correlation patterns
+
+      **Key insight from research:** The single most discriminative feature category is **temporal patterns**. Human posting follows circadian rhythms and natural intervals. Even sophisticated bots struggle to perfectly replicate the randomness and burstiness of human timing.
+
+      Let's choose the primary feature engineering strategy.
+    dialogue:
+      - speaker: interviewer
+        text: "Which features are hardest for bots to fake?"
+      - speaker: candidate
+        text: "Temporal patterns and social graph features. Bots can fake profile information and even generate convincing text, but replicating natural human timing patterns and building genuine social connections is extremely difficult at scale."
+      - speaker: interviewer
+        text: "What about GPT-powered bots that generate human-like content?"
+      - speaker: candidate
+        text: "Content-based detection alone won't work against LLM bots. We need to shift focus to behavioral and network features -- when they post, how they engage, who they interact with, and whether they're coordinated with other accounts. The content might look human, but the behavior rarely does."
+      - speaker: interviewer
+        text: "Good insight. Let's dive into the specific approach."
+    next: feat_question
+
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Engineering Strategy"
+    speaker: interviewer
+    content: |
+      Feature engineering is critical for bot detection. Different bot types leave different signals. What feature strategy would you prioritize?
+    choices:
+      - label: "Behavioral features (timing, activity patterns)"
+        answer: |
+          I'd focus on **behavioral features** -- the temporal patterns of account activity that are hardest for bots to fake:
+
+          **Timing features (most discriminative):**
+          - **Inter-event time distribution**: Real humans have irregular patterns; bots often post at fixed intervals
+          - **Active hours distribution**: Humans sleep; bots posting 24/7 is suspicious
+          - **Burstiness score**: `std(inter_event_times) / mean(inter_event_times)` -- bots tend to have lower variance
+          - **Response latency**: Time between being followed and following back, time between seeing and retweeting
+          - **Session duration distribution**: Human sessions follow power-law; bot sessions are more uniform
+
+          **Activity pattern features:**
+          - **Action type ratio**: Ratio of posts:likes:retweets:follows -- bots often have skewed ratios (mostly retweets, few original posts)
+          - **Content diversity**: Unique word ratio, topic distribution entropy -- bots often have narrow topical focus
+          - **Engagement reciprocity**: Do followers of this account engage back? Bot follower farms have very low reciprocity
+          - **Growth patterns**: Sudden follower spikes (purchased followers) vs organic growth curves
+          - **Velocity features**: Actions per hour (rolling 1h, 6h, 24h, 7d windows)
+
+          **Device/session features:**
+          - **User agent diversity**: Bots often use a single user agent; humans switch devices
+          - **IP pattern**: Bots from cloud IPs (AWS, GCP), VPNs, or known proxy networks
+          - **API vs UI usage ratio**: Heavy API usage suggests automation
+          - **Geolocation consistency**: Account claims to be in NYC but posts from Moscow IPs
+
+          **Why behavioral features:**
+          - **Hard to fake**: A bot can generate human-like content with GPT, but mimicking natural human timing patterns is much harder
+          - **Scale-agnostic**: Same features work for individual spam bots and coordinated networks
+          - **Real-time computable**: Most features derived from streaming event data
+        next: feat_behavioral
+      - label: "Graph/network features (social connections)"
+        answer: |
+          I'd focus on **graph-based features** that analyze the social network structure -- this is where coordinated bot detection excels:
+
+          **Why graph features are essential:**
+          - Sophisticated bots **look normal individually** but form suspicious patterns in the network
+          - Bot networks share **infrastructure** (same creator, similar profiles, coordinated posting)
+          - The social graph is the **hardest signal to fake** -- building a genuine social network takes years
+
+          **Graph construction:**
+          - **Nodes**: User accounts (500M+)
+          - **Edges**: Follow relationships, @mentions, retweet chains, reply threads
+          - **Edge attributes**: Timestamp, interaction type, reciprocity
+          - **Node attributes**: Account features, activity features, content features
+
+          **Graph features per account:**
+          - **Degree distribution**: Follower/following ratio (bots often follow many, have few followers)
+          - **Clustering coefficient**: How connected are an account's followers to each other? Bot networks have unusual clustering
+          - **Bipartite structure detection**: Bot farms create bipartite-like structures (group A follows group B but not each other)
+          - **Temporal correlation**: Do connected accounts act simultaneously? (Post within seconds of each other)
+          - **Community membership**: Which community clusters does this account belong to? Are those communities suspicious?
+
+          **Coordinated behavior detection:**
+          - **Co-action similarity**: Jaccard similarity of accounts that liked/retweeted the same content within a time window
+          - **Synchronized posting**: Accounts posting the same/similar content within minutes
+          - **Follow chain detection**: Linear follow chains (A->B->C->D) characteristic of bot networks
+          - **Content amplification patterns**: Small group of accounts consistently amplifying the same source
+
+          **Implementation:**
+          - **Apache Spark GraphX** for batch graph computation (daily)
+          - **Neo4j** for real-time graph queries on suspicious accounts
+          - **Graph Neural Networks (GNN)** for learning graph-level representations
+        next: feat_graph
+
+  - id: feat_behavioral
+    stage: features
+    type: info
+    label: "Behavioral Feature Details"
+    speaker: interviewer
+    content: |
+      Great choice. Let's detail the behavioral feature pipeline.
+
+      **Real-time feature computation (Apache Flink):**
+
+      ```
+      User Action Stream (Kafka)
+           │
+           ▼
+      ┌──────────────────────┐
+      │ Flink Streaming Job   │
+      │ - Per-user time-window│
+      │   aggregations        │
+      │ - Rolling statistics  │
+      │ - Anomaly scores      │
+      └──────────┬───────────┘
+               ▼
+      ┌──────────────────────┐
+      │ Redis Feature Store   │
+      │ - account:{id}:action_count_1h    │
+      │ - account:{id}:unique_targets_24h │
+      │ - account:{id}:timing_variance    │
+      │ - account:{id}:content_diversity  │
+      └──────────────────────┘
+      ```
+
+      **Key behavioral features with computation:**
+
+      | Feature | Formula | Bot Signal |
+      |---------|---------|-----------|
+      | Timing regularity | `1 - (std(Δt) / mean(Δt))` | >0.8 = likely bot |
+      | Action diversity | `entropy(action_type_distribution)` | Low entropy = bot |
+      | Night activity ratio | `actions_2am_6am / total_actions` | High = suspicious |
+      | Follow-to-post ratio | `follows_per_day / posts_per_day` | >100:1 = likely bot |
+      | Content uniqueness | `unique_texts / total_posts` | <0.3 = copy-paste bot |
+      | Engagement authenticity | `mutual_engagements / total_engagements` | <0.01 = suspicious |
+
+      **Handling LLM-powered bots:**
+      - GPT-generated content evades content-based detection
+      - **Timing features still work**: Even GPT bots need to be triggered and posted programmatically
+      - **Perplexity scoring**: Use a language model to measure how "surprising" the text is -- GPT output has lower perplexity than human text
+      - **Stylometric consistency**: Humans have inconsistent writing style; GPT bots are unnaturally consistent
+      - **Engagement patterns**: GPT bots still follow programmatic engagement schedules
+
+      Now let's choose the model architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you detect LLM-powered bots that generate human-like content?"
+      - speaker: candidate
+        text: "Content analysis alone won't cut it anymore. I'd focus on behavioral signals that are orthogonal to content quality: timing patterns, engagement patterns, and network structure. A GPT bot can write like a human but still follows and retweets on a programmatic schedule."
+      - speaker: interviewer
+        text: "What about bots that randomize their timing?"
+      - speaker: candidate
+        text: "Even randomized timing has telltale patterns -- the randomization distribution itself is different from natural human behavior. Human inter-event times follow a Pareto distribution; synthetic randomization is usually uniform or Gaussian."
+    next: mod_question
+
+  - id: feat_graph
+    stage: features
+    type: info
+    label: "Graph Feature Details"
+    speaker: interviewer
+    content: |
+      Excellent choice. Graph features are the strongest signal for coordinated bot networks.
+
+      **Graph analytics pipeline:**
+
+      ```
+      Social Graph Updates (Kafka)
+           │
+           ├──► Incremental Graph Update ──► Neo4j (real-time queries)
+           │    - New follow/unfollow edges
+           │    - Interaction edges
+           │
+           └──► Batch Graph Analytics (Spark GraphX, daily)
+                - Community detection (Louvain)
+                - PageRank computation
+                - Bipartite structure detection
+                - Feature materialization
+      ```
+
+      **Key graph features:**
+
+      | Feature | Computation | Bot Signal |
+      |---------|------------|-----------|
+      | Follower/following ratio | `followers / following` | <0.01 = follow-spam bot |
+      | Clustering coefficient | Local graph density | Abnormally low = bot |
+      | PageRank | Eigenvector centrality | Very low = peripheral bot |
+      | Community suspiciousness | % of community members flagged | >30% = bot network |
+      | Temporal co-action score | `jaccard(actions_in_window)` across accounts | >0.5 = coordinated |
+      | Bipartite score | Graph structure analysis | High = bot farm |
+
+      **Coordinated Inauthentic Behavior (CIB) detection:**
+      - Facebook's CIB detection is the gold standard
+      - Method: Identify clusters of accounts that (1) were created similarly, (2) share content amplification targets, (3) have suspicious graph structure
+      - Use **spectral clustering** on the co-action similarity matrix
+      - Accounts in suspicious clusters get elevated bot scores even if individually they look normal
+
+      **Graph Neural Network (GNN) approach:**
+      - **GraphSAGE**: Learn account embeddings from neighbor aggregation
+      - Input: Account features + neighbor features (2-hop)
+      - The GNN learns that "accounts with bot-like neighbors are likely bots"
+      - Particularly effective for detecting the periphery of known bot networks
+
+      **Scalability challenge:**
+      - Full graph: 500M nodes, 100B+ edges -- too large for single-machine computation
+      - Solution: **Sampled subgraph** approach -- for each account to score, sample 2-hop ego network (typically <10K nodes)
+      - Pre-compute global features (PageRank, community) in batch; use sampled subgraph for per-account GNN features
+
+      Now let's choose the model architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you scale graph analytics to 500M accounts?"
+      - speaker: candidate
+        text: "Two-tier approach: global graph features like PageRank and community detection run as batch Spark jobs on the full graph daily. Per-account features use sampled ego-networks. Only accounts flagged by other signals get the expensive real-time graph analysis."
+      - speaker: interviewer
+        text: "What about the arms race? Bot operators will adapt their network structure."
+      - speaker: candidate
+        text: "The beauty of graph features is that they're expensive to fake. Building a genuine-looking social network takes months. Bot operators can change content and timing easily, but restructuring the graph requires massive investment and is detectable during the restructuring."
+    next: mod_question
+
+  # ============ MODEL ============
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Model Architecture"
+    speaker: interviewer
+    content: |
+      Now let's design the model. Bot detection typically requires combining multiple signal types. What architecture would you choose?
+    choices:
+      - label: "Gradient boosting ensemble on tabular features"
+        answer: |
+          I'd use a **gradient boosting ensemble** (XGBoost/LightGBM) as the primary model:
+
+          **Feature vector per account (~150 features):**
+          - Account metadata: 15 features (age, verification, profile completeness)
+          - Behavioral features: 50 features (timing, activity patterns, content diversity)
+          - Session/device features: 20 features (IP patterns, user agent, API usage)
+          - Graph features: 30 features (degree, clustering, PageRank, community)
+          - Content features: 35 features (text statistics, hashtag patterns, URL usage)
+
+          **Model architecture:**
+          ```
+          Feature Vector (150 dims)
+               │
+               ▼
+          ┌─────────────────────────┐
+          │ LightGBM Ensemble       │
+          │ - 3 models:             │
+          │   Model A: 30-day data  │
+          │   Model B: 90-day data  │
+          │   Model C: account-age  │
+          │     weighted data       │
+          │ - Average scores        │
+          └────────┬────────────────┘
+                   │
+                   ▼
+             Bot Score (0-1)
+          ```
+
+          **Why gradient boosting:**
+          - **Best for tabular features**: Bot detection is fundamentally a tabular problem with mixed feature types
+          - **Handles missing data**: New accounts have missing historical features; LightGBM handles this natively
+          - **Fast inference**: <1ms per account -- essential for scoring 500M accounts
+          - **Interpretable**: SHAP values explain why each account was flagged
+          - **Twitter's approach**: Their published bot detection system uses gradient boosting
+
+          **Ensemble rationale:**
+          - Model A (30-day): Catches recent behavior changes
+          - Model B (90-day): Captures long-term patterns, more stable
+          - Model C (account-age weighted): Optimized for different account age segments
+
+          **Threshold tuning:** Per-account-segment thresholds (new accounts vs established, verified vs unverified) -- a 1-day-old account needs less evidence to flag than a 5-year-old account.
+        next: mod_gbm
+      - label: "Multi-modal model with GNN component"
+        answer: |
+          I'd use a **multi-modal architecture** combining tabular features, behavioral sequences, and graph neural networks:
+
+          **Architecture:**
+          ```
+          Account Features (tabular)  ──► LightGBM ──► Score_tabular (0-1)
+                                                              │
+          Action Sequence (temporal)  ──► LSTM/Transformer ──► Score_seq (0-1)
+                                                              │
+          Ego-Network (graph)         ──► GraphSAGE ──────► Score_graph (0-1)
+                                                              │
+                                                              ▼
+                                                    ┌──────────────┐
+                                                    │ Meta-Learner  │
+                                                    │ (Logistic Reg)│
+                                                    │ combines 3    │
+                                                    │ scores        │
+                                                    └──────┬───────┘
+                                                           │
+                                                           ▼
+                                                    Bot Score (0-1)
+          ```
+
+          **Component models:**
+
+          **LightGBM (tabular features, <1ms):**
+          - 150 tabular features as described previously
+          - Handles the bulk of detection for simple/medium bots
+
+          **LSTM/Transformer (behavioral sequence, ~10ms):**
+          - Input: Last 100 actions as a sequence [(action_type, timestamp, target), ...]
+          - Learns temporal patterns: What sequences of actions look bot-like?
+          - Catches rhythm-based detection that static features miss
+
+          **GraphSAGE (network structure, ~50ms):**
+          - Input: 2-hop sampled ego network with node/edge features
+          - 2-layer GraphSAGE with mean aggregation
+          - Learns: "Accounts surrounded by suspicious accounts are suspicious"
+          - Most effective for coordinated bot networks
+
+          **Meta-learner:**
+          - Simple logistic regression combining the three scores
+          - Allows each component to have different contribution per account type
+          - Trained on the same labeled data with cross-validation
+
+          **Why multi-modal:**
+          - Each model catches different bot types: tabular catches spam bots, sequence catches automation bots, graph catches coordinated networks
+          - No single model covers all bot types effectively
+          - Meta-learner learns which signal is most reliable for each scenario
+        next: mod_multimodal
+
+  - id: mod_gbm
+    stage: model
+    type: info
+    label: "Gradient Boosting Details"
+    speaker: interviewer
+    content: |
+      Let's detail the gradient boosting approach.
+
+      **Training strategy for bot detection:**
+
+      **Handling evolving bot tactics:**
+      - **Sliding window training**: Use last 90 days of data (bots evolve fast)
+      - **Positive-Unlabeled (PU) learning**: Many bots in the "unlabeled" set haven't been caught yet
+      - Use PU-learning techniques: Train initial model, identify likely positives in unlabeled set, iterate
+      - **Adversarial validation**: Check if training and test distributions differ (indicates bot evolution)
+
+      **Feature importance analysis:**
+      - Top features change over time as bots adapt
+      - Current typical ranking:
+        1. Account age / action count ratio (how active relative to age)
+        2. Timing regularity score
+        3. Follower/following ratio
+        4. Content uniqueness score
+        5. IP reputation score
+
+      **Model calibration:**
+      - Post-training Platt scaling to ensure probability calibration
+      - A score of 0.8 should mean ~80% chance of being a bot
+      - Calibration is critical because the enforcement engine uses specific score thresholds
+
+      **Inference pipeline:**
+      ```
+      Account Action ──► Feature Assembly (Redis, <5ms)
+                              │
+                              ▼
+                        LightGBM Inference (<1ms)
+                              │
+                              ▼
+                        Score Cache (Redis, TTL=1hr)
+                              │
+                              ▼
+                        Enforcement Engine
+      ```
+
+      **Score caching:** Re-score each account at most once per hour (saves compute). Invalidate cache immediately on high-severity signals (spike in suspicious activity).
+
+      Now let's discuss training.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle the PU learning problem -- bots hiding in the unlabeled data?"
+      - speaker: candidate
+        text: "Two approaches: first, use the initial model to score all unlabeled accounts and treat high-scoring unlabeled accounts as likely positives with lower weight. Second, use techniques like bagging with random negative subsampling, which is robust to label noise."
+      - speaker: interviewer
+        text: "Good. How often do you need to retrain?"
+      - speaker: candidate
+        text: "Weekly for the primary model, with daily monitoring for distribution drift. If we detect a new bot campaign that evades the model, we trigger an emergency retrain with the newly identified bot accounts included."
+    next: train_strategy
+
+  - id: mod_multimodal
+    stage: model
+    type: info
+    label: "Multi-modal Model Details"
+    speaker: interviewer
+    content: |
+      Let's detail the multi-modal architecture.
+
+      **GraphSAGE component:**
+
+      ```
+      Target Account
+           │
+           ▼
+      Sample 2-hop Ego Network (max 500 nodes)
+           │
+           ▼
+      ┌─────────────────────────┐
+      │ GraphSAGE (2 layers)    │
+      │ - Layer 1: Aggregate    │
+      │   neighbor features     │
+      │   (mean pooling)        │
+      │ - Layer 2: Aggregate    │
+      │   2-hop features        │
+      │ - Output: 64-dim        │
+      │   account embedding     │
+      └────────┬────────────────┘
+               │
+               ▼
+      Linear(64, 1) → σ → Score_graph
+      ```
+
+      **Training the multi-modal system:**
+      - Each component trained independently first
+      - Then meta-learner trained on component scores
+      - **Not end-to-end** (too expensive for graph component)
+      - Each component retrained on different schedules:
+        - LightGBM: Weekly
+        - LSTM: Bi-weekly
+        - GraphSAGE: Monthly (graph features change slowly)
+        - Meta-learner: Weekly
+
+      **Inference strategy (latency-aware):**
+      ```
+      New Account Action
+           │
+           ├──► LightGBM (<1ms) ──► Score_tabular
+           │         │
+           │     Score > 0.3? (suspicious)
+           │         │
+           │    Yes   │   No → Return score_tabular
+           │         ▼
+           ├──► LSTM (~10ms) ──► Score_seq
+           │
+           │    Combined > 0.5? (more suspicious)
+           │         │
+           │    Yes   │   No → Return combined
+           │         ▼
+           └──► GraphSAGE (~50ms) ──► Score_graph
+                                           │
+                                           ▼
+                                   Meta-learner → Final Score
+      ```
+
+      **Cascading inference** saves compute: Only ~20% of accounts trigger the LSTM, and only ~5% trigger the expensive GraphSAGE. This keeps average inference cost low while maintaining accuracy on hard cases.
+
+      Now let's discuss training.
+    dialogue:
+      - speaker: interviewer
+        text: "Why not train the whole system end-to-end?"
+      - speaker: candidate
+        text: "Scale constraints. The GraphSAGE component requires sampling ego-networks from a 500M-node graph during training -- this is already expensive. End-to-end training would require backpropagating through the graph sampling, which is impractical at this scale."
+      - speaker: interviewer
+        text: "How do you handle the latency of the cascading approach?"
+      - speaker: candidate
+        text: "The cascade is key. The fast LightGBM model handles 80% of decisions in <1ms. Only suspicious accounts get the expensive deep models. Average latency across all accounts stays under 5ms."
+    next: train_strategy
+
+  # ============ TRAINING ============
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: interviewer
+    content: |
+      Let's design the training pipeline for bot detection.
+
+      **Training data construction:**
+      - **Confirmed bots**: 500K accounts from Trust & Safety investigations and coordinated takedowns
+      - **Confirmed humans**: 200K accounts verified through multiple signals (phone + email + long history + real engagement)
+      - **Uncertain**: Remaining 499M+ accounts -- use PU learning techniques
+      - **Synthetic bots**: Generate fake bot accounts with known behavior patterns for data augmentation
+
+      **Training schedule:**
+      - **Weekly retrain**: Sliding 90-day window with emphasis on recent data (exponential decay weighting)
+      - **Emergency retrain**: Triggered by detection of new bot campaign with novel evasion
+      - **Quarterly full retrain**: On expanded feature set with new features from research
+
+      **Validation strategy:**
+      - **Temporal holdout**: Train on months 1-3, validate month 4, test month 5
+      - **Campaign-level holdout**: Hold out entire bot campaigns for testing (not individual accounts)
+      - **Why campaign-level?** Bot accounts within the same campaign share characteristics -- if you split them between train/test, you leak information
+
+      **Handling adversarial evolution:**
+      - Track model performance over time on each bot campaign type
+      - If a specific bot type's detection rate drops, investigate and create targeted training data
+      - Maintain a **bot taxonomy**: spam, follower farm, astroturfing, influence operation, scraper
+      - Track detection rate per taxonomy category monthly
+
+      **Positive-Unlabeled (PU) Learning:**
+      ```
+      1. Train initial model on labeled positives vs random sample of unlabeled
+      2. Score all unlabeled accounts
+      3. High-scoring unlabeled accounts → treat as "likely positive" (weight 0.5)
+      4. Low-scoring unlabeled accounts → treat as "likely negative" (weight 1.0)
+      5. Retrain with expanded label set
+      6. Iterate 2-3 times
+      ```
+
+      This captures ~20% more bots that exist in the unlabeled set.
+    dialogue:
+      - speaker: interviewer
+        text: "Why is campaign-level holdout important?"
+      - speaker: candidate
+        text: "Bot campaigns have shared characteristics -- similar creation patterns, content, timing. If you randomly split accounts from the same campaign into train and test, the model memorizes campaign-specific signals and overestimates its generalization ability."
+      - speaker: interviewer
+        text: "Good insight. How do you handle the fact that bots get more sophisticated over time?"
+      - speaker: candidate
+        text: "The sliding training window ensures the model always sees recent bot tactics. We also weight recent data more heavily. And the quarterly research cycle lets us add entirely new feature types as new evasion techniques emerge."
+    next: train_evaluation
+
+  - id: train_evaluation
+    stage: training
+    type: info
+    label: "Offline Evaluation & Validation"
+    speaker: interviewer
+    content: |
+      Before deploying a bot detection model, we need rigorous offline evaluation. Bot detection evaluation has unique challenges due to the adversarial nature and incomplete labels.
+
+      **Evaluation methodology:**
+
+      | Aspect | Approach | Rationale |
+      |--------|----------|-----------|
+      | **Data split** | Campaign-level temporal split | Prevents leaking campaign-specific signals |
+      | **Train window** | Rolling 6 months | Recent tactics weighted higher |
+      | **Validation** | Most recent 30 days | Threshold and hyperparameter tuning |
+      | **Test** | Held-out 30 days | Final unbiased evaluation |
+      | **Red team test** | Synthetic bot accounts | Tests against latest evasion techniques |
+
+      **Evaluation metrics (in priority order):**
+      1. **PR-AUC** -- primary model comparison metric (never ROC-AUC due to class imbalance)
+      2. **Precision at target recall** -- operational metric for threshold setting
+      3. **Prevalence estimation accuracy** -- compare model-estimated bot rate with manual sample estimate
+      4. **Campaign detection rate** -- what fraction of coordinated bot campaigns are identified?
+      5. **False suspension rate** -- fraction of legitimate users incorrectly flagged
+      6. **Time-to-detection** -- how long do new bot accounts survive before detection?
+
+      **Common evaluation pitfalls:**
+      - **Survivorship bias**: Only evaluating on accounts that were eventually caught misses bots that evaded detection
+      - **Campaign leakage**: If train and test sets contain accounts from the same campaign, metrics are inflated
+      - **Temporal leakage**: Using future account state (later suspended) as features during training
+      - **Class distribution shift**: Bot prevalence varies by season, events, and platform changes
+
+      **Red team evaluation:**
+      - Create 100 test bot accounts using the latest bot tools and techniques
+      - Run the candidate model against these accounts
+      - Measure: How many are flagged? How quickly?
+      - Red team findings feed back into feature engineering and training data
+
+      Let's now discuss deployment architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you evaluate a bot detection model when you don't have perfect labels?"
+      - speaker: candidate
+        text: "Three approaches: campaign-level holdout using known coordinated takedowns as ground truth, manual review of a random sample for prevalence estimation, and red team testing with synthetic bot accounts we control."
+      - speaker: interviewer
+        text: "What's the most important metric?"
+      - speaker: candidate
+        text: "Campaign detection rate -- can the model identify coordinated bot networks? Individual bot detection is important, but catching organized campaigns has much higher impact on platform integrity."
+      - speaker: interviewer
+        text: "How do you prevent the model from being gamed by bot operators?"
+      - speaker: candidate
+        text: "Never publish specific detection criteria. Use ensemble models so no single feature determines the outcome. Regular red team exercises to identify weaknesses before bot operators do. And continuous retraining to stay ahead of adaptation."
+    next: deploy_question
+
+  # ============ DEPLOYMENT ============
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Deployment Architecture"
+    speaker: interviewer
+    content: |
+      How would you deploy the bot detection system? Consider:
+      - 500M accounts to monitor
+      - 2B actions per day
+      - Detection should not add latency to user actions
+      - Some actions need real-time scoring (account creation, mass following)
+    choices:
+      - label: "Event-driven scoring with action triggers"
+        answer: |
+          I'd deploy an **event-driven architecture** that scores accounts based on action triggers:
+
+          **Architecture:**
+          ```
+          User Action (Kafka)
+               │
+               ├──► Action-Level Filter ──► Immediate Action?
+               │    (rule-based, <1ms)       │
+               │    - Rate limiting           Yes → Block/CAPTCHA
+               │    - Known bad IP            │
+               │    - Blocklisted device      No
+               │                              │
+               ▼                              ▼
+          Account Scoring Service        Normal Processing
+               │
+               ├── Update behavioral features (Redis)
+               │
+               ├── Check if rescore needed (>1hr since last, or high-activity)
+               │
+               └── If yes: Score account (<5ms) → Update enforcement state
+          ```
+
+          **Trigger-based scoring:**
+          - **Account creation**: Score immediately with available features (device, IP, email pattern)
+          - **Burst activity**: >20 actions in 5 minutes triggers immediate rescore
+          - **Follow spam**: >50 follows in 1 hour triggers rescore
+          - **Content posting**: Each post scored for spam/manipulation independently
+          - **Periodic batch**: All accounts rescored every 24 hours in batch
+
+          **Why event-driven:**
+          - **No added latency**: Scoring happens asynchronously after the action is processed
+          - **Resource efficient**: Only rescore when meaningful new signal arrives (not on every action)
+          - **Real-time for critical triggers**: Account creation and burst activity scored immediately
+          - **Batch for comprehensive coverage**: Daily batch ensures no account goes unscored for >24h
+
+          **Enforcement actions (automated):**
+          - Rate limiting: Reduce allowed actions to 50% of normal
+          - CAPTCHA challenge: Present verification on next login
+          - Shadow ban: Content not shown in feeds/search
+          - Temporary suspension: Account locked until appeal
+          - Permanent suspension: Account deleted (highest confidence only)
+        next: deploy_event
+      - label: "Batch scoring with real-time overrides"
+        answer: |
+          I'd use a **batch-first architecture** with real-time overrides for high-risk signals:
+
+          **Architecture:**
+          ```
+          Daily Batch Pipeline (Spark)
+               │
+               ├── Feature computation for all 500M accounts
+               │
+               ├── Model scoring (distributed, ~2 hours total)
+               │
+               ├── Score storage (DynamoDB: account_id → bot_score)
+               │
+               └── Enforcement updates (suspend/limit flagged accounts)
+
+          Real-time Override Layer
+               │
+               ├── Account creation → Instant scoring
+               │
+               ├── Burst detection → Immediate rate limit
+               │
+               └── Known bad signal → Immediate block
+          ```
+
+          **Why batch-first:**
+          - **Graph features**: Full graph analysis requires batch computation -- real-time graph queries at scale are prohibitively expensive
+          - **Comprehensive features**: Batch allows using the complete 90-day behavioral history
+          - **Cost efficient**: Batch processing on spot instances costs ~70% less than always-on real-time infrastructure
+          - **Stability**: Batch scores are more stable than event-triggered scores (less jitter)
+
+          **Batch pipeline details:**
+          - Run daily at 2 AM UTC (low-traffic period)
+          - Spark cluster: 200 nodes, ~2 hours for 500M accounts
+          - Features materialized from Hive tables + Redis snapshots
+          - Scores written to DynamoDB for <5ms lookup at enforcement time
+
+          **Real-time overrides (covering the gap):**
+          - Rule-based filters catch obvious bots in real-time (known bad IPs, rate limit violations)
+          - New account scoring service runs a lightweight model on creation
+          - CAPTCHA challenges for suspicious actions even before batch scoring
+
+          **Trade-off:** 24-hour detection delay for sophisticated bots that don't trigger real-time rules. Mitigated by: (1) real-time rules catch obvious cases, (2) newly created accounts are scored immediately, (3) high-activity accounts trigger ad-hoc rescoring.
+        next: deploy_batch
+
+  - id: deploy_event
+    stage: deployment
+    type: info
+    label: "Event-Driven Deployment Details"
+    speaker: interviewer
+    content: |
+      Let's detail the event-driven deployment.
+
+      **Scoring service infrastructure:**
+
+      | Component | Technology | Scale | Latency |
+      |-----------|-----------|-------|---------|
+      | Event Stream | Kafka (partitioned by account_id) | 2B events/day | <50ms |
+      | Feature Store | Redis Cluster (256GB) | 500M accounts | <5ms |
+      | Scoring Service | K8s + LightGBM (100 pods) | ~50K scores/min | <5ms |
+      | Enforcement DB | DynamoDB | 500M records | <5ms |
+      | Graph DB | Neo4j | Suspicious accounts only | <100ms |
+
+      **Account lifecycle scoring:**
+
+      ```
+      Account Created → Immediate Score (lightweight model)
+           │                    │
+           │              Score > 0.8 → Block + CAPTCHA
+           │              Score > 0.5 → Rate limit + monitor
+           │              Score < 0.5 → Normal access
+           │
+      Ongoing Activity → Event-driven rescoring
+           │
+      24h Batch → Full feature rescore (graph + behavioral)
+      ```
+
+      **Scaling for coordinated attacks:**
+      - Bot campaigns can create 100K+ accounts simultaneously
+      - Auto-scale scoring pods based on account creation rate
+      - Emergency mode: If creation rate >10x normal, require CAPTCHA for ALL new accounts
+      - Circuit breaker: If scoring service overwhelmed, fall back to rule-based enforcement
+
+      Now let's discuss monitoring.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle the race condition where a bot scores clean on creation but turns malicious later?"
+      - speaker: candidate
+        text: "Periodic rescoring handles this. All accounts are rescored within 24 hours via batch, and high-activity accounts are rescored on every trigger event. The key is that enforcement states are mutable -- an account approved today can be flagged tomorrow."
+      - speaker: interviewer
+        text: "What about the transition period for new accounts?"
+      - speaker: candidate
+        text: "New accounts get a 7-day probationary period with stricter thresholds and rate limits regardless of score. This gives the behavioral features time to accumulate enough signal for reliable scoring."
+    next: deploy_infrastructure
+
+  - id: deploy_batch
+    stage: deployment
+    type: info
+    label: "Batch Deployment Details"
+    speaker: interviewer
+    content: |
+      Let's detail the batch scoring architecture.
+
+      **Daily batch pipeline:**
+
+      ```
+      02:00 UTC ─── Feature Extraction (Spark, 1h)
+                         │
+                         ├── Account features from Hive
+                         ├── Behavioral features from event logs
+                         ├── Graph features from Spark GraphX
+                         └── Content features from text pipeline
+                         │
+      03:00 UTC ─── Model Scoring (Spark, 30 min)
+                         │
+                         ├── LightGBM score per account
+                         ├── (Optional: GNN scoring for flagged)
+                         └── Score calibration
+                         │
+      03:30 UTC ─── Enforcement Update (1h)
+                         │
+                         ├── Compare new scores to previous
+                         ├── Newly flagged → Add to enforcement
+                         ├── Score improved → Remove enforcement
+                         └── Write to DynamoDB
+                         │
+      04:30 UTC ─── Complete. Real-time serving of new scores.
+      ```
+
+      **Cost comparison:**
+
+      | Architecture | Monthly Cost | Coverage |
+      |-------------|-------------|----------|
+      | Batch only | ~$30K | 24h detection delay |
+      | Event-driven only | ~$120K | Real-time but no graph features |
+      | **Hybrid (recommended)** | ~$80K | Best of both: real-time + graph |
+
+      **Backfill and reprocessing:**
+      - When a new model is trained, backfill scores for all 500M accounts (~4 hours on 200-node Spark cluster)
+      - Maintain score history for 90 days (enables analysis of bot lifecycle)
+      - When a new feature is added, backfill features before including in model
+
+      Now let's discuss monitoring.
+    dialogue:
+      - speaker: interviewer
+        text: "What happens if the batch pipeline fails?"
+      - speaker: candidate
+        text: "Scores from the previous day remain active in DynamoDB -- they're stale by 24h but still useful. The real-time override layer continues catching obvious bots. We have automated alerting on pipeline failure with a runbook for manual recovery."
+      - speaker: interviewer
+        text: "How do you validate batch results before they go live?"
+      - speaker: candidate
+        text: "Sanity checks: compare score distributions between yesterday and today, flag if newly suspended accounts exceed 2x historical rate, sample 100 newly flagged accounts for quick human review. Auto-rollback if any check fails."
+    next: deploy_infrastructure
+
+  - id: deploy_infrastructure
+    stage: deployment
+    type: info
+    label: "CI/CD & Safety Infrastructure"
+    speaker: interviewer
+    content: |
+      Bot detection model deployments need careful safety infrastructure. False positives suspend real users, and false negatives allow bot networks to operate unchecked.
+
+      **CI/CD pipeline for model deployment:**
+
+      ```
+      Model Training Complete
+           │
+           ▼
+      Automated Validation Gates:
+      1. PR-AUC > 0.95 on temporal test set
+      2. False suspension rate < 0.01% on known-human set
+      3. Red team detection rate > 80%
+      4. No regression on any bot type category
+      5. Latency benchmark passes
+           │
+           ▼
+      Shadow Scoring (2 weeks):
+      - Score all accounts alongside champion
+      - Compare score distributions
+      - Analyze disagreements (manual review of 500 samples)
+           │
+           ▼
+      Gradual Rollout:
+      - 5% of enforcement decisions from new model (1 week)
+      - 25% (1 week) → 50% (3 days) → 100%
+      - Automated rollback triggers:
+        * False suspension rate > 0.02%
+        * Appeal rate > 2x baseline
+        * Bot prevalence estimate changes > 20%
+      ```
+
+      **Enforcement safety mechanisms:**
+      - **Graduated enforcement**: New detections start with CAPTCHA, escalate to rate-limiting, then suspension
+      - **Appeal fast-track**: First-time flagged accounts with >1 year history get expedited appeal (<1 hour)
+      - **Never auto-suspend verified accounts**: Verified (blue-check) accounts are always sent to human review
+      - **Cooling period**: After a model update, no bulk enforcement for 48 hours -- let the system stabilize
+
+      **Incident response for bot attacks:**
+      - **Coordinated attack detected**: Temporarily lower thresholds for new account creation, increase CAPTCHA rate
+      - **Model evasion identified**: Emergency rule deployment for the specific evasion pattern, then model retrain
+      - **False positive spike**: Immediately raise thresholds, pause new enforcement, begin manual review of recent actions
+
+      **Model versioning:**
+      - All model artifacts versioned with full reproducibility
+      - Previous 3 versions available for instant rollback
+      - Each version tagged with the training data snapshot and feature schema
+
+      Let's now design the monitoring system.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you balance speed of deployment with safety?"
+      - speaker: candidate
+        text: "Shadow scoring is the key safety net. Two weeks of shadow scoring reveals problems without affecting users. The gradual rollout then provides a second layer of safety with automated rollback triggers. For emergency model updates, we compress the timeline but keep the automated safety checks."
+      - speaker: interviewer
+        text: "What about the risk of suspending high-profile accounts?"
+      - speaker: candidate
+        text: "Never auto-suspend verified or high-follower accounts. Those go to a priority human review queue. The reputational damage from suspending a legitimate public figure far outweighs the risk of leaving a sophisticated bot active for a few more hours."
+      - speaker: interviewer
+        text: "Smart. Let's discuss ongoing monitoring."
+    next: mon_strategy
+
+  # ============ MONITORING ============
+  - id: mon_strategy
+    stage: monitoring
+    type: question
+    label: "Monitoring Strategy"
+    speaker: interviewer
+    content: |
+      Bot detection monitoring must handle the adversarial nature of bots and the difficulty of measuring true performance. How would you design the monitoring system?
+    choices:
+      - label: "Prevalence estimation + adversarial testing"
+        answer: |
+          I'd build a monitoring system centered on **bot prevalence estimation** and **continuous adversarial testing**:
+
+          **Bot prevalence estimation (gold standard):**
+          - Weekly random sample of 5,000 accounts
+          - Each reviewed by 2 Trust & Safety analysts
+          - Estimate: (1) total bot prevalence, (2) per-bot-type prevalence, (3) detection recall
+          - This is the only unbiased estimate of how well the system is working
+
+          **Adversarial red team testing:**
+          - Internal red team creates bot accounts monthly using latest techniques:
+            - GPT-generated content bots
+            - Slow-burn bots that build history before activation
+            - Distributed bot networks across many IPs
+            - Accounts that mimic real user patterns
+          - Measure: How long until the system detects them? What score do they receive?
+          - Finding: If the red team can evade detection for >7 days, the system needs improvement
+
+          **Automated monitoring signals:**
+
+          | Signal | Threshold | Meaning |
+          |--------|----------|---------|
+          | Score distribution shift | KL-divergence >0.05 | Bot tactics or model changed |
+          | New account suspension rate | >2x or <0.5x baseline | Campaign or model drift |
+          | User bot reports | >50% increase | Model missing bots |
+          | Appeal overturn rate | >5% (precision) or >15% (recall mode) | Over-moderation |
+          | Bot campaign detection | New clusters appearing | Emerging coordinated attack |
+
+          **Monthly threat intelligence report:**
+          - Catalog of active bot campaigns (source, method, scale, detection rate)
+          - New evasion techniques observed
+          - Recommendations for model improvements
+          - Benchmarking against external detection tools
+        next: mon_prevalence
+      - label: "Platform health metrics + engagement authenticity"
+        answer: |
+          I'd focus monitoring on **platform health metrics** that capture the real-world impact of bots:
+
+          **Platform health dashboard:**
+
+          | Metric | Measurement | Target | Why |
+          |--------|-------------|--------|-----|
+          | Spam encounter rate | % of feed items that are spam (sampled) | <0.1% | User experience |
+          | Fake engagement rate | % of likes/retweets from bot accounts | <2% | Advertiser trust |
+          | Manipulation index | Unusual amplification of specific content | Decreasing | Platform integrity |
+          | Organic reach ratio | Organic vs bot-amplified impressions | >95% organic | Content authenticity |
+          | User trust survey | Quarterly survey on bot perception | >80% trust | User retention |
+
+          **Engagement authenticity monitoring:**
+          - For trending topics: What fraction of engagement is from flagged/suspicious accounts?
+          - For viral content: Is the amplification pattern organic (exponential) or coordinated (step function)?
+          - For political content: Are both sides getting similar levels of inauthentic amplification?
+
+          **Advertiser-facing metrics:**
+          - **Invalid traffic rate**: % of ad impressions served to bot accounts
+          - Target: <1% (industry standard from IAS/DoubleVerify)
+          - Track by ad campaign, advertiser, and ad format
+          - Provide transparency dashboard for major advertisers
+
+          **Feedback from downstream systems:**
+          - Content recommendation system: Are bot-generated items appearing in recommendations?
+          - Trending algorithm: Are bots manipulating trending topics?
+          - Search: Are bot accounts appearing in people search results?
+          - Each downstream system provides signals about bot impact on their domain
+
+          **Quarterly review:** Executive dashboard showing bot impact on platform KPIs (DAU quality, engagement authenticity, advertiser satisfaction, regulatory compliance).
+        next: mon_health
+
+  - id: mon_prevalence
+    stage: monitoring
+    type: info
+    label: "Prevalence Monitoring Details"
+    speaker: interviewer
+    content: |
+      Excellent approach. Prevalence estimation is the most rigorous way to measure bot detection effectiveness.
+
+      **Prevalence estimation methodology:**
+
+      ```
+      Weekly Random Sample (5,000 accounts)
+           │
+           ▼
+      Analyst Review (2 reviewers per account)
+           │
+           ├── Definite bot (both agree)
+           ├── Definite human (both agree)
+           ├── Uncertain (disagree) → 3rd reviewer tiebreak
+           │
+           ▼
+      Prevalence Estimate ± Confidence Interval
+           │
+           ├── Overall: X% ± Y% (95% CI)
+           ├── By type: spam Z%, astroturfing W%, ...
+           └── By detection status: caught A%, uncaught B%
+      ```
+
+      **Using prevalence to measure recall:**
+      - Total estimated bots in sample: N_bot
+      - Bots our system flagged: N_flagged
+      - Recall estimate: N_flagged / N_bot
+      - This gives unbiased recall even for bots the system missed
+
+      **Red team scorecard (monthly):**
+
+      | Bot Type Created | Accounts | Detected Within 24h | Within 7d | Undetected |
+      |-----------------|----------|---------------------|-----------|-----------|
+      | GPT content bot | 20 | 5 (25%) | 15 (75%) | 5 (25%) |
+      | Follower farm | 100 | 80 (80%) | 95 (95%) | 5 (5%) |
+      | Slow-burn astro | 10 | 0 (0%) | 3 (30%) | 7 (70%) |
+      | Spam network | 50 | 45 (90%) | 50 (100%) | 0 (0%) |
+
+      This scorecard directly drives model improvement priorities. In this example, slow-burn astroturfing bots need urgent attention.
+
+      You've designed a comprehensive bot detection system!
+    dialogue:
+      - speaker: interviewer
+        text: "What do you do when the red team consistently evades detection?"
+      - speaker: candidate
+        text: "That's actually the desired outcome of the exercise -- finding blind spots. We analyze exactly how the red team accounts differ from detected bots, create targeted training data from these accounts, and develop new features to capture the evasion patterns."
+      - speaker: interviewer
+        text: "How do you ensure the prevalence estimate is statistically valid?"
+      - speaker: candidate
+        text: "Sample size of 5,000 gives a margin of error of about +-1.4% at 95% confidence for a 5% prevalence rate. We stratify the sample by account age, activity level, and geography to ensure representativeness."
+    next: mon_terminal_prevalence
+
+  - id: mon_health
+    stage: monitoring
+    type: info
+    label: "Platform Health Monitoring"
+    speaker: interviewer
+    content: |
+      Great approach focusing on downstream impact.
+
+      **Automated health alerting:**
+
+      | Alert | Threshold | Action |
+      |-------|----------|--------|
+      | Spam encounter rate | >0.5% of impressions | Investigate + tighten thresholds |
+      | Fake engagement spike | >5% on any trending topic | Flag topic for review |
+      | Account creation rate | >5x normal sustained 1hr | Activate CAPTCHA for all new accounts |
+      | Bot campaign detected | New coordinated cluster | Alert Trust & Safety team |
+      | Model score drift | KL-divergence >0.05 | Investigate model health |
+
+      **Integration with other platform systems:**
+      - **Advertising**: Share bot scores with ad targeting -- don't serve ads to likely bots (saves advertiser money, builds trust)
+      - **Recommendations**: Down-rank content from bot-amplified sources
+      - **Search**: Exclude flagged accounts from people/account search
+      - **Trending**: Filter bot engagement from trending algorithm inputs
+      - **Verification**: Fast-track verification for accounts with very low bot scores
+
+      **Regulatory compliance monitoring:**
+      - EU DSA requires platforms to report bot prevalence
+      - Maintain audit trail of all bot detection and enforcement actions
+      - Quarterly transparency report with bot prevalence estimates, takedown numbers, and appeal statistics
+
+      **Continuous improvement flywheel:**
+      1. Detection system catches bots
+      2. Human review confirms/corrects
+      3. Confirmed labels feed back into training
+      4. New model trained and deployed
+      5. Red team tests new model
+      6. Repeat
+
+      You've designed a comprehensive bot detection system!
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle the fact that bot detection can be politically controversial?"
+      - speaker: candidate
+        text: "Transparency is key. Publish methodology, error rates, and appeal statistics. Use consistent criteria regardless of political orientation. Have the Trust & Safety team review high-profile enforcement decisions before they take effect."
+      - speaker: interviewer
+        text: "What's the most impactful metric for stakeholders?"
+      - speaker: candidate
+        text: "For executives: fake engagement rate, because it directly impacts advertiser revenue and platform credibility. For users: spam encounter rate. For regulators: prevalence estimate with confidence intervals."
+    next: mon_terminal_health
+
+  # ============ TERMINALS ============
+  - id: mon_terminal_prevalence
+    stage: monitoring
+    type: terminal
+    label: "Prevalence Monitoring Path Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive **bot detection system** with rigorous prevalence monitoring.
+
+      **Your design summary:**
+      - **Problem**: Multi-signal bot detection across 500M accounts
+      - **Metrics**: Precision-recall trade-off with graduated enforcement
+      - **Data**: Multi-source labels with PU learning for noisy ground truth
+      - **Features**: Behavioral timing, activity patterns, graph structure
+      - **Model**: Scalable architecture with cascading complexity
+      - **Training**: Weekly retraining with adversarial evolution awareness
+      - **Deployment**: Event-driven or batch scoring with real-time overrides
+      - **Monitoring**: Prevalence estimation, red team testing, threat intelligence
+
+      **Key strengths:**
+      - Prevalence estimation provides unbiased performance measurement
+      - Red team testing proactively identifies blind spots
+      - Multi-signal approach catches different bot types
+      - Graduated enforcement balances detection with user experience
+
+      Outstanding system design for one of the hardest problems in platform security!
+
+  - id: mon_terminal_health
+    stage: monitoring
+    type: terminal
+    label: "Platform Health Path Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive **bot detection system** focused on platform health impact.
+
+      **Your design summary:**
+      - **Problem**: Bot detection as a platform integrity challenge
+      - **Metrics**: Business-aligned targets with engagement authenticity focus
+      - **Data**: Diverse signals with adversarial label handling
+      - **Features**: Rich behavioral and network analysis
+      - **Model**: Production-optimized architecture for scale
+      - **Training**: Continuous learning with bot evolution tracking
+      - **Deployment**: Scalable infrastructure with real-time and batch components
+      - **Monitoring**: Platform health metrics with downstream system integration
+
+      **Key strengths:**
+      - Metrics tied to real business impact (advertiser trust, user experience)
+      - Integration with downstream systems amplifies detection value
+      - Regulatory compliance built into monitoring framework
+      - Continuous improvement flywheel keeps system current
+
+      Outstanding system design that connects bot detection to platform-wide health!

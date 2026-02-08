@@ -1,0 +1,528 @@
+id: drift-monitoring
+title: "Data & Concept Drift Monitor"
+description: "Build a monitoring system to detect data and concept drift in production models."
+companies: ["Google", "Netflix", "Uber"]
+domains: ["MLOps/Infrastructure", "Anomaly Detection"]
+root: pd_start
+
+nodes:
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design a **drift monitoring system** that detects when production ML models degrade due to changes in data distributions or underlying relationships.
+
+      **Context**: The organization runs **150+ ML models** in production. Over the past year, several high-impact incidents were caused by undetected drift:
+      - A **fraud detection model** missed $2M in fraud because fraudsters shifted to a new attack pattern (concept drift). The model's precision dropped from 95% to 70% over 3 weeks, undetected
+      - A **recommendation model** served irrelevant results for 2 weeks because a data pipeline change silently altered feature distributions (data drift)
+      - A **pricing model** gave incorrect prices after a schema change upstream introduced null values in a key feature (data quality issue)
+
+      **The drift monitoring system should:**
+      - Detect **data drift** (input feature distributions change)
+      - Detect **concept drift** (relationship between features and labels changes)
+      - Detect **data quality issues** (schema changes, null spikes, range violations)
+      - Alert model owners within **hours**, not weeks
+      - Work across diverse model types (classification, regression, ranking, LLM-based)
+      - Monitor **150+ models** with **10,000+ features** total
+      - Minimize false alerts (alert fatigue is the #1 reason monitoring systems are ignored)
+
+      This is a meta-ML problem: building ML infrastructure to monitor other ML systems.
+    dialogue:
+      - speaker: interviewer
+        text: "We need to build a drift monitoring system. The organization has had several costly incidents from undetected model degradation."
+      - speaker: candidate
+        text: "What types of drift are we most concerned about?"
+      - speaker: interviewer
+        text: "Data drift, concept drift, and data quality issues. The fraud model incident was concept drift - fraudsters changed tactics. The recommendation incident was data drift from a pipeline change."
+      - speaker: candidate
+        text: "How quickly do we need to detect these changes?"
+      - speaker: interviewer
+        text: "Within hours, not weeks. The fraud model degraded for 3 weeks before anyone noticed. That's unacceptable."
+    next: pd_types
+
+  - id: pd_types
+    stage: problem_definition
+    type: info
+    label: "Drift Types Explained"
+    speaker: interviewer
+    content: |
+      Let's clarify the different types of drift we need to detect.
+
+      **Data drift** (covariate shift): The distribution of input features P(X) changes over time, but the relationship P(Y|X) remains the same.
+      - Example: An e-commerce model trained on desktop user features starts receiving mostly mobile users. Feature distributions shift (screen size, session duration, click patterns), but the underlying purchase behavior given those features hasn't changed.
+      - **Detection**: Compare feature distributions between reference (training data) and production windows.
+
+      **Concept drift**: The relationship between features and labels P(Y|X) changes, even if feature distributions stay the same.
+      - Example: COVID-19 changed consumer purchasing behavior. The same user features that predicted "will buy" pre-COVID now predict differently. Features look the same, but what they mean for predictions has changed.
+      - **Detection**: Monitor prediction accuracy over time. Requires ground truth labels (often delayed).
+
+      **Prediction drift**: The distribution of model predictions P(Y_hat) changes.
+      - Example: A model that historically predicted 5% fraud rate suddenly predicts 15%. This can indicate either data drift or concept drift.
+      - **Detection**: Compare prediction distribution over time. Available immediately (no labels needed).
+
+      **Data quality drift**: The data itself is corrupted, not naturally drifting.
+      - Example: A feature goes from 2% nulls to 80% nulls because an upstream API changed. Or a feature's type changes from float to string.
+      - **Detection**: Schema validation, null rate monitoring, range checks.
+
+      Each type requires different detection methods and has different urgency levels.
+    dialogue:
+      - speaker: interviewer
+        text: "There are several distinct types of drift. Can you explain the difference between data drift and concept drift?"
+      - speaker: candidate
+        text: "Data drift is when the input distribution changes - like getting more mobile users. Concept drift is when the relationship between inputs and outputs changes - like COVID changing purchase patterns."
+      - speaker: interviewer
+        text: "Good. Why is the distinction important?"
+      - speaker: candidate
+        text: "Because the remediation is different. Data drift might be fixed by retraining on recent data. Concept drift might require fundamentally rethinking the feature set or model architecture."
+      - speaker: interviewer
+        text: "Exactly. And prediction drift can be a symptom of either. Let's think about metrics."
+    next: met_detection
+
+  - id: met_detection
+    stage: metrics
+    type: question
+    label: "Detection Approach"
+    speaker: interviewer
+    content: |
+      How would you approach drift detection? The fundamental question is whether to use statistical tests or model-based approaches.
+    dialogue:
+      - speaker: interviewer
+        text: "What's your approach to detecting drift across 10,000 features? Statistical tests? ML-based approaches?"
+      - speaker: candidate
+        text: "Each has different strengths. Statistical tests are interpretable but may miss complex multivariate drift. ML-based approaches catch more but are harder to explain."
+    choices:
+      - label: "Statistical test suite (KS, PSI, Chi-squared)"
+        answer: |
+          I'd build a **statistical test suite** using well-established hypothesis tests for drift detection. Interpretability and false positive control are paramount for a monitoring system.
+
+          **Per-feature univariate tests:**
+          - **Kolmogorov-Smirnov (KS) test** for continuous features: Tests whether two distributions are different. Non-parametric, makes no distribution assumptions. A KS statistic >0.1 with p-value <0.01 indicates significant drift
+          - **Population Stability Index (PSI)** for all features: Compares binned distributions. PSI <0.1 = no drift, 0.1-0.25 = moderate drift, >0.25 = significant drift. Industry standard in banking/finance
+          - **Chi-squared test** for categorical features: Tests whether category proportions changed. With Bonferroni correction for multiple testing
+
+          **Multivariate drift detection:**
+          - **Maximum Mean Discrepancy (MMD)**: Kernel-based test that detects differences in joint distributions, not just marginals. Can detect drift that individual feature tests miss (e.g., correlation structure change)
+          - Run MMD on the top 50 principal components of the feature space for efficiency
+
+          **Why statistical tests?**
+          - **Interpretable**: "Feature X has KS statistic 0.35, meaning its distribution has significantly shifted." Model owners understand this immediately
+          - **Controllable false positive rate**: Set significance level (alpha=0.01) to limit false alerts. Critical for avoiding alert fatigue
+          - **Well-studied**: Decades of statistical theory behind these tests. Known failure modes and assumptions
+          - **Efficient**: KS test runs in O(n log n). Can test 10,000 features in seconds
+
+          **Trade-off**: Univariate tests can miss multivariate drift. PSI requires binning choices. Multiple testing correction reduces sensitivity. But interpretability wins for an operational monitoring system.
+        next: data_architecture
+      - label: "ML-based drift detection (classifier two-sample test)"
+        answer: |
+          I'd use an **ML-based approach** where a classifier is trained to distinguish between reference and production data. If it can tell them apart, they've drifted.
+
+          **Classifier Two-Sample Test (C2ST)**:
+          1. Take a sample from the reference distribution (training data) and label it 0
+          2. Take a sample from the production distribution (recent predictions) and label it 1
+          3. Train a lightweight classifier (logistic regression or small random forest) to distinguish them
+          4. If accuracy > 55% (significantly above chance), the distributions are different = drift detected
+          5. **Feature importance** from the classifier reveals WHICH features drifted most
+
+          **Why ML-based?**
+          - **Catches multivariate drift**: A classifier can detect changes in feature correlations, interaction effects, and high-dimensional patterns that univariate tests miss entirely
+          - **Adaptive**: The classifier learns what "normal" looks like for each specific model, rather than applying generic statistical thresholds
+          - **Feature attribution**: Permutation importance or SHAP on the drift classifier shows exactly which features contributed most to drift. This is operationally valuable - "drift is primarily in features X, Y, Z"
+          - **Handles heterogeneous features**: Works on mixed numeric/categorical features without separate tests
+
+          **Implementation:**
+          - **Reference window**: Last training data snapshot (e.g., 100K samples)
+          - **Production window**: Last 24 hours of production data (varying sample size)
+          - **Classifier**: Gradient-boosted trees (LightGBM) for speed and handling mixed features
+          - **Evaluation**: 5-fold cross-validated accuracy as the drift score. Score >0.55 = warning, >0.65 = critical
+          - **Run frequency**: Every 6 hours for high-priority models, daily for others
+
+          **Concept drift detection**: Same approach but with prediction confidence. Train classifier to distinguish between high-confidence and low-confidence predictions over time. If confidence distribution shifts, concept drift is likely.
+
+          **Trade-off**: Less interpretable than statistical tests ("the classifier achieves 72% accuracy distinguishing data" is less intuitive than "KS statistic is 0.35"). Also has its own hyperparameters that need tuning. But catches drift that statistical tests miss.
+        next: data_architecture
+
+  - id: data_architecture
+    stage: data
+    type: info
+    label: "Reference Data Architecture"
+    speaker: interviewer
+    content: |
+      Let's discuss how we store and manage the reference distributions and production data for drift detection.
+
+      **Reference data management:**
+      - **Training reference**: Snapshot of the feature distributions used to train each model version. Stored as statistical summaries (histograms, quantiles, correlations) + raw samples (10K-100K rows)
+      - **Rolling reference**: Updated weekly or monthly to account for natural seasonal variation. A recommendation model's traffic patterns in December look different from June - that's expected, not drift
+      - **Baseline calibration**: When a model is deployed, run drift detection for 2 weeks in "calibration mode" to establish normal variation levels. Set alert thresholds based on observed variation
+
+      **Production data pipeline:**
+      - **Logging**: Model serving infrastructure logs every prediction request: features, prediction, confidence, timestamp, model version
+      - **Sampling**: At 10M predictions/day per model, storing everything is expensive. **Stratified sampling** at 1-10% for drift detection, with higher sampling for rare classes
+      - **Storage**: Production logs stored in columnar format (Parquet on S3) partitioned by model + date
+      - **Privacy**: Features may contain PII. Store statistical summaries rather than raw features where possible. Apply differential privacy noise if needed
+
+      **Windowing strategy:**
+      - **Detection window**: Typically 1 hour - 1 day of production data. Too short = noisy, too long = delayed detection
+      - **Comparison**: Compare detection window against reference window using selected drift metrics
+      - **Sliding windows**: Overlap windows by 50% for continuous monitoring without gaps
+
+      **Data budget**: At 150 models * 10K sampled rows/day * 100 features * 8 bytes = ~12GB/day of production data for drift monitoring. Very manageable.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you manage the reference data that production data is compared against?"
+      - speaker: candidate
+        text: "Both a training reference snapshot and a rolling reference that accounts for seasonal variation. A December baseline shouldn't be compared against June data."
+      - speaker: interviewer
+        text: "Good point. What about the production data pipeline?"
+      - speaker: candidate
+        text: "Log predictions at 1-10% sampling rate, stored in columnar format. At 150 models, that's about 12GB per day - very manageable."
+      - speaker: interviewer
+        text: "And how do you handle PII in logged features?"
+      - speaker: candidate
+        text: "Store statistical summaries rather than raw features where possible. Apply differential privacy noise for sensitive features."
+    next: data_question
+
+  - id: data_question
+    stage: data
+    type: question
+    label: "Concept Drift Strategy"
+    speaker: interviewer
+    content: |
+      Concept drift (changing P(Y|X)) is harder to detect because it requires ground truth labels, which are often delayed. How would you approach this?
+    dialogue:
+      - speaker: interviewer
+        text: "For concept drift, we need labels. But labels might be delayed by days or weeks. How do you detect concept drift early?"
+      - speaker: candidate
+        text: "We need proxy metrics that indicate concept drift before delayed labels arrive."
+    choices:
+      - label: "Proxy metrics (prediction confidence, stability)"
+        answer: |
+          I'd use **proxy metrics** that indicate concept drift without requiring ground truth labels, enabling near-real-time detection.
+
+          **Prediction confidence monitoring:**
+          - Track the distribution of model confidence scores (softmax probabilities for classification, prediction intervals for regression)
+          - If the model was well-calibrated at training time, a shift in confidence distribution suggests the model is encountering data where it's less certain - a strong concept drift signal
+          - Metric: **Average confidence** and **confidence entropy**. Alert when average confidence drops >10% from baseline
+
+          **Prediction stability:**
+          - For the same entity (user, transaction), how much does the prediction change between consecutive scoring runs?
+          - High instability (same user gets very different scores hour-to-hour) suggests the model is in an unstable region of feature space
+          - Metric: **Prediction flip rate** for classification, **prediction variance** for regression
+
+          **Feature-prediction correlation monitoring:**
+          - Track Pearson/Spearman correlation between each feature and the model's prediction. These correlations should be stable if P(Y|X) is stable
+          - If a feature that was strongly correlated with positive predictions (r=0.7) suddenly becomes uncorrelated (r=0.1), the relationship has changed
+          - Run correlation analysis on each detection window and compare to reference
+
+          **Cohort-level performance:**
+          - For models with delayed labels, track cohort-level metrics. Example: "Of users scored as high-risk 7 days ago, what percentage actually churned?" Compare to historical cohort conversion rates
+          - This gives concept drift signal with label delay, not real-time, but much faster than waiting for individual labels
+
+          **Advantages**: All these metrics are available immediately without labels. Can detect concept drift within hours, not weeks.
+        next: feat_monitoring
+      - label: "Accelerated labeling + performance monitoring"
+        answer: |
+          I'd invest in **accelerated labeling pipelines** to get ground truth labels as quickly as possible, enabling direct concept drift detection.
+
+          **Label acceleration strategies by model type:**
+          - **Fraud detection**: Labels come from chargebacks (30-60 days delayed) or manual review (1-7 days). Accelerate by: routing a random 5% of predictions to immediate manual review. This gives 24-hour labeled samples for drift detection
+          - **Recommendations**: Labels are implicit (click, purchase, ignore). Available within hours. Monitor CTR and conversion rate as direct performance metrics
+          - **Pricing**: Revenue outcome is immediate. Track revenue per prediction as a direct quality signal
+          - **Credit scoring**: Default labels are delayed 3-12 months. Use early payment behavior (30-day) as proxy labels
+
+          **Performance monitoring with partial labels:**
+          - Even with delayed labels, a SUBSET of labels arrive quickly (e.g., 10% of fraud cases are caught within 48 hours by manual review)
+          - Track model performance on this fast-arriving subset as an early warning system
+          - **Assumption**: If performance degrades on the fast subset, it will degrade on the full dataset too
+
+          **A/B testing for concept drift:**
+          - Continuously run a small champion-challenger experiment
+          - If the challenger model (recently retrained) significantly outperforms the champion (older model), concept drift has occurred
+          - The performance gap size indicates drift magnitude
+
+          **Sequential testing:**
+          - Use **CUSUM (Cumulative Sum)** or **Page-Hinkley** test on streaming performance metrics
+          - These sequential tests detect mean shifts in a time series efficiently
+          - Alert when the cumulative deviation from expected performance exceeds a threshold
+          - Advantages: Controls false positive rate while detecting changes quickly
+
+          **Trade-off**: Requires labeling investment. Manual review costs $5-10 per sample. Reviewing 100 samples/day per model = $500-1000/day across 150 models. Expensive but provides definitive drift signals.
+        next: feat_monitoring
+
+  - id: feat_monitoring
+    stage: features
+    type: info
+    label: "Feature-Level Monitoring"
+    speaker: interviewer
+    content: |
+      Let's design the feature-level monitoring system that tracks individual feature health.
+
+      **Per-feature monitoring dashboard:**
+      For each of the 10,000+ features, continuously track:
+      - **Distribution statistics**: Mean, median, standard deviation, quantiles (p5, p25, p75, p95). Compare to reference baseline
+      - **Null rate**: Percentage of null/missing values. Alert on increase >2x baseline
+      - **Cardinality** (categorical): Number of unique values. New unseen categories indicate distribution shift
+      - **Range**: Min/max values. Out-of-range values indicate data quality issues
+      - **Correlation matrix**: Pairwise correlations between top features. Structural changes indicate multivariate drift
+
+      **Smart alerting to avoid fatigue:**
+      - With 10,000 features, naive per-feature alerting would generate hundreds of daily alerts (most false positives)
+      - **Feature importance weighting**: Weight drift scores by feature importance in the model. Drift in a feature with 0.1% importance doesn't matter; drift in a feature with 30% importance is critical
+      - **Correlated alert suppression**: If 50 features drift simultaneously because they share an upstream data source, fire ONE alert about the data source, not 50 individual alerts
+      - **Adaptive thresholds**: Learn normal variation patterns per feature. A feature that naturally varies (e.g., "day_of_week") has wider thresholds than a stable feature (e.g., "user_age")
+      - **Alert severity tiers**: P1 (model accuracy impacted, page on-call), P2 (significant drift, investigate within 24h), P3 (minor drift, weekly review)
+
+      **Feature health score**: Aggregate individual feature metrics into a single 0-100 health score per model. Scores below 80 trigger investigation. Calculated as weighted combination of drift magnitude, feature importance, and data quality metrics.
+    dialogue:
+      - speaker: interviewer
+        text: "With 10,000 features across 150 models, how do you avoid alert fatigue?"
+      - speaker: candidate
+        text: "Feature importance weighting is the key. Only alert on drift in features that actually matter to the model. And suppress correlated alerts from shared data sources."
+      - speaker: interviewer
+        text: "How do you summarize the health of a model's features?"
+      - speaker: candidate
+        text: "A composite health score from 0 to 100, combining drift magnitude, feature importance, and data quality. Below 80 triggers investigation."
+      - speaker: interviewer
+        text: "That gives model owners a single number to watch. What about individual feature deep-dives?"
+      - speaker: candidate
+        text: "Dashboard showing distribution comparison plots, time series of feature statistics, and null rate trends. One click from the health score to the specific drifting features."
+    next: mod_system
+
+  - id: mod_system
+    stage: model
+    type: question
+    label: "System Architecture"
+    speaker: interviewer
+    content: |
+      How would you architect the overall drift monitoring platform?
+    dialogue:
+      - speaker: interviewer
+        text: "Let's design the system architecture. How do all these monitoring components fit together?"
+      - speaker: candidate
+        text: "The core question is whether to build a streaming real-time system or a batch analysis pipeline."
+    choices:
+      - label: "Streaming architecture (real-time drift detection)"
+        answer: |
+          I'd build a **streaming drift detection system** that processes prediction logs in real-time for minimum detection latency.
+
+          **Architecture:**
+          1. **Ingestion**: Model serving infrastructure publishes prediction events (features + prediction + metadata) to **Apache Kafka** topics, one per model
+          2. **Stream processor** (Apache Flink): Consumes Kafka topics, maintains windowed statistics (running mean, variance, histograms) using Flink's state management. Window size: 1 hour sliding, 15-minute hop
+          3. **Drift computation**: Every 15 minutes, compare windowed statistics against reference distributions. Compute KS statistics, PSI, or C2ST scores. Emit drift scores to a results Kafka topic
+          4. **Alert engine**: Consumes drift scores. Applies feature importance weighting, correlated alert suppression, and adaptive thresholds. Fires alerts via PagerDuty/Slack when thresholds exceeded
+          5. **Dashboard** (Grafana/custom): Real-time visualization of drift scores, feature distributions, and alert history
+
+          **Why streaming?**
+          - **Fast detection**: Detect drift within 15-30 minutes of onset. Critical for high-impact models (fraud, pricing)
+          - **Continuous**: No batch job to fail or run late. Monitoring is always running
+          - **Scalable**: Kafka + Flink scales linearly. Add partitions/workers for more models or higher throughput
+
+          **State management**: Flink maintains windowed statistics in RocksDB-backed state. Per-model state: ~10MB (histograms for 100 features * 100 bins * 8 bytes). Total: 150 models * 10MB = 1.5GB. Easily fits in memory.
+
+          **Backpressure handling**: If production traffic spikes, Flink processes with bounded latency. Kafka buffering absorbs temporary throughput mismatches.
+
+          **Cost**: 5-10 Flink TaskManagers + Kafka cluster = ~$50K/year infrastructure. Plus engineering time for Flink development.
+        next: train_thresholds
+      - label: "Batch architecture (scheduled analysis)"
+        answer: |
+          I'd build a **batch drift analysis pipeline** that runs on a schedule, analyzing accumulated production data.
+
+          **Architecture:**
+          1. **Logging**: Model serving infrastructure logs predictions to a data warehouse (BigQuery/Snowflake) via async batch writes
+          2. **Orchestration**: Apache Airflow schedules drift analysis jobs. Default: every 6 hours for critical models, daily for others
+          3. **Analysis jobs** (Python/Spark):
+             - Load reference distributions from feature store
+             - Load production data window from data warehouse
+             - Compute all drift metrics (KS, PSI, MMD, C2ST, null rates, range checks)
+             - Compute feature health scores per model
+          4. **Results store**: Write drift scores, alerts, and diagnostics to PostgreSQL
+          5. **Alert dispatch**: Alert engine reads results, applies suppression logic, sends notifications
+          6. **Dashboard**: Web UI showing drift trends, feature health, and alert history
+
+          **Why batch?**
+          - **Simpler infrastructure**: No Kafka, no Flink, no streaming state management. Standard data warehouse + Airflow + Python
+          - **Richer analysis**: Batch jobs can run more sophisticated analyses (C2ST with full cross-validation, multivariate MMD, correlation structure analysis) because there's no real-time constraint
+          - **Cost-effective**: Pay for compute only when jobs run. No always-on streaming infrastructure
+          - **Debuggable**: Each batch run produces a complete report. Easy to re-run, inspect, and debug. Streaming state is harder to examine
+
+          **Detection latency**: 6-hour batch cadence means worst-case 6-hour detection delay. For most models, this is acceptable. For critical models (fraud), run more frequently (hourly).
+
+          **Incremental computation**: Don't recompute everything from scratch each run. Maintain rolling statistics that are incrementally updated. Each batch job only processes new data since last run.
+
+          **Cost**: Airflow orchestration + batch compute (Spark/Python on spot instances) = ~$20K/year. Significantly cheaper than streaming infrastructure.
+
+          **Trade-off**: Slower detection than streaming (6 hours vs. 15 minutes). But for most models, 6-hour detection is a massive improvement over the current weeks-to-detect status quo.
+        next: train_thresholds
+
+  - id: train_thresholds
+    stage: training
+    type: info
+    label: "Threshold Calibration"
+    speaker: interviewer
+    content: |
+      Let's discuss how to set and calibrate alert thresholds - this is critical to avoid alert fatigue.
+
+      **The alert fatigue problem**: If we set thresholds too low, we get hundreds of alerts daily and engineers ignore them all. If too high, we miss real drift. The sweet spot is different for every model and every feature.
+
+      **Threshold calibration approach:**
+      1. **Calibration period**: When a model is first monitored, run drift detection for 2-4 weeks without alerting. Observe the natural variation in drift scores
+      2. **Baseline statistics**: Compute mean and standard deviation of each drift metric during the calibration period. This captures normal seasonal and daily variation
+      3. **Dynamic thresholds**: Set alert thresholds at mean + 3*sigma (for P2 warnings) and mean + 5*sigma (for P1 critical). These adapt to each metric's natural variability
+      4. **Seasonal adjustment**: For models with known seasonality (e-commerce holiday season, tax season), maintain seasonal baselines. Compare against same-season reference, not overall average
+
+      **Feature importance-weighted drift score:**
+      ```
+      weighted_drift = sum(drift_i * importance_i) / sum(importance_i)
+      ```
+      Where `drift_i` is the drift score for feature i, and `importance_i` is SHAP importance or permutation importance from the model. This focuses attention on features that actually affect predictions.
+
+      **Alert suppression rules:**
+      - **Root cause grouping**: If 20 features from the same data source drift, fire one alert about the data source, not 20 feature alerts
+      - **Time-based dedup**: Don't re-alert for the same drift within 24 hours unless severity increases
+      - **Known events**: Suppress alerts during known events (product launches, holidays) with configurable suppression windows
+      - **Gradual drift tracking**: Distinguish between sudden shifts (alert immediately) and gradual drift (alert after sustained trend over 7+ days)
+
+      **Alert routing**: Route alerts to the right people. Feature drift -> data engineering team. Concept drift -> ML engineering team. Data quality -> platform team.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you set thresholds that balance sensitivity with false alarm rate?"
+      - speaker: candidate
+        text: "Calibration period to establish baseline variation, then dynamic thresholds at 3-sigma for warnings and 5-sigma for critical alerts."
+      - speaker: interviewer
+        text: "And what about correlated alerts?"
+      - speaker: candidate
+        text: "Root cause grouping. If 20 features from one data source drift, that's one alert about the source, not 20 individual alerts. Plus time-based deduplication."
+      - speaker: interviewer
+        text: "Smart. How do you handle expected variation like holidays?"
+      - speaker: candidate
+        text: "Seasonal baselines and configurable suppression windows for known events. December traffic patterns shouldn't trigger alerts if we compare against last December, not last Tuesday."
+    next: deploy_platform
+
+  - id: deploy_platform
+    stage: deployment
+    type: info
+    label: "Platform Deployment"
+    speaker: interviewer
+    content: |
+      Let's discuss deploying the drift monitoring platform.
+
+      **Integration points:**
+      - **Model serving**: Instrument model serving infrastructure to log predictions. Provide SDKs for common serving frameworks (TF Serving, TorchServe, Seldon, custom Flask/FastAPI)
+      - **Feature store**: If one exists, read reference distributions directly from the feature store. If not, teams provide reference data during model registration
+      - **Model registry**: Read model metadata (feature list, importance scores, version) from MLflow, Weights & Biases, or internal registry
+      - **Alerting**: Integrate with PagerDuty, Slack, email, and model owner notification channels
+
+      **Onboarding flow for new models:**
+      1. Register model with drift monitoring (API call with model name, feature schema, reference data location)
+      2. SDK automatically logs predictions from serving infrastructure
+      3. 2-week calibration period establishes baselines
+      4. Monitoring goes live with adaptive thresholds
+      5. Model owner reviews dashboard and adjusts alert preferences
+
+      **Multi-tenant architecture**: The platform serves 150+ models from 15 teams. Isolation is important:
+      - Per-model alerting configuration (each team sets their own thresholds and notification channels)
+      - Per-team dashboards and access control
+      - Shared compute infrastructure (Kafka, Flink/Spark, database) with resource quotas
+
+      **Scalability**: Currently 150 models. Designed for 1000+ models with linear scaling:
+      - Kafka: Add partitions for new models
+      - Compute: Add Flink/Spark workers proportionally
+      - Storage: Object storage scales infinitely
+      - Dashboard: Per-model views with model selector
+
+      **High availability**: The monitoring system itself must be reliable. If the monitor goes down, drift goes undetected:
+      - Multi-AZ deployment for all components
+      - Kafka replication factor 3
+      - Dead-man's switch: If no drift scores are produced for 1 hour, alert the platform team
+    dialogue:
+      - speaker: interviewer
+        text: "How do you make it easy for teams to onboard their models?"
+      - speaker: candidate
+        text: "Simple registration API, automatic prediction logging via SDK, 2-week calibration period, and then monitoring goes live with adaptive thresholds."
+      - speaker: interviewer
+        text: "What about the monitoring system's own reliability?"
+      - speaker: candidate
+        text: "Dead-man's switch. If drift scores stop being produced for an hour, alert the platform team. A monitoring system that silently fails is worse than no monitoring at all."
+    next: mon_operations
+
+  - id: mon_operations
+    stage: monitoring
+    type: info
+    label: "Operations & Remediation"
+    speaker: interviewer
+    content: |
+      Finally, let's discuss what happens when drift is detected - the remediation workflow.
+
+      **Alert investigation workflow:**
+      1. **Alert fires**: Engineer receives alert with summary: "Model `fraud_v3` health score dropped from 92 to 65. Primary cause: feature `txn_velocity_1h` PSI=0.42 (critical). Onset: 2024-06-15T14:00 UTC"
+      2. **Dashboard investigation**: Engineer opens drift dashboard showing:
+         - Feature distribution comparison plots (reference vs. current)
+         - Time series of drift scores (when did drift start?)
+         - Feature importance overlay (how much does this drift affect predictions?)
+         - Prediction distribution changes
+      3. **Root cause analysis**: Engineer uses lineage information to trace drifted features to upstream data sources. Is it a pipeline issue? Natural distribution change? New user segment?
+      4. **Remediation decision**: Based on cause and severity, choose from:
+         - **Retrain model** on recent data (most common for gradual drift)
+         - **Fix data pipeline** (for data quality issues)
+         - **Roll back model** to previous version (if new version is worse)
+         - **Feature engineering** (if concept drift invalidates current features)
+         - **Accept and monitor** (if drift is expected and benign)
+
+      **Automated remediation** (for trusted, well-understood models):
+      - **Auto-retrain trigger**: If performance drops >5% and sufficient recent labeled data is available, automatically trigger retraining pipeline
+      - **Auto-rollback**: If a newly deployed model shows worse drift scores than the previous version within 24 hours, automatically roll back
+      - **Auto-scale thresholds**: If a feature consistently triggers alerts that are dismissed, automatically widen its threshold
+
+      **Post-incident review**: After every significant drift incident, conduct a review:
+      - What was the root cause?
+      - How long did detection take?
+      - How could we detect earlier?
+      - Should we add new monitoring signals?
+      - Update runbooks and thresholds based on learnings
+
+      **Success metric**: **Mean Time to Detection (MTTD)** for drift. Current: weeks. Target: <6 hours for critical models, <24 hours for others.
+    dialogue:
+      - speaker: interviewer
+        text: "When drift is detected, what's the remediation workflow?"
+      - speaker: candidate
+        text: "Structured workflow: alert with context, dashboard investigation, root cause analysis using lineage, and remediation decision."
+      - speaker: interviewer
+        text: "Can any of this be automated?"
+      - speaker: candidate
+        text: "For well-understood models, yes. Auto-retrain when performance drops, auto-rollback for newly deployed models showing regression, and auto-threshold adjustment for chronic false positives."
+      - speaker: interviewer
+        text: "What's the success metric for the overall monitoring system?"
+      - speaker: candidate
+        text: "Mean Time to Detection. Going from weeks to under 6 hours for critical models would prevent incidents like the $2M fraud miss."
+    next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Design Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive drift monitoring system.
+
+      **Your design summary:**
+      - Clearly defined drift types (data, concept, prediction, data quality) with distinct detection approaches
+      - Chose statistical or ML-based drift detection methods with clear rationale
+      - Designed data architecture for reference management and production data logging
+      - Addressed concept drift through proxy metrics or accelerated labeling
+      - Built feature-level monitoring with importance-weighted alerting
+      - Architected the platform with streaming or batch processing
+      - Calibrated thresholds dynamically with alert fatigue prevention
+      - Defined remediation workflows with automated responses
+
+      **Key strengths:**
+      - Alert fatigue prevention through importance weighting, root cause grouping, and adaptive thresholds
+      - Practical approach to concept drift without requiring immediate labels
+      - Clear remediation workflow with both manual and automated paths
+      - Dead-man's switch ensures the monitor itself is monitored
+
+      **Areas for further exploration:**
+      - Drift detection for unstructured data (text, images) - embedding distribution monitoring
+      - Causal drift analysis - understanding WHY drift occurred, not just that it occurred
+      - Drift prediction - forecasting when drift will exceed thresholds
+      - Cross-model drift correlation - detecting organization-wide data issues affecting multiple models

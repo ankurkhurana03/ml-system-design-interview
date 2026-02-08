@@ -1,0 +1,1477 @@
+id: fake-news-detection
+title: "Fake News Detection"
+description: "Create a fake news detection system for a high-traffic news aggregator."
+companies: ["Google", "Meta", "X/Twitter"]
+domains: ["NLP", "Graph/Network", "Classification"]
+category: "Security, Safety & Fraud"
+root: pd_start
+
+nodes:
+  # ============ PROBLEM DEFINITION ============
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design a **fake news detection system** for a high-traffic news aggregator platform.
+
+      **Business context:**
+      - Google News serves **~280 million users** monthly across 120+ countries
+      - Meta's news feed surfaces billions of news articles daily, and misinformation spreads **6x faster** than accurate news (MIT study, 2018)
+      - During the 2020 US election, platforms removed millions of pieces of election misinformation
+      - The EU Digital Services Act (DSA) and US regulatory pressure mandate proactive misinformation detection
+
+      **Types of misinformation to detect:**
+      - **Fabricated content**: Entirely made-up stories with no factual basis
+      - **Manipulated content**: Real events distorted or taken out of context
+      - **Misleading headlines**: Clickbait that misrepresents the article content
+      - **Satire misinterpreted**: Satirical content shared as real news
+      - **Outdated information**: Old stories recirculated as current events
+      - **Deepfakes/manipulated media**: Altered images or videos presented as authentic
+
+      **Goal:** Design an ML system that assesses the credibility of news articles and claims, providing credibility scores that inform content ranking, labeling, and moderation decisions.
+
+      **Key challenge:** Truth is not binary. Many claims exist on a spectrum from fully true to fully false, with context-dependent nuance. The system must handle this uncertainty gracefully.
+    dialogue:
+      - speaker: interviewer
+        text: "Let's design a fake news detection system. What makes this problem uniquely challenging?"
+      - speaker: candidate
+        text: "Three things: truth is subjective in many cases, the landscape changes daily with new claims, and there's enormous political sensitivity. Any system that labels news as 'fake' will face accusations of bias."
+      - speaker: interviewer
+        text: "Exactly. How would you handle the subjectivity issue?"
+      - speaker: candidate
+        text: "I'd avoid binary true/false labels. Instead, I'd focus on credibility signals -- source reliability, claim verifiability, content consistency -- and present these to users rather than making absolute truth determinations."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: info
+    label: "Problem Scoping"
+    speaker: interviewer
+    content: |
+      Let's scope the system.
+
+      **What we're building:**
+      - A **claim credibility scoring service** that evaluates news articles and social media posts
+      - A **source reputation system** that tracks publisher reliability over time
+      - A **propagation analysis engine** that detects coordinated spread of misinformation
+      - Outputs feed a **content ranking system** (demote low-credibility content) and **labeling system** (add context labels)
+
+      **What we're NOT building:**
+      - A truth arbiter (we provide signals, not verdicts)
+      - A censorship system (we label and reduce reach, not remove)
+      - Real-time fact-checking of every claim (too expensive; we prioritize high-reach content)
+
+      **ML formulation:**
+      - **Multi-class classification**: Credible / Mostly-credible / Mixed / Mostly-incredible / Fabricated
+      - **Claim verification**: Given a claim, retrieve evidence and assess support/contradiction
+      - **Source scoring**: Publisher-level reputation based on historical accuracy
+
+      **Key design principle:** **Reduce reach, don't remove.** Instead of deleting content (which triggers censorship accusations), reduce algorithmic amplification of low-credibility content and add informational labels.
+
+      Let's discuss metrics.
+    dialogue:
+      - speaker: interviewer
+        text: "How would you frame the ML problem?"
+      - speaker: candidate
+        text: "I'd frame it as multi-class classification on a credibility spectrum rather than binary fake/real. I'd also build a separate source reputation model -- the publisher is one of the strongest signals for article credibility."
+      - speaker: interviewer
+        text: "Why not binary classification?"
+      - speaker: candidate
+        text: "Because truth exists on a spectrum. A mostly accurate article with one misleading statistic is different from a completely fabricated story. Multi-class captures this nuance and allows graduated actions."
+    next: met_question
+
+  # ============ METRICS ============
+  - id: met_question
+    stage: metrics
+    type: question
+    label: "System Optimization"
+    speaker: interviewer
+    content: |
+      Fake news detection faces a unique tension:
+
+      - **Over-labeling** (false positives): Labeling legitimate news as potentially misleading undermines trust in the platform and creates accusations of political bias
+      - **Under-detection** (false negatives): Failing to flag misinformation allows it to spread, causing real-world harm (health misinformation, election interference)
+
+      How would you optimize the system?
+    choices:
+      - label: "Credibility signals: Surface evidence, let users decide"
+        answer: |
+          I'd optimize for **surfacing credibility signals** rather than making truth judgments:
+
+          **Philosophy:** The system provides information; users make judgments. This avoids the political minefield of labeling content as "false."
+
+          **What we surface:**
+          - **Source credibility score**: "This publisher has been rated as Mixed by independent fact-checkers"
+          - **Claim verification**: "This claim has been checked: 3 fact-checkers say False, 1 says Partly True"
+          - **Context**: "This article references an event from 2019" (outdated), "This is a satire site"
+          - **Corroboration count**: "12 other sources report this story" vs "Only 1 source reports this"
+
+          **Target metrics:**
+
+          | Metric | Target | Measurement |
+          |--------|--------|-------------|
+          | Source score accuracy | >90% agreement with expert ratings | Comparison to Media Bias/Fact Check |
+          | Claim verification accuracy | >85% agreement with fact-checkers | Sampled human evaluation |
+          | User awareness | >50% notice labels | User behavior tracking |
+          | Misinformation spread reduction | >40% reduction in shares | A/B test on labeled vs unlabeled |
+          | Political balance | <5% disparity across political spectrum | Audit by ideology |
+
+          **Why this approach:**
+          - **Avoids censorship accusations**: Providing context is different from declaring truth
+          - **Scales globally**: Works across cultures where truth standards differ
+          - **Empowers users**: Treats users as capable of evaluating evidence
+          - **Legally safer**: Presenting signals vs making truth claims has different liability profiles
+        next: met_signals
+      - label: "Aggressive detection: Flag and demote misinformation"
+        answer: |
+          I'd optimize for **aggressive detection and demotion** of low-credibility content:
+
+          **Philosophy:** The platform has a responsibility to reduce the spread of misinformation, even at the cost of some false positives. Algorithmic amplification of misinformation is itself a form of harm.
+
+          **Actions based on credibility score:**
+
+          | Score Range | Label | Action |
+          |-------------|-------|--------|
+          | 0.8-1.0 (Credible) | None | Normal distribution |
+          | 0.6-0.8 (Mostly credible) | None | Normal distribution |
+          | 0.4-0.6 (Mixed) | "Disputed by fact-checkers" | Reduce reach by 50% |
+          | 0.2-0.4 (Mostly incredible) | "Rated False by fact-checkers" | Reduce reach by 80% |
+          | 0.0-0.2 (Fabricated) | "Contains false information" | Remove from recommendations, keep accessible via direct link |
+
+          **Target metrics:**
+
+          | Metric | Target | Measurement |
+          |--------|--------|-------------|
+          | Recall on known misinformation | >90% | Fact-checker dataset |
+          | Precision on "false" label | >95% | Human evaluation |
+          | Misinformation impressions | -70% vs baseline | A/B test |
+          | User engagement with labeled content | -50% shares | Behavioral tracking |
+          | False positive rate | <2% | Expert review of demoted content |
+          | Political balance | <3% disparity | Ideology audit |
+
+          **Why aggressive detection:**
+          - MIT research shows misinformation spreads 6x faster than truth -- passive labeling isn't enough
+          - **Health misinformation kills**: Anti-vaccine misinformation contributed to measurable drops in vaccination rates
+          - **Election integrity**: Misinformation about voting undermines democratic processes
+          - **Advertiser safety**: Brands don't want ads next to misinformation
+        next: met_aggressive
+
+  - id: met_signals
+    stage: metrics
+    type: info
+    label: "Credibility Signals Metrics"
+    speaker: interviewer
+    content: |
+      Good approach. Let's detail the evaluation framework.
+
+      **Multi-dimensional evaluation:**
+
+      | Dimension | Metric | Target | Source |
+      |-----------|--------|--------|--------|
+      | **Source accuracy** | Agreement with expert ratings | >90% | MediaBiasFactCheck, NewsGuard |
+      | **Claim accuracy** | Agreement with fact-checkers | >85% | ClaimBuster, PolitiFact |
+      | **Corroboration quality** | Relevant sources retrieved | >80% precision | Human evaluation |
+      | **Timeliness** | Score available before viral spread | <1 hour | Time-to-score tracking |
+      | **Coverage** | % of high-reach content scored | >95% | Coverage monitoring |
+      | **Fairness** | Political balance audit | <5% disparity | External audit |
+
+      **Evaluation methodology:**
+      - **Expert fact-checker agreement**: Compare system scores to professional fact-checker ratings (ClaimReview markup data)
+      - **User study**: Does seeing credibility signals change user behavior? A/B test sharing rates
+      - **Longitudinal tracking**: Do sources with low credibility scores eventually get debunked by fact-checkers?
+      - **Adversarial testing**: Can manipulated content evade the credibility scoring? Monthly red team exercise
+
+      **Political balance audit (critical):**
+      - Sample 1,000 articles across the political spectrum
+      - Score each and analyze: Are left-leaning and right-leaning sources scored similarly for equivalent quality?
+      - External auditor performs this quarterly
+      - Any imbalance >5% triggers model investigation
+
+      Let's design the data pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle the political sensitivity of rating news credibility?"
+      - speaker: candidate
+        text: "Transparency and external auditing. We publish our methodology, provide appeals, and hire independent auditors to verify political balance quarterly. We also focus on verifiable factual claims rather than opinion or interpretation."
+      - speaker: interviewer
+        text: "What about opinion articles or editorials?"
+      - speaker: candidate
+        text: "We explicitly label opinion content as such and don't apply credibility scoring to opinions -- only to factual claims within those pieces. The source reputation score still applies to the publisher."
+    next: data_collection
+
+  - id: met_aggressive
+    stage: metrics
+    type: info
+    label: "Aggressive Detection Metrics"
+    speaker: interviewer
+    content: |
+      Good reasoning. Let's detail the evaluation framework.
+
+      **Tiered evaluation:**
+
+      | Content Type | Primary Metric | Target | Action |
+      |-------------|---------------|--------|--------|
+      | Health misinformation | Recall | >95% | Highest priority removal |
+      | Election misinformation | Recall | >95% | Highest priority labeling |
+      | Fabricated news | Precision | >95% | Auto-label + demote |
+      | Misleading context | Balanced F1 | >80% | Label + moderate demote |
+      | Satire/parody | Precision (avoid mislabeling) | >98% | Label as satire only |
+
+      **Impact measurement:**
+      - **Impressions avoided**: Estimated impressions prevented by demotion (primary business metric)
+      - **Spread velocity reduction**: Compare time-to-viral for labeled vs unlabeled misinformation
+      - **User engagement change**: Do users share less after seeing credibility labels?
+      - **Fact-checker alignment**: Does system agree with professional fact-checkers who review the same content?
+
+      **Guardrails:**
+      - **False labeling rate**: <2% of labeled content should be found credible upon expert review
+      - **Appeal success rate**: <5% of appeals should result in label removal
+      - **Political balance**: External quarterly audit must show <3% scoring disparity across political spectrum
+      - **Over-moderation detection**: Alert if any single publisher's content is demoted >3x more than baseline
+
+      Let's design the data pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you measure the real-world impact of demotion?"
+      - speaker: candidate
+        text: "A/B testing is key. For a random subset, show content without demotion and measure sharing and engagement rates. Compare to the treatment group that sees demoted content. The difference in shares multiplied by the average audience gives us estimated impressions avoided."
+      - speaker: interviewer
+        text: "What if demoting content creates a Streisand effect -- drawing more attention to it?"
+      - speaker: candidate
+        text: "We monitor for this. Labels that say 'Contains false information' can backfire if they're too aggressive. The informational approach -- 'This claim has been disputed by 3 fact-checkers' -- performs better in user studies."
+    next: data_collection
+
+  # ============ DATA ============
+  - id: data_collection
+    stage: data
+    type: info
+    label: "Data Sources & Collection"
+    speaker: interviewer
+    content: |
+      Before designing the pipeline, let's map out the data landscape for fake news detection.
+
+      **Primary data sources:**
+
+      | Source | Description | Volume | Quality |
+      |--------|-------------|--------|---------|
+      | **Fact-checker verdicts** | Ratings from IFCN-certified fact-checking organizations | ~50K verdicts/month | Highest quality, but low volume |
+      | **News articles** | Full-text articles from indexed news sources | ~10M articles/day | Raw input -- needs credibility assessment |
+      | **Source reputation data** | Historical accuracy records per publisher/domain | ~200K tracked domains | High quality, slow to update |
+      | **Social media signals** | Sharing patterns, engagement metrics, user reports | Billions of signals/day | Noisy but high volume |
+      | **Claim databases** | ClaimBuster, Google Fact Check Tools API, WikiData | ~500K verified claims | Structured, high quality |
+      | **User feedback** | Reports, ratings, and engagement with credibility labels | ~1M feedback signals/day | Noisy, potential manipulation |
+
+      **Data quality challenges:**
+      - **Truth is temporal**: A claim may be true today and false tomorrow as new evidence emerges
+      - **Political bias in labels**: Fact-checkers have been accused of political bias -- using multiple diverse fact-checking organizations mitigates this
+      - **Satire vs misinformation**: Satirical content (The Onion, Babylon Bee) is frequently misclassified as fake news
+      - **Context dependency**: A factual statement can become misleading if shared out of context
+      - **Emerging claims**: The system must handle entirely new claims with no fact-checker coverage
+
+      **Data consent and ethics:**
+      - News articles are public but may have copyright restrictions for training
+      - User engagement data must be anonymized per GDPR/CCPA
+      - Fact-checker verdicts should be attributed transparently
+      - The system should never be used for political censorship -- focus on verifiable factual claims
+
+      Let's now design the data pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "What's the most valuable data source for fake news detection?"
+      - speaker: candidate
+        text: "Fact-checker verdicts from IFCN-certified organizations. They're the gold standard for credibility assessment. But they're low volume -- only ~50K verdicts per month -- so we need to generalize from these to the millions of articles published daily."
+      - speaker: interviewer
+        text: "How do you handle political bias in fact-checking?"
+      - speaker: candidate
+        text: "Use multiple diverse fact-checking organizations from different political leanings and countries. Cross-reference verdicts and flag cases where fact-checkers disagree. Focus on claims with objective, verifiable facts rather than opinion or interpretation."
+      - speaker: interviewer
+        text: "Good approach. What about the temporal nature of truth?"
+      - speaker: candidate
+        text: "Every credibility assessment must be timestamped and regularly re-evaluated. We track when evidence changes and update scores accordingly. COVID-19 was a perfect example -- early guidance changed as scientific understanding evolved."
+    next: data_pipeline
+
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      Let's design the data pipeline. Fake news detection requires diverse data sources.
+
+      **Data sources:**
+
+      | Source | Description | Volume | Quality |
+      |--------|------------|--------|---------|
+      | Fact-checker ratings | ClaimReview markup from 100+ fact-checking organizations | ~50K new ratings/month | Gold standard |
+      | Source reputation databases | NewsGuard, Media Bias/Fact Check, MBFC | 8,000+ rated sources | High |
+      | Article content | Full text, headlines, images, metadata | Millions/day | Raw |
+      | Social propagation | Share patterns, comment sentiment, user engagement | Billions of events/day | Medium |
+      | Knowledge bases | Wikidata, Google Knowledge Graph, WHO health database | Structured facts | High |
+      | User reports | Flagged content from users | ~1M reports/month | Noisy |
+
+      **ClaimReview data (primary training signal):**
+      - Structured format used by fact-checkers worldwide (schema.org/ClaimReview)
+      - Contains: claim text, rating (True/Mostly True/Half True/Mostly False/False), evidence, publisher
+      - Google aggregates ClaimReview from 100+ organizations via the Fact Check Explorer API
+      - Limitation: Only covers claims that fact-checkers choose to review (selection bias toward high-profile claims)
+
+      **Data processing pipeline:**
+      ```
+      New Article Published
+           │
+           ├──► Content Extraction
+           │    - Full text + headline
+           │    - Named entities (NER)
+           │    - Claim extraction
+           │    - Image reverse search
+           │
+           ├──► Source Enrichment
+           │    - Publisher reputation lookup
+           │    - Domain registration history
+           │    - Historical accuracy score
+           │
+           └──► Propagation Monitoring
+                - Share velocity across platforms
+                - Bot amplification score
+                - Geographic spread pattern
+      ```
+
+      **Handling data freshness:**
+      - New misinformation narratives emerge daily (COVID variants, election claims, crisis events)
+      - Fact-checker ratings arrive with **hours to days** delay
+      - The system must make initial assessments before fact-checkers weigh in, using source reputation and content signals
+
+      Let's decide on the feature engineering approach.
+    dialogue:
+      - speaker: interviewer
+        text: "What's the biggest challenge with training data for misinformation detection?"
+      - speaker: candidate
+        text: "Selection bias. Fact-checkers only review high-profile claims, so our training data over-represents viral misinformation and under-represents subtle, low-profile false claims. We need to actively sample diverse content for labeling."
+      - speaker: interviewer
+        text: "How do you handle claims that are time-sensitive, like during a breaking crisis?"
+      - speaker: candidate
+        text: "During breaking events, we increase weight on source reputation and corroboration signals since content analysis is unreliable when the truth is still emerging. We also flag rapidly spreading unverified claims for expedited fact-checker review."
+    next: feat_overview
+
+  # ============ FEATURES ============
+  - id: feat_overview
+    stage: features
+    type: info
+    label: "Feature Engineering Overview"
+    speaker: interviewer
+    content: |
+      Feature engineering for fake news detection draws on multiple signal types -- content analysis alone is insufficient because well-crafted misinformation can be linguistically polished.
+
+      **Feature categories for fake news detection:**
+
+      1. **Content features**: Writing style, sensationalism, emotional language, logical consistency
+      2. **Source features**: Publisher reputation, historical accuracy, domain age, WHOIS data
+      3. **Claim verification features**: Evidence support/contradiction from trusted sources
+      4. **Propagation features**: How the content spreads -- bot amplification, inauthentic sharing patterns
+      5. **Network features**: Who shares it, what communities amplify it, cross-platform spread
+      6. **Temporal features**: How quickly it spread, correlation with news events, freshness
+
+      **Key insight from research (MIT 2018 study):**
+      False news spreads **6x faster** than true news on social media and reaches significantly more people. This propagation pattern itself is a feature -- content that spreads unusually fast relative to its source authority is more likely to be misinformation.
+
+      **Feature engineering challenges:**
+      - **Adversarial sophistication**: State-sponsored misinformation is designed by professionals -- no obvious linguistic tells
+      - **Context dependency**: The same claim may be true in one context and misleading in another
+      - **Multimodal misinformation**: Manipulated images, out-of-context photos, deepfake videos require different features
+      - **Speed vs depth trade-off**: Detailed claim verification takes hours; basic content features compute in milliseconds
+
+      **Feature serving architecture:**
+      - **Real-time features** (<100ms): Content style scores, source reputation lookup, basic propagation metrics
+      - **Near-real-time features** (<10 min): Claim similarity search against fact-check database, cross-referencing with trusted sources
+      - **Batch features** (daily): Network analysis, deep claim verification, source reputation updates
+
+      Let's choose the primary feature engineering strategy.
+    dialogue:
+      - speaker: interviewer
+        text: "What's the most reliable feature for detecting fake news?"
+      - speaker: candidate
+        text: "Source reputation. The publisher's historical accuracy is the single strongest predictor of article credibility. Content features are useful but gameable. Source reputation is much harder to fake because it requires building years of credibility."
+      - speaker: interviewer
+        text: "What about new or unknown sources?"
+      - speaker: candidate
+        text: "Cold-start problem. For unknown sources, we rely more heavily on content features, cross-referencing with known sources, and propagation patterns. New domains with no track record should be treated with higher skepticism by default."
+      - speaker: interviewer
+        text: "Let's explore the specific feature strategy."
+    next: feat_question
+
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Engineering Approach"
+    speaker: interviewer
+    content: |
+      Feature engineering for fake news detection spans content analysis, source evaluation, and propagation patterns. What approach would you prioritize?
+    choices:
+      - label: "Content + source features (text analysis approach)"
+        answer: |
+          I'd focus on **content analysis and source reputation features** as the primary approach:
+
+          **Content features (per article/claim):**
+          - **Headline-body consistency**: Similarity score between headline and article body (clickbait detection)
+          - **Claim extractiveness**: Number of verifiable factual claims per 100 words
+          - **Emotional language score**: Proportion of emotionally charged words (exaggeration, fear, outrage)
+          - **Citation density**: Number of references to other sources, links to primary data
+          - **Named entity analysis**: Are the people/organizations mentioned real and relevant?
+          - **Temporal consistency**: Does the article date match the events described?
+          - **Image manipulation signals**: Reverse image search results, EXIF metadata analysis
+
+          **Source reputation features:**
+          - **NewsGuard score** (0-100): Professional evaluation of publisher trustworthiness
+          - **Historical fact-check ratio**: % of fact-checked claims from this source rated True
+          - **Domain age and registration**: Recently registered domains are higher risk
+          - **WHOIS transparency**: Hidden registration correlates with low credibility
+          - **Ad-to-content ratio**: High ad density correlates with low-quality content
+          - **Correction behavior**: Does the publisher issue corrections? (Signal of journalistic integrity)
+
+          **Claim verification features:**
+          - **Knowledge base consistency**: Does the claim contradict established facts in Wikidata/Wikipedia?
+          - **Cross-source corroboration**: How many reputable sources report the same claim?
+          - **Stance detection**: Do other articles agree, disagree, or discuss the claim?
+          - **Expert source citations**: Does the claim cite recognized experts or institutions?
+
+          **Why content + source:**
+          - Source reputation alone catches ~60% of misinformation (low-quality sources are repeat offenders)
+          - Content analysis adds ~20% more (catches misinformation from otherwise reputable sources)
+          - Together they provide coverage before propagation patterns are visible (early detection)
+        next: feat_content
+      - label: "Propagation + network features (spread analysis approach)"
+        answer: |
+          I'd focus on **propagation patterns and social network analysis** -- how misinformation spreads reveals its nature:
+
+          **Key insight from research (Vosoughi et al., Science, 2018):**
+          - False news spreads further, faster, and more broadly than true news
+          - False news reaches 1,500 people 6x faster than true news
+          - The propagation pattern itself is a strong signal of content credibility
+
+          **Propagation features:**
+          - **Spread velocity**: Shares per minute in the first hour (misinformation spreads faster)
+          - **Cascade shape**: Tree depth vs breadth of sharing cascades (misinformation has deeper cascades)
+          - **Bot amplification ratio**: % of shares from bot/suspicious accounts
+          - **Geographic spread pattern**: Organic news spreads from a geographic center; coordinated campaigns appear simultaneously in multiple regions
+          - **Platform cross-pollination**: Content that appears on 4chan before Twitter often signals coordinated manipulation
+
+          **User network features:**
+          - **Sharer credibility**: Average credibility score of accounts sharing the content
+          - **Echo chamber score**: How politically homogeneous are the sharers?
+          - **Influencer involvement**: Are known misinformation amplifiers sharing this?
+          - **First-sharer analysis**: Who shared it first? From which platform?
+
+          **Temporal features:**
+          - **Narrative clustering**: Is this claim part of a larger coordinated narrative campaign?
+          - **Recurrence pattern**: Has this claim appeared before? (Old debunked claims resurface)
+          - **Event correlation**: Does the claim emerge suspiciously close to an election/crisis?
+
+          **Why propagation features:**
+          - **Hard to fake**: Content can be made to look credible, but faking organic propagation patterns is extremely difficult
+          - **Works on novel claims**: Doesn't need fact-checker training data for specific claims
+          - **Real-time signal**: Available within minutes of content going viral
+          - **Complementary to content analysis**: Catches cases where the content looks professional but the spread pattern is inauthentic
+        next: feat_propagation
+
+  - id: feat_content
+    stage: features
+    type: info
+    label: "Content Feature Details"
+    speaker: interviewer
+    content: |
+      Let's detail the content analysis pipeline.
+
+      **NLP processing pipeline:**
+
+      ```
+      Article Text
+           │
+           ├──► Claim Extraction (DeBERTa fine-tuned)
+           │    - Identify verifiable factual claims
+           │    - "The unemployment rate is 15%" → claim
+           │    - "This is the worst economy ever" → opinion (skip)
+           │
+           ├──► Stance Detection (BERT fine-tuned)
+           │    - For each claim, find related articles
+           │    - Classify: Agrees / Disagrees / Discusses / Unrelated
+           │
+           ├──► Entity Verification
+           │    - Extract named entities (spaCy NER)
+           │    - Verify against knowledge bases
+           │    - Flag non-existent entities ("Dr. John Smith of Harvard" -- does this person exist?)
+           │
+           └──► Style Analysis
+                - Emotional language scoring (NRC Emotion Lexicon)
+                - Readability score (Flesch-Kincaid)
+                - Hedging language detection ("allegedly", "reportedly")
+                - ALL-CAPS ratio, exclamation density
+      ```
+
+      **Source reputation pipeline:**
+
+      | Signal | Source | Update Frequency |
+      |--------|--------|-----------------|
+      | NewsGuard score | NewsGuard API | Monthly |
+      | MBFC rating | Media Bias/Fact Check | Monthly |
+      | Fact-check hit rate | ClaimReview aggregation | Weekly |
+      | Domain age | WHOIS lookup | One-time + cache |
+      | Historical accuracy | Internal tracking | Daily |
+      | Correction rate | Manual + automated tracking | Weekly |
+
+      **Claim verification via retrieval:**
+      - For each extracted claim, query knowledge bases and news archives
+      - Use **dense retrieval** (DPR or Contriever) to find relevant evidence passages
+      - Score the claim against retrieved evidence using a **Natural Language Inference (NLI)** model
+      - NLI output: Entailment (supports claim), Contradiction (refutes claim), Neutral
+
+      This forms the backbone of automated fact-checking, similar to Google's Fact Check Explorer.
+
+      Let's choose the model architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle claims where there's no fact-checker rating yet?"
+      - speaker: candidate
+        text: "Three approaches: source reputation as a prior, claim verification against knowledge bases, and corroboration analysis -- how many reputable sources report the same thing. For truly novel claims, we flag for expedited fact-checker review rather than making a judgment."
+      - speaker: interviewer
+        text: "What about claims that are technically true but misleading?"
+      - speaker: candidate
+        text: "Stance detection helps here. If the claim says 'Crime rose 20%' but omits that it's a cherry-picked timeframe, related articles will provide fuller context. The headline-body consistency score also catches misleading framing."
+    next: mod_question
+
+  - id: feat_propagation
+    stage: features
+    type: info
+    label: "Propagation Feature Details"
+    speaker: interviewer
+    content: |
+      Let's detail the propagation analysis pipeline.
+
+      **Real-time propagation tracking:**
+
+      ```
+      Content Shared on Platform
+           │
+           ▼
+      ┌─────────────────────────┐
+      │ Propagation Tracker      │
+      │ (Flink streaming)        │
+      │                          │
+      │ - Build cascade tree     │
+      │ - Track share velocity   │
+      │ - Compute bot ratio      │
+      │ - Geographic analysis    │
+      └────────┬────────────────┘
+               │
+               ▼
+      ┌─────────────────────────┐
+      │ Feature Materialization  │
+      │ - cascade_depth          │
+      │ - share_velocity_1h      │
+      │ - bot_amplification_pct  │
+      │ - geographic_entropy     │
+      │ - sharer_credibility_avg │
+      └─────────────────────────┘
+      ```
+
+      **Cascade analysis features:**
+
+      | Feature | Computation | Misinformation Signal |
+      |---------|------------|----------------------|
+      | Cascade depth | Max path length in share tree | Deeper = suspicious |
+      | Width/depth ratio | Breadth / depth of cascade | Low ratio = unusual |
+      | Share velocity | Shares/minute in first hour | Very fast = suspicious |
+      | Unique sharers | Unique accounts / total shares | Low uniqueness = bot |
+      | Bot amplification | % shares from flagged accounts | >20% = coordinated |
+      | Geographic entropy | Shannon entropy of sharer locations | Very low = localized campaign |
+      | Cross-platform speed | Time to appear on second platform | Very fast = coordinated |
+
+      **Narrative clustering:**
+      - Embed claims/articles using Sentence-BERT
+      - Cluster similar claims appearing within a time window
+      - Large clusters emerging suddenly = coordinated narrative campaign
+      - Track narrative evolution: How do false claims mutate and adapt?
+
+      **Early warning system:**
+      - When propagation features cross thresholds (velocity >95th percentile, bot ratio >20%), trigger early warning
+      - Rapidly spreading unverified claims get expedited review
+      - Historical pattern matching: "This propagation pattern matches known disinformation campaigns"
+
+      Let's choose the model architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "How early can you detect misinformation using propagation signals?"
+      - speaker: candidate
+        text: "Within 15-30 minutes of viral spread starting. The cascade shape and bot amplification ratio become reliable after about 100 shares. For high-reach content, this is well before most users see it."
+      - speaker: interviewer
+        text: "What about misinformation that spreads slowly?"
+      - speaker: candidate
+        text: "Slow-spreading misinformation won't trigger propagation alerts, which is why we need content and source features as well. The content-based approach catches it regardless of spread speed. The ideal system uses both."
+    next: mod_question
+
+  # ============ MODEL ============
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Model Architecture"
+    speaker: interviewer
+    content: |
+      Now let's design the credibility scoring model. It needs to handle multiple signal types and provide interpretable outputs. What architecture would you choose?
+    choices:
+      - label: "Retrieval-augmented claim verification (NLI-based)"
+        answer: |
+          I'd build a **retrieval-augmented claim verification system** based on Natural Language Inference:
+
+          **Architecture:**
+          ```
+          Article/Claim
+               │
+               ▼
+          ┌─────────────────┐
+          │ Claim Extraction │  DeBERTa → list of verifiable claims
+          └────────┬────────┘
+                   │
+                   ▼
+          ┌─────────────────┐
+          │ Evidence Retrieval│  Dense retrieval (Contriever)
+          │ - Knowledge bases │  → top-K relevant passages
+          │ - News archives   │
+          │ - Fact-check DB   │
+          └────────┬────────┘
+                   │
+                   ▼
+          ┌─────────────────┐
+          │ NLI Scoring      │  DeBERTa-NLI
+          │ Per claim-evidence│  → Support / Contradict / Neutral
+          │ pair              │
+          └────────┬────────┘
+                   │
+                   ▼
+          ┌─────────────────┐
+          │ Aggregation      │  Combine claim-level scores
+          │ + Source features │  + source reputation
+          │ → Article score   │  → final credibility (0-1)
+          └─────────────────┘
+          ```
+
+          **Claim extraction model:**
+          - Fine-tuned DeBERTa on ClaimBuster dataset
+          - Identifies sentences containing verifiable factual claims
+          - Filters out opinions, questions, and subjective statements
+
+          **Evidence retrieval:**
+          - **Dense retrieval** using Contriever embeddings (better than BM25 for claim-evidence matching)
+          - Search corpus: Wikipedia + Reuters/AP archive + WHO health database + ClaimReview database
+          - Retrieve top-10 evidence passages per claim
+
+          **NLI scoring:**
+          - For each (claim, evidence) pair, classify as Entailment/Contradiction/Neutral
+          - Aggregate across evidence: Strong contradiction from multiple sources = likely false
+          - **Confidence calibration**: Only flag if multiple independent sources contradict the claim
+
+          **Why this approach:**
+          - **Explainable**: "This claim is rated low-credibility because 3 independent sources contradict it" -- cites specific evidence
+          - **Novel claim handling**: Works on claims never seen before, as long as relevant evidence exists
+          - **Grounded in evidence**: Decisions based on retrieved facts, not pattern matching on training data
+          - **Used by Google**: Fact Check Explorer uses similar retrieval-based verification
+        next: mod_nli
+      - label: "Multi-signal ensemble (content + source + propagation)"
+        answer: |
+          I'd build a **multi-signal ensemble** that combines content, source, and propagation features:
+
+          **Architecture:**
+          ```
+          Content Features ──► Content Model (DeBERTa) ──► Score_content
+                                                                │
+          Source Features  ──► Source Model (LightGBM)  ──► Score_source
+                                                                │
+          Propagation     ──► Propagation Model (LSTM)  ──► Score_propagation
+          Features                                              │
+                                                                ▼
+                                                    ┌──────────────────┐
+                                                    │ Meta-Ensemble     │
+                                                    │ (Gradient Boosting│
+                                                    │  on 3 scores +   │
+                                                    │  metadata)        │
+                                                    └────────┬─────────┘
+                                                             │
+                                                             ▼
+                                                    Credibility Score (0-1)
+          ```
+
+          **Content model (DeBERTa, ~30ms):**
+          - Fine-tuned on FakeNewsNet + LIAR + MultiFC datasets
+          - Input: Headline + first 512 tokens of article body
+          - Learns: Linguistic patterns associated with low-credibility content
+          - Features: Emotional language, hedging, citation density, headline-body consistency
+
+          **Source model (LightGBM, <1ms):**
+          - Input: Publisher reputation features (~30 features)
+          - NewsGuard score, MBFC rating, domain age, historical accuracy, correction rate
+          - **Most stable signal**: Source reputation changes slowly, provides strong prior
+
+          **Propagation model (LSTM on cascade sequences, ~10ms):**
+          - Input: Sequence of sharing events [(user_type, timestamp, platform), ...]
+          - Learns: Temporal patterns of misinformation spread
+          - Only available after content starts spreading (complementary to content model)
+
+          **Meta-ensemble (LightGBM):**
+          - Combines the three scores with metadata (article topic, publish time, language)
+          - Learns which signal is most reliable in which context:
+            - Breaking news: Weight source heavily (content analysis unreliable for emerging events)
+            - Health claims: Weight content + NLI heavily (well-established knowledge bases)
+            - Political news: Weight propagation heavily (content analysis has bias risk)
+
+          **Why ensemble:**
+          - No single signal type catches all misinformation
+          - Source reputation catches 60%, content analysis adds 20%, propagation adds 10%
+          - The ensemble learns context-dependent weighting
+        next: mod_ensemble
+
+  - id: mod_nli
+    stage: model
+    type: info
+    label: "NLI Model Details"
+    speaker: interviewer
+    content: |
+      Let's detail the retrieval-augmented verification system.
+
+      **Evidence retrieval infrastructure:**
+
+      ```
+      Knowledge Corpus (updated daily)
+           │
+           ├── Wikipedia (6M+ articles)
+           ├── Reuters/AP news archive (10M+ articles)
+           ├── WHO/CDC health database
+           ├── ClaimReview fact-check database (200K+ ratings)
+           └── Government statistics databases
+           │
+           ▼
+      ┌──────────────────┐
+      │ Vector Index       │  Contriever embeddings
+      │ (FAISS, ~50M docs) │  768-dim vectors
+      │ Approximate NN     │  <50ms retrieval
+      └──────────────────┘
+      ```
+
+      **Pipeline latency breakdown:**
+      - Claim extraction: ~50ms (DeBERTa inference)
+      - Evidence retrieval: ~50ms (FAISS approximate nearest neighbor)
+      - NLI scoring: ~30ms per claim-evidence pair (DeBERTa-NLI), 10 pairs = ~300ms total
+      - Aggregation: ~5ms
+      - **Total: ~400ms per article** (acceptable for near-real-time scoring)
+
+      **Handling evidence quality:**
+      - Not all retrieved evidence is equally reliable
+      - Weight evidence by source credibility: Wikipedia > random blog
+      - Recency weighting: Recent evidence more relevant for current claims
+      - **Disagreement handling**: If evidence sources disagree, surface the disagreement rather than forcing a verdict
+
+      **Multi-hop reasoning:**
+      - Some claims require connecting multiple pieces of evidence
+      - Example: "Country X has the highest crime rate" requires retrieving crime statistics for multiple countries
+      - Use **iterative retrieval**: First retrieval finds relevant topic, second retrieval finds specific comparison data
+
+      **Limitations:**
+      - Only works for claims where evidence exists in the knowledge corpus
+      - Fails on truly novel claims where no prior information exists
+      - Requires regular corpus updates to stay current
+
+      Now let's discuss training.
+    dialogue:
+      - speaker: interviewer
+        text: "What happens when the knowledge corpus itself contains errors?"
+      - speaker: candidate
+        text: "Source weighting is key. We prioritize high-quality sources -- Wikipedia has strong editorial oversight, government databases are authoritative for statistics. For controversial topics, we require multiple independent sources to agree before scoring a claim as false."
+      - speaker: interviewer
+        text: "How do you keep the knowledge corpus current?"
+      - speaker: candidate
+        text: "Daily incremental updates from news wire services and Wikipedia edits. Weekly full reindexing of the FAISS vector store. For breaking events, we prioritize real-time indexing of trusted news sources."
+    next: train_strategy
+
+  - id: mod_ensemble
+    stage: model
+    type: info
+    label: "Ensemble Model Details"
+    speaker: interviewer
+    content: |
+      Let's detail the multi-signal ensemble.
+
+      **Component model training:**
+
+      **Content model (DeBERTa):**
+      - Pre-trained: DeBERTa-v3-base (183M params)
+      - Fine-tuning data: FakeNewsNet (23K articles), LIAR (12K claims), MultiFC (36K claims), platform-specific labeled data (100K articles)
+      - Multi-task: Credibility classification + stance detection
+      - Training: 4x A100 GPUs, ~4 hours
+
+      **Source model (LightGBM):**
+      - Training data: 8,000+ rated publishers from NewsGuard + MBFC
+      - Features: 30 source-level features
+      - Very fast training (<5 minutes), retrained weekly with latest accuracy data
+
+      **Propagation model (LSTM):**
+      - Input: Sharing cascade as sequence of events
+      - Training data: 500K cascades with credibility labels (derived from fact-checker ratings)
+      - Learns to distinguish organic spread patterns from coordinated manipulation
+
+      **Meta-ensemble calibration:**
+      ```
+      Three component scores + metadata
+           │
+           ▼
+      LightGBM Meta-learner
+           │
+           ├── Trained on held-out set with all three scores as features
+           │
+           ├── Calibrated using Platt scaling
+           │    - P(misinformation) = 0.7 means 70% chance
+           │
+           └── Context-dependent weighting learned automatically:
+                - Health topic → higher weight on content model
+                - Breaking news → higher weight on source model
+                - Viral content → higher weight on propagation model
+      ```
+
+      **Feature importance from meta-ensemble:**
+      - Source reputation: ~40% of signal (most important single feature)
+      - Content credibility score: ~30%
+      - Propagation anomaly score: ~15%
+      - Metadata (topic, recency): ~15%
+
+      Now let's discuss training.
+    dialogue:
+      - speaker: interviewer
+        text: "Source reputation is the single strongest signal. Does that concern you?"
+      - speaker: candidate
+        text: "Yes, it creates a chicken-and-egg problem for new publishers. We handle this by defaulting new/unknown sources to neutral and relying more heavily on content analysis. After 50+ articles, the source model has enough data to contribute meaningfully."
+      - speaker: interviewer
+        text: "What about when a reputable source publishes misinformation?"
+      - speaker: candidate
+        text: "That's exactly why we need all three models. Content analysis catches the anomaly, and the meta-ensemble learns to override source reputation when content signals are strong enough. This is rare for top-tier sources but happens."
+    next: train_strategy
+
+  # ============ TRAINING ============
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: interviewer
+    content: |
+      Let's design the training pipeline.
+
+      **Training data sources and challenges:**
+
+      | Source | Size | Pros | Cons |
+      |--------|------|------|------|
+      | ClaimReview | 200K+ ratings | Gold standard, structured | Selection bias, English-dominant |
+      | FakeNewsNet | 23K articles | Full article text + social context | US-centric, outdated claims |
+      | LIAR | 12.8K claims | Labeled by PolitiFact | Short claims only, no full articles |
+      | MultiFC | 36K claims | Multi-source, 26 fact-check sites | Noisy labels (different rating scales) |
+      | Platform data | 100K+ articles | Platform-specific, current | Expensive to label |
+
+      **Training schedule:**
+      - **Content model**: Bi-weekly retrain (misinformation topics evolve)
+      - **Source model**: Weekly retrain (source accuracy data updates weekly)
+      - **Propagation model**: Monthly retrain (propagation patterns are more stable)
+      - **Meta-ensemble**: Weekly retrain (captures changing signal importance)
+      - **Emergency retrain**: During crisis events (pandemic, election) with rapidly evolving misinformation
+
+      **Handling emerging misinformation topics:**
+      - New misinformation narratives emerge around events (COVID, elections, natural disasters)
+      - **Zero-shot detection**: Source reputation + propagation features work without topic-specific training data
+      - **Few-shot learning**: When fact-checkers rate the first claims in a new narrative, fine-tune content model on these examples
+      - **Active learning**: Flag high-reach unscored content for expedited fact-checker review
+
+      **Cross-lingual training:**
+      - Use multilingual DeBERTa (mDeBERTa) for content model
+      - Transfer learning: English fact-check data improves non-English detection
+      - Language-specific source reputation databases for major languages
+      - Translation augmentation for low-resource languages
+
+      Let's move to deployment.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle the delay between new misinformation appearing and training data being available?"
+      - speaker: candidate
+        text: "Multi-layered defense. Source reputation provides an immediate prior -- content from known-unreliable sources is scored appropriately without claim-specific data. Propagation features detect anomalous spread patterns within minutes. Content-specific detection improves as fact-checkers provide ratings."
+      - speaker: interviewer
+        text: "What about the arms race -- misinformation creators adapting to detection?"
+      - speaker: candidate
+        text: "The propagation model is hardest to game since faking organic spread patterns is expensive. Content-wise, we monitor for evasion techniques -- paraphrasing debunked claims, using images instead of text, embedding misinformation in otherwise credible content."
+    next: train_evaluation
+
+  - id: train_evaluation
+    stage: training
+    type: info
+    label: "Offline Evaluation & Validation"
+    speaker: interviewer
+    content: |
+      Evaluating a fake news detection system is uniquely challenging because "truth" is not always binary and ground truth labels are scarce.
+
+      **Evaluation methodology:**
+
+      | Aspect | Approach | Rationale |
+      |--------|----------|-----------|
+      | **Data split** | Temporal (by claim emergence date) | Prevents leaking future fact-checker verdicts |
+      | **Train window** | Rolling 12 months | Misinformation topics evolve with news cycles |
+      | **Validation** | Most recent 30 days | Tune thresholds and ranking weights |
+      | **Test** | Held-out 30 days | Unbiased final evaluation |
+      | **Topic holdout** | Leave-one-topic-out | Test generalization to unseen claim types |
+
+      **Evaluation metrics (in priority order):**
+      1. **Credibility ranking correlation** -- Spearman correlation between model scores and fact-checker ratings on shared articles
+      2. **Precision at top-K** -- among the K lowest-scored articles, what fraction are confirmed misinformation?
+      3. **Source reputation accuracy** -- AUC for identifying reliable vs unreliable sources
+      4. **Claim verification accuracy** -- accuracy on verifiable claims with known truth values
+      5. **Political balance audit** -- equal false positive rates across political orientations
+
+      **Critical evaluation pitfalls:**
+      - **Confirmation bias**: If training data over-represents misinformation from one political side, the model will be biased
+      - **Topic leakage**: If the same claim appears in train and test with different fact-checker ratings, the model memorizes the claim
+      - **Temporal leakage**: Using propagation features that include future engagement data
+      - **Coverage bias**: Fact-checkers cover English and high-profile claims disproportionately
+
+      **Political balance testing:**
+      - Curate a balanced test set with equal representation of misinformation from different political perspectives
+      - Measure false positive rate and false negative rate independently per political orientation
+      - Maximum allowed disparity: 1.5x between any two political categories
+      - Independent annual audit by external organization
+
+      Let's now discuss deployment architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you evaluate political balance in the system?"
+      - speaker: candidate
+        text: "A curated balanced test set with equal representation from different political orientations. We measure false positive rates per orientation and flag any disparity exceeding 1.5x. We also commission annual external audits."
+      - speaker: interviewer
+        text: "What about the topic generalization problem?"
+      - speaker: candidate
+        text: "Leave-one-topic-out evaluation. Train on all topics except one, test on the held-out topic. This reveals whether the model generalizes to new claim types or just memorizes known debunked claims."
+      - speaker: interviewer
+        text: "Good. A model that only catches previously fact-checked claims has limited value. Let's discuss deployment."
+    next: deploy_question
+
+  # ============ DEPLOYMENT ============
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Deployment Architecture"
+    speaker: interviewer
+    content: |
+      How would you deploy the fake news detection system? Consider:
+      - Millions of articles published daily
+      - Scoring should happen before significant spread
+      - The system must handle breaking news events with massive content volume
+      - Explainability is required for transparency
+    choices:
+      - label: "Priority-based pipeline (high-reach content first)"
+        answer: |
+          I'd deploy a **priority-based scoring pipeline** that focuses resources on high-reach content:
+
+          **Architecture:**
+          ```
+          New Content Published
+               │
+               ▼
+          ┌──────────────────┐
+          │ Priority Router   │
+          │ - Reach prediction│
+          │ - Source risk      │
+          │ - Topic sensitivity│
+          └────────┬─────────┘
+                   │
+              ┌────┴─────┐
+              │          │
+              ▼          ▼
+          High Priority  Low Priority
+          (top 10%       (remaining 90%)
+           by reach)
+              │              │
+              ▼              ▼
+          Full Pipeline   Source Score Only
+          - Claim extract  - Publisher reputation
+          - NLI verify     - Quick content scan
+          - Propagation    - Score in <1s
+          - Score in <60s  - Rescore if goes viral
+          ```
+
+          **Priority scoring:**
+          - Content from high-reach accounts (>100K followers) → immediate full scoring
+          - Content on trending topics → immediate full scoring
+          - Content from unknown/low-credibility sources → full scoring within 5 minutes
+          - Content from established credible sources → source score only unless flagged
+
+          **Why priority-based:**
+          - **80/20 rule**: 10% of content gets 90% of impressions -- focus resources there
+          - **Cost efficient**: Full NLI pipeline costs ~$0.01/article; scoring all content would cost ~$100K/day
+          - **Latency appropriate**: High-reach content scored before most users see it
+          - **Scalable**: During breaking events, the router adjusts priorities dynamically
+
+          **Viral content trigger:**
+          - If low-priority content suddenly gains traction (>1000 shares in 1 hour), automatically escalate to full pipeline
+          - This catches content that initially seemed low-risk but becomes influential
+        next: deploy_priority
+      - label: "Real-time scoring for all content"
+        answer: |
+          I'd deploy **real-time scoring for all content** using a tiered model approach:
+
+          **Architecture:**
+          ```
+          New Content Published
+               │
+               ▼
+          ┌──────────────────┐
+          │ Tier 1: Fast Score │  Source reputation + content heuristics
+          │ (<100ms)           │  → Quick credibility estimate
+          └────────┬─────────┘
+                   │
+                   ▼
+          ┌──────────────────┐
+          │ Tier 2: Deep Score│  NLI verification + full analysis
+          │ (async, <60s)     │  → Refined credibility score
+          └────────┬─────────┘
+                   │
+                   ▼
+          ┌──────────────────┐
+          │ Tier 3: Propagation│  Cascade analysis (after spread starts)
+          │ (continuous)       │  → Updated score with spread signals
+          └──────────────────┘
+          ```
+
+          **Tier 1: Instant scoring (<100ms)**
+          - Source reputation lookup (Redis, <5ms)
+          - Headline analysis: Emotional language score, clickbait classifier
+          - Known claim matching: Embed headline and match against fact-checked claims database
+          - Output: Initial credibility score used for immediate content ranking
+
+          **Tier 2: Deep analysis (async, <60s)**
+          - Full claim extraction and NLI verification
+          - Cross-source corroboration check
+          - Image reverse search for manipulated media
+          - Output: Refined score that updates the initial estimate
+
+          **Tier 3: Propagation monitoring (continuous)**
+          - Track sharing patterns over time
+          - Update score as propagation signals accumulate
+          - Trigger re-scoring if propagation pattern becomes anomalous
+
+          **Why real-time for all content:**
+          - **Early detection**: Misinformation is most harmful in the first hour of spread
+          - **Consistent experience**: All content gets scored, no gaps in coverage
+          - **Tiered approach manages cost**: Tier 1 is cheap (<$0.001/article); expensive Tier 2 is async
+          - **Continuously improving score**: Score gets better over time as more signals arrive
+        next: deploy_realtime
+
+  - id: deploy_priority
+    stage: deployment
+    type: info
+    label: "Priority Pipeline Details"
+    speaker: interviewer
+    content: |
+      Let's detail the priority-based deployment.
+
+      **Scoring infrastructure:**
+
+      | Component | Technology | Scale |
+      |-----------|-----------|-------|
+      | Priority Router | K8s service + Redis (reach predictions) | 1M articles/day |
+      | Claim Extraction | GPU pods (DeBERTa), auto-scaling | 100K articles/day |
+      | Evidence Retrieval | FAISS index (50M docs) + Redis cache | <50ms per query |
+      | NLI Scoring | GPU pods (DeBERTa-NLI) | 500K claim-evidence pairs/day |
+      | Aggregation | CPU pods + PostgreSQL | All scored articles |
+      | Label Service | K8s + CDN for user-facing labels | 10M label lookups/day |
+
+      **Breaking event scaling:**
+      - During major news events, article volume can spike 10x
+      - Auto-scale GPU pods from 20 to 200 based on queue depth
+      - Temporarily relax deep scoring SLA (60s → 300s) for lower-priority content
+      - Keep high-priority scoring SLA fixed
+
+      **Explainability pipeline:**
+      - For every scored article, generate an explanation:
+        - "Source X has a credibility rating of Mixed (NewsGuard: 55/100)"
+        - "Claim 'Y' is contradicted by Reuters, AP, and WHO data"
+        - "This article was shared primarily by accounts flagged for coordinated behavior"
+      - Explanations stored in PostgreSQL, served via API for user-facing labels
+
+      Now let's discuss monitoring.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle content that goes viral before it's scored?"
+      - speaker: candidate
+        text: "The viral content trigger catches this. Once content exceeds a share velocity threshold, it's immediately escalated to the full scoring pipeline regardless of initial priority. The Tier 1 source-based score provides some protection in the interim."
+      - speaker: interviewer
+        text: "What about content that's deliberately seeded to low-risk-looking accounts?"
+      - speaker: candidate
+        text: "This is where propagation monitoring helps. Even if the seeding accounts look credible, the downstream spread pattern of coordinated misinformation is different from organic sharing. The propagation model catches this once enough sharing data accumulates."
+    next: deploy_infrastructure
+
+  - id: deploy_realtime
+    stage: deployment
+    type: info
+    label: "Real-time Scoring Details"
+    speaker: interviewer
+    content: |
+      Let's detail the real-time scoring architecture.
+
+      **Tiered inference pipeline:**
+
+      | Tier | Latency | Cost/Article | Coverage | Accuracy |
+      |------|---------|-------------|----------|----------|
+      | Tier 1 (instant) | <100ms | ~$0.001 | 100% | ~70% |
+      | Tier 2 (deep) | <60s | ~$0.01 | 100% | ~85% |
+      | Tier 3 (propagation) | Continuous | ~$0.005 | Viral only | +5-10% |
+
+      **Known claim matching (Tier 1 enhancement):**
+      - Maintain an embedding index of all fact-checked claims (200K+)
+      - When a new article arrives, embed its headline and search for similar claims
+      - If match found (cosine similarity >0.85), apply the existing fact-check rating immediately
+      - This instantly scores ~20% of misinformation that recycles debunked claims
+
+      **Score evolution over time:**
+      ```
+      t=0     Tier 1 score (source + headline)     → 0.4 (uncertain)
+      t=30s   Tier 2 score (NLI verification)       → 0.25 (low credibility)
+      t=1hr   Tier 3 score (propagation signals)    → 0.15 (likely misinformation)
+      t=24hr  Fact-checker rating arrives            → 0.1 (confirmed false)
+      ```
+
+      The score improves over time as more signals become available.
+
+      **Handling score updates:**
+      - Content ranking system uses the latest score
+      - Labels applied only when score is stable (Tier 2 complete)
+      - Users who shared the content notified if score significantly decreases
+      - Historical score timeline stored for transparency and appeals
+
+      Now let's discuss monitoring.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle the initial period when only the Tier 1 score is available?"
+      - speaker: candidate
+        text: "Tier 1 is conservative -- it only labels content with very low source credibility or exact matches to debunked claims. For uncertain content, the ranking algorithm slightly reduces amplification until Tier 2 completes, which typically takes under 60 seconds."
+      - speaker: interviewer
+        text: "What about the cost of scoring all content?"
+      - speaker: candidate
+        text: "At scale, Tier 1 costs about $1K/day for 1M articles. Tier 2 adds about $10K/day. The total of $11K/day is modest compared to the platform's revenue and the cost of misinformation-related regulatory fines."
+    next: deploy_infrastructure
+
+  - id: deploy_infrastructure
+    stage: deployment
+    type: info
+    label: "CI/CD & Safety Infrastructure"
+    speaker: interviewer
+    content: |
+      Fake news detection model deployment requires extreme care because errors have direct political and social implications. Over-labeling legitimate news is censorship; under-labeling allows misinformation to spread.
+
+      **CI/CD pipeline for model deployment:**
+
+      ```
+      Model Training Complete
+           │
+           ▼
+      Automated Validation Gates:
+      1. Credibility ranking correlation > 0.75 on test set
+      2. Political balance audit passes (FPR disparity < 1.5x)
+      3. No regression on any content category
+      4. Fact-checker agreement rate > 85%
+      5. Source reputation accuracy AUC > 0.90
+           │
+           ▼
+      Shadow Deployment (2 weeks):
+      - Score all content alongside champion
+      - Log scores and labels, don't influence ranking
+      - Political balance analysis on shadow scores
+      - Fact-checker review of 500 disagreement samples
+           │
+           ▼
+      Gradual Rollout:
+      - 5% of ranking decisions (1 week)
+      - 25% (1 week) → 50% (3 days) → 100%
+      - Automated rollback triggers:
+        * Labeling rate changes > 30%
+        * Political balance disparity > 2x
+        * Publisher complaint rate > 2x baseline
+      ```
+
+      **Political sensitivity safeguards:**
+      - **No model changes during elections**: Freeze model updates 30 days before major elections
+      - **Political balance dashboard**: Real-time monitoring of label distribution across political orientations
+      - **Publisher appeal fast-track**: News organizations can appeal within 4 hours
+      - **External oversight board**: Quarterly review by independent media experts
+
+      **Crisis mode protocols:**
+      - **Breaking news**: Temporarily raise labeling thresholds (reduce actions on unverified content since truth is still emerging)
+      - **Coordinated misinformation campaign**: Activate enhanced source-based scoring, increase fact-checker coordination
+      - **Model error discovered**: Immediate rollback with public acknowledgment
+
+      **Transparency requirements:**
+      - EU DSA mandates transparency in algorithmic content moderation
+      - Publish quarterly transparency reports with labeling statistics, error rates, and appeal outcomes
+      - Provide API for researchers to access anonymized scoring data
+
+      Let's now design the monitoring system.
+    dialogue:
+      - speaker: interviewer
+        text: "Why freeze model updates during elections?"
+      - speaker: candidate
+        text: "Any model change during an election will be accused of political bias, regardless of intent. By freezing, we remove that attack vector. We prepare thoroughly before the freeze window and rely on human fact-checkers for novel claims during the election period."
+      - speaker: interviewer
+        text: "How do you handle the tension between speed and accuracy?"
+      - speaker: candidate
+        text: "Source reputation provides an immediate, reasonably accurate signal for new content. For high-reach content, we escalate to rapid fact-checker review within 30 minutes. The key is being transparent about confidence levels -- a source-based score is less certain than a fact-checker verdict."
+      - speaker: interviewer
+        text: "Let's discuss ongoing monitoring."
+    next: mon_strategy
+
+  # ============ MONITORING ============
+  - id: mon_strategy
+    stage: monitoring
+    type: question
+    label: "Monitoring Strategy"
+    speaker: interviewer
+    content: |
+      Fake news detection monitoring must handle both model quality and the political sensitivity of content labeling. How would you design the monitoring system?
+    choices:
+      - label: "Fact-checker alignment + political balance audit"
+        answer: |
+          I'd center monitoring on **fact-checker alignment** and **political balance auditing**:
+
+          **Fact-checker alignment tracking:**
+          - When professional fact-checkers rate a claim, compare to our system's score at the time of rating
+          - **Agreement rate**: Target >85% directional agreement (both say "false" or both say "true")
+          - Track agreement by topic: Health, politics, science, economics
+          - Track agreement by language and region
+
+          **Weekly evaluation pipeline:**
+          ```
+          New ClaimReview ratings this week (from 100+ fact-checkers)
+               │
+               ▼
+          Match to content our system scored
+               │
+               ▼
+          Compute agreement metrics:
+          - Overall agreement rate
+          - Per-topic agreement
+          - Per-language agreement
+          - False negative analysis (claims we missed)
+          - False positive analysis (content we incorrectly labeled)
+               │
+               ▼
+          Report + alerts if agreement drops below threshold
+          ```
+
+          **Political balance audit (quarterly, external):**
+          - Independent auditor selects 2,000 articles across the political spectrum
+          - Compare credibility scores for left-leaning vs right-leaning vs center sources
+          - Control for actual credibility differences (some sources are genuinely less credible)
+          - Report any statistically significant scoring bias
+
+          **User trust metrics:**
+          - Survey users quarterly on perceived platform credibility
+          - Track: "Do you trust the credibility labels?" (target >70% trust)
+          - Monitor social media discourse about the platform's moderation
+
+          **Transparency dashboard (public-facing):**
+          - Number of articles scored, labeled, demoted per week
+          - Agreement rate with fact-checkers
+          - Political balance audit results
+          - Appeal statistics
+        next: mon_factcheck
+      - label: "Impact measurement + misinformation prevalence tracking"
+        answer: |
+          I'd center monitoring on **measuring real-world impact** of the detection system:
+
+          **Misinformation prevalence estimation:**
+          - Weekly random sample of 5,000 articles on the platform
+          - Expert fact-checkers rate each for credibility
+          - Estimate: What % of content users see is misinformation? (Target: <2%)
+          - Track trend over time -- is prevalence decreasing?
+
+          **Impact metrics dashboard:**
+
+          | Metric | Measurement | Target |
+          |--------|-------------|--------|
+          | Misinformation impressions | Impressions on labeled/demoted content | Decreasing monthly |
+          | Pre-debunk rate | % of misinformation caught before viral | >80% |
+          | Sharing reduction | % fewer shares after labeling | >40% |
+          | User exposure | Avg misinformation articles per user/week | <2 |
+          | Narrative tracking | Active misinformation campaigns detected | All major campaigns |
+
+          **A/B testing framework:**
+          - Continuously test: Does labeling actually reduce misinformation spread?
+          - Test different label formats: "Disputed" vs "Rated False" vs "Missing Context"
+          - Measure: Which intervention most effectively reduces sharing?
+          - Meta's research found that informational labels reduce shares by ~50%
+
+          **Narrative monitoring:**
+          - Track emerging misinformation narratives in real-time
+          - Dashboard showing: Active narratives, origin, spread velocity, detection rate
+          - Alert when new narrative emerges that the system isn't catching
+          - Weekly "threat intelligence" briefing for Trust & Safety team
+
+          **Downstream impact:**
+          - Track advertiser satisfaction (brand safety incidents involving misinformation)
+          - Monitor regulatory compliance (EU DSA response time requirements)
+          - User retention analysis: Do users who encounter more misinformation churn faster?
+        next: mon_impact
+
+  - id: mon_factcheck
+    stage: monitoring
+    type: info
+    label: "Fact-checker Alignment Monitoring"
+    speaker: interviewer
+    content: |
+      Excellent approach. Fact-checker alignment is the most credible quality signal.
+
+      **Alignment analysis details:**
+
+      | Agreement Type | Target | Action if Below |
+      |---------------|--------|----------------|
+      | Overall directional | >85% | Investigate model regression |
+      | Health claims | >90% | Health misinfo is most harmful |
+      | Election claims | >90% | Regulatory requirement |
+      | Science claims | >85% | Complex, some disagreement expected |
+      | Per-language | >80% | Language-specific model improvement |
+
+      **Disagreement analysis:**
+      - When system and fact-checkers disagree, categorize the reason:
+        - System missed context (fact-checker had additional information)
+        - Fact-checker applied stricter standard
+        - Temporal issue (claim was true when scored but later debunked)
+        - Cultural/regional context missed
+      - This taxonomy drives targeted model improvements
+
+      **Appeals and corrections pipeline:**
+      - Publishers can appeal scores via a dedicated portal
+      - Appeal reviewed by internal team within 48 hours
+      - If upheld, score adjusted and publisher notified
+      - Track appeal rate and overturn rate as quality metrics
+
+      **Long-term credibility tracking:**
+      - Maintain a "credibility report card" for every publisher scored
+      - Track their accuracy over months and years
+      - Publishers that improve get higher credibility scores
+      - Publish aggregated credibility trends in transparency reports
+
+      You've designed a comprehensive fake news detection system!
+    dialogue:
+      - speaker: interviewer
+        text: "What do you do when fact-checkers themselves disagree?"
+      - speaker: candidate
+        text: "Surface the disagreement honestly. If two fact-checkers rate a claim differently, we show both ratings. We also weight fact-checkers by their own track record and methodology transparency. The IFCN (International Fact-Checking Network) signatories get higher weight."
+      - speaker: interviewer
+        text: "How do you handle topics where no fact-checkers have weighed in?"
+      - speaker: candidate
+        text: "We rely more heavily on source reputation and propagation signals. For high-reach content, we can expedite fact-checker review through partnership programs. Google and Meta both have such programs with IFCN members."
+    next: mon_terminal_factcheck
+
+  - id: mon_impact
+    stage: monitoring
+    type: info
+    label: "Impact Monitoring Details"
+    speaker: interviewer
+    content: |
+      Great impact-focused approach. Let's detail the measurement methodology.
+
+      **Misinformation prevalence estimation methodology:**
+
+      ```
+      Weekly Random Sample (5,000 articles from user feeds)
+           │
+           ▼
+      Expert Review (3 reviewers per article)
+           │
+           ├── Credible: Accurate reporting from reliable sources
+           ├── Mixed: Contains some inaccuracies or missing context
+           ├── Misleading: Accurate facts presented deceptively
+           └── False: Contains fabricated or demonstrably false claims
+           │
+           ▼
+      Prevalence Estimate with 95% CI
+           │
+           ├── Overall: X% ± Y%
+           ├── By topic: Health, Politics, Science, Entertainment
+           ├── By language: English, Spanish, Hindi, etc.
+           └── By detection status: Caught by system? (measures recall)
+      ```
+
+      **Impact reporting (monthly executive dashboard):**
+      - **Impressions prevented**: Estimated impressions avoided through demotion
+      - **Narrative response time**: Average time from narrative emergence to system detection
+      - **Cross-platform leakage**: How much misinformation reaches our platform from others
+      - **Advertiser incidents**: Number of brand safety incidents involving misinformation
+
+      **Regulatory compliance metrics:**
+      - EU DSA: Time to assess and act on reported content (<24h for illegal content)
+      - Transparency report data: Automated and manual content actions per category
+      - Code of Practice on Disinformation: Commitments tracking
+
+      You've designed a comprehensive fake news detection system!
+    dialogue:
+      - speaker: interviewer
+        text: "How do you measure the causal impact of your labeling on misinformation spread?"
+      - speaker: candidate
+        text: "Randomized controlled trials. For a random subset of detected misinformation, delay the label application by varying amounts and measure sharing rates. The difference between immediately-labeled and delayed-labeled content gives causal impact."
+      - speaker: interviewer
+        text: "What's the most important metric for the platform's leadership?"
+      - speaker: candidate
+        text: "Misinformation prevalence in user feeds. It's the bottom-line metric that captures the entire system's effectiveness. If prevalence is declining, everything is working. If it's rising, something is failing, regardless of model accuracy metrics."
+    next: mon_terminal_impact
+
+  # ============ TERMINALS ============
+  - id: mon_terminal_factcheck
+    stage: monitoring
+    type: terminal
+    label: "Fact-checker Alignment Path Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive **fake news detection system** with fact-checker alignment monitoring.
+
+      **Your design summary:**
+      - **Problem**: Multi-class credibility scoring for news content
+      - **Metrics**: Accuracy, political balance, and user trust metrics
+      - **Data**: Fact-checker ratings, source reputation databases, social propagation data
+      - **Features**: Content analysis, source reputation, and propagation patterns
+      - **Model**: Retrieval-augmented or ensemble architecture for credibility scoring
+      - **Training**: Multi-source training with emerging topic adaptation
+      - **Deployment**: Priority-based or tiered real-time scoring
+      - **Monitoring**: Fact-checker alignment with political balance auditing
+
+      **Key strengths:**
+      - Grounded in professional fact-checker standards
+      - Transparent methodology with public auditing
+      - Political balance as a first-class concern
+      - Explainable scoring with evidence citations
+
+      Outstanding system design that balances accuracy with fairness and transparency!
+
+  - id: mon_terminal_impact
+    stage: monitoring
+    type: terminal
+    label: "Impact Monitoring Path Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive **fake news detection system** focused on measurable impact.
+
+      **Your design summary:**
+      - **Problem**: Credibility scoring as a platform integrity challenge
+      - **Metrics**: Impact-focused with prevalence estimation and spread reduction
+      - **Data**: Diverse sources with real-time propagation tracking
+      - **Features**: Rich multi-signal analysis (content + source + propagation)
+      - **Model**: Scalable architecture with tiered scoring
+      - **Training**: Continuous adaptation to emerging misinformation narratives
+      - **Deployment**: Optimized for coverage with cost-efficient tiering
+      - **Monitoring**: Prevalence estimation with causal impact measurement
+
+      **Key strengths:**
+      - Direct measurement of misinformation reduction
+      - Causal impact evaluation through controlled experiments
+      - Regulatory compliance built into monitoring framework
+      - Business impact tracking for stakeholder alignment
+
+      Outstanding system design that connects detection to real-world misinformation reduction!

@@ -1,0 +1,1407 @@
+id: content-moderation
+title: "Content Moderation"
+description: "Build an automated content moderation system to filter offensive comments."
+companies: ["Meta", "YouTube", "TikTok"]
+domains: ["NLP", "Computer Vision", "Classification"]
+category: "Security, Safety & Fraud"
+root: pd_start
+
+nodes:
+  # ============ PROBLEM DEFINITION ============
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design an **automated content moderation system** to detect and filter offensive, harmful, or policy-violating content at scale.
+
+      **Business context:**
+      - Platforms like Meta review **~3 million reports per day** from users, plus proactively scan billions of posts
+      - YouTube removes **~10 million videos per quarter** for policy violations
+      - TikTok processes **~34 million videos uploaded daily**, each needing moderation before or shortly after publication
+      - Content types include **text comments, images, videos, and audio** -- each requiring different ML approaches
+      - Moderation must balance **user safety** (removing harmful content) with **free expression** (avoiding over-censorship)
+
+      **Goal:** Design an ML system that automatically classifies user-generated content into policy categories (hate speech, violence, harassment, spam, NSFW, misinformation) and takes appropriate action (remove, reduce visibility, warn, or escalate to human review).
+
+      **Key challenge:** Content moderation is inherently subjective. What constitutes "hate speech" varies by culture, context, and evolving social norms. The system must handle nuance, sarcasm, coded language, and adversarial evasion.
+
+      Let's scope the problem.
+    dialogue:
+      - speaker: interviewer
+        text: "Let's design a content moderation system for a major social platform. What's the first thing you'd want to understand?"
+      - speaker: candidate
+        text: "I'd want to understand the content types we're moderating and the policy categories. Are we handling text, images, video, or all of the above?"
+      - speaker: interviewer
+        text: "Start with text comments -- that's the highest volume. We can discuss multimodal later."
+      - speaker: candidate
+        text: "Got it. For text, the key challenges are context sensitivity, multilingual support, and adversarial evasion like leetspeak or homoglyphs."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: info
+    label: "Problem Scoping"
+    speaker: interviewer
+    content: |
+      Let's scope the system precisely.
+
+      **What we're building:**
+      - A **content classification service** that receives user-generated content and returns policy violation scores across multiple categories
+      - The system handles **text** as the primary modality, with an architecture extensible to images and video
+      - It must support **30+ languages** with varying levels of coverage
+      - Outputs feed a **decision engine** that maps scores to actions: remove, reduce reach, warn user, or send to human review queue
+
+      **Policy categories (non-exhaustive):**
+      - **Hate speech**: Content targeting protected groups based on race, religion, gender, etc.
+      - **Violence/threats**: Graphic content, incitement, threats of harm
+      - **Harassment/bullying**: Targeted attacks on individuals
+      - **NSFW/sexual content**: Adult content, nudity, exploitation
+      - **Spam/scam**: Commercial spam, phishing, misleading content
+      - **Misinformation**: False claims about health, elections, crisis events
+
+      **ML formulation:**
+      - **Multi-label classification**: A single comment can violate multiple policies simultaneously
+      - Each category gets an independent probability score (not mutually exclusive)
+      - Separate thresholds per category (hate speech threshold may differ from spam threshold)
+
+      **Scale:** ~500K comments per minute across all languages, with P99 latency <200ms per comment.
+
+      Let's discuss metrics.
+    dialogue:
+      - speaker: interviewer
+        text: "How would you formulate the ML problem?"
+      - speaker: candidate
+        text: "Multi-label classification. A single post might contain both hate speech and misinformation, so the categories aren't mutually exclusive. Each category gets an independent score."
+      - speaker: interviewer
+        text: "Right. How does that affect the model architecture?"
+      - speaker: candidate
+        text: "We can use a shared backbone encoder with separate classification heads per category, or a single model with multi-label output and sigmoid activations instead of softmax."
+    next: met_question
+
+  # ============ METRICS ============
+  - id: met_question
+    stage: metrics
+    type: question
+    label: "Optimization Priority"
+    speaker: interviewer
+    content: |
+      Content moderation faces a fundamental tension:
+
+      - **Over-moderation** (false positives): Removing legitimate content suppresses free expression, alienates users, and creates PR backlash. Meta's Oversight Board has repeatedly criticized over-removal.
+      - **Under-moderation** (false negatives): Leaving harmful content up causes real-world harm, regulatory fines (EU DSA mandates removal within 24 hours), and advertiser boycotts.
+
+      How would you balance this trade-off?
+    choices:
+      - label: "Safety-first: Prioritize removing harmful content"
+        answer: |
+          I'd optimize for **high recall on the most harmful categories** -- the cost of missing dangerous content outweighs the cost of occasional over-moderation.
+
+          **Tiered approach by severity:**
+
+          | Tier | Categories | Recall Target | Precision Target | Action |
+          |------|-----------|---------------|-----------------|--------|
+          | **Critical** | CSAM, terrorism, imminent threats | >99% | >90% | Auto-remove, report to authorities |
+          | **High** | Hate speech, violence, harassment | >95% | >85% | Auto-remove + appeal option |
+          | **Medium** | NSFW, misinformation | >90% | >80% | Reduce reach + label |
+          | **Low** | Spam, low-quality | >85% | >75% | Reduce reach |
+
+          **Why safety-first:**
+          - **Legal liability**: EU DSA, UK Online Safety Act, and US FOSTA/SESTA create legal obligations to remove certain content
+          - **Advertiser revenue**: Brand safety concerns drive ~70% of platform ad revenue decisions
+          - **User retention**: Research shows users who encounter harassment are **3x more likely to leave** the platform
+          - **Real-world harm**: Hate speech online correlates with offline violence (UN reports on Myanmar/Facebook)
+
+          **Handling over-moderation:**
+          - Robust **appeals process** with fast human review (<24h turnaround)
+          - Transparency reports showing error rates
+          - User notification with specific policy citation when content is removed
+          - Track **overturn rate** on appeals as a key metric -- target <10%
+        next: met_safety
+      - label: "Expression-first: Minimize false positives"
+        answer: |
+          I'd optimize for **high precision** across all categories -- removing content should require high confidence to protect free expression.
+
+          **Why expression-first:**
+          - **User trust**: Over-moderation is the #1 complaint from creators and drives them to competing platforms
+          - **Cultural sensitivity**: Humor, satire, and cultural references are frequently misclassified as hate speech
+          - **Political neutrality**: High false positive rates on political speech create accusations of bias
+          - **Creator economy**: Wrongly removing a creator's content can destroy their livelihood (demonetization, shadow-banning)
+
+          **Target metrics:**
+
+          | Category | Precision Target | Recall Target | Decision |
+          |----------|-----------------|---------------|----------|
+          | All categories | >95% | Varies | Only auto-remove with high confidence |
+          | Borderline cases | N/A | N/A | Send to human review |
+
+          **Strategy for handling borderline content:**
+          - **Three-tier scoring**: High confidence violations auto-removed, low confidence auto-approved, middle band sent to human review
+          - **Human review queue** sized for 500K reviews/day with <4h turnaround
+          - **Reduce-reach as intermediate action**: Borderline content stays up but gets less algorithmic amplification
+          - **User appeals with priority queue**: Creators with high appeal overturn rates get lighter moderation
+
+          **Business metric:** Track **creator satisfaction score** and **content removal appeal rate** alongside safety metrics. Target appeal overturn rate <5% (meaning 95%+ of removals are correct).
+        next: met_expression
+
+  - id: met_safety
+    stage: metrics
+    type: info
+    label: "Safety-First Metrics Framework"
+    speaker: interviewer
+    content: |
+      Good choice. Safety-first is the industry standard for platforms at scale.
+
+      **Complete metrics framework:**
+
+      | Category | Metric | Target | Measurement |
+      |----------|--------|--------|-------------|
+      | **Accuracy** | Per-category recall | 90-99% by tier | Sampled human evaluation (weekly) |
+      | **Accuracy** | Per-category precision | 80-95% by tier | Appeals overturn rate |
+      | **Speed** | Time-to-action | <10 min for critical | End-to-end from post to action |
+      | **Coverage** | Proactive detection rate | >90% | % of violations found before user report |
+      | **User Impact** | Appeal overturn rate | <10% | Appeals reviewed and reversed |
+      | **Fairness** | Error rate parity | <2x across languages | Sampled per-language evaluation |
+      | **Operational** | P99 inference latency | <200ms | Service monitoring |
+
+      **Evaluation methodology:**
+      - **Sampled human evaluation**: Weekly random sample of 10K decisions reviewed by trained labelers (3 labelers per item, majority vote)
+      - **Appeal analysis**: Every successful appeal analyzed for patterns (which categories, languages, contexts)
+      - **Adversarial testing**: Red team creates test content with evasion techniques monthly
+      - **Cross-language evaluation**: Separate metrics per language -- don't let English performance mask poor Burmese performance
+
+      **Key insight:** The threshold is not fixed. During crisis events (elections, mass shootings, pandemics), temporarily **lower thresholds** (accept more false positives) to prioritize safety. Meta calls this "breaking glass" protocol.
+
+      Let's design the data pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you measure recall when you don't know all the violating content?"
+      - speaker: candidate
+        text: "Two approaches: sampled evaluation where human reviewers label random content to estimate prevalence, and user reports as a proxy for false negatives. If user reports increase for a category, recall may be declining."
+      - speaker: interviewer
+        text: "What about fairness across languages?"
+      - speaker: candidate
+        text: "Critical issue. English models are typically the best, but most harmful content is in other languages. I'd track metrics per language and set minimum recall thresholds for each supported language."
+    next: data_collection
+
+  - id: met_expression
+    stage: metrics
+    type: info
+    label: "Expression-First Metrics Framework"
+    speaker: interviewer
+    content: |
+      Good reasoning. An expression-first approach requires careful design to maintain safety guardrails.
+
+      **Complete metrics framework:**
+
+      | Category | Metric | Target | Measurement |
+      |----------|--------|--------|-------------|
+      | **Accuracy** | Per-category precision | >95% | Appeals analysis |
+      | **Accuracy** | Per-category recall | >85% baseline | Sampled human evaluation |
+      | **User Trust** | Appeal overturn rate | <5% | Appeals reviewed and reversed |
+      | **User Trust** | Creator satisfaction | >80% positive | Survey + retention metrics |
+      | **Safety** | Time-to-action (critical) | <5 min | End-to-end for CSAM/terrorism |
+      | **Safety** | User-reported content queue | <24h clearance | Queue depth monitoring |
+      | **Fairness** | False positive parity | <1.5x across groups | Sampled demographic analysis |
+
+      **Evaluation methodology:**
+      - **Precision-first evaluation**: For every auto-removal, track whether it would have been upheld by a human reviewer
+      - **False positive deep-dives**: Weekly analysis of reversed removals -- categorize by type (satire, cultural context, language ambiguity)
+      - **A/B testing threshold changes**: Test different thresholds on 1% of traffic to find optimal precision-recall operating point
+      - **Creator impact tracking**: Monitor how moderation actions affect creator posting frequency, audience growth, and platform tenure
+
+      **Important guardrail:** Even with an expression-first approach, **critical safety categories (CSAM, terrorism, imminent threats) always use safety-first thresholds**. Expression-first applies to the gray areas: hate speech, misinformation, harassment.
+
+      Let's design the data pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle the safety categories with an expression-first approach?"
+      - speaker: candidate
+        text: "Expression-first is for the gray areas only. For CSAM, terrorism, and imminent threats, we always use maximum recall thresholds. These categories have near-universal agreement on what constitutes a violation."
+      - speaker: interviewer
+        text: "Good distinction. The framework is severity-dependent, not one-size-fits-all."
+    next: data_collection
+
+  # ============ DATA ============
+  - id: data_collection
+    stage: data
+    type: info
+    label: "Data Sources & Collection"
+    speaker: interviewer
+    content: |
+      Before designing the pipeline, let's map out the data landscape for content moderation.
+
+      **Primary data sources:**
+
+      | Source | Description | Volume | Quality |
+      |--------|-------------|--------|---------|
+      | **User-generated content** | Text comments, posts, messages across the platform | ~500K/min | Raw input -- needs labeling |
+      | **User reports** | Flagged content from community members | ~3M/day | Noisy, sometimes weaponized |
+      | **Human review decisions** | Expert labeler verdicts on sampled content | ~1M/month | Highest quality |
+      | **Appeal outcomes** | Overturned or upheld moderation decisions | ~100K/month | High quality (reviewed twice) |
+      | **Public datasets** | HateXplain, Civil Comments, Jigsaw Toxicity | ~2M examples | Domain mismatch risk |
+      | **Synthetic data** | LLM-generated adversarial examples and augmentations | As needed | Variable quality |
+
+      **Data quality challenges:**
+      - **Labeler subjectivity**: Inter-annotator agreement for hate speech is typically Cohen's kappa 0.4-0.6 (moderate), compared to 0.8+ for spam
+      - **Cultural bias**: Labels reflect the cultural background of labelers -- a US-based team may mislabel content from other cultures
+      - **Weaponized reports**: Users file false reports against people they disagree with, creating noisy labels
+      - **Temporal drift**: What constitutes "hate speech" evolves with social norms and emerging slang
+      - **Labeler trauma**: Exposure to extreme content causes psychological harm, requiring rotation policies and well-being support
+
+      **Data consent and ethics:**
+      - User content must be handled per platform TOS and privacy regulations (GDPR, CCPA)
+      - Training data should be anonymized -- strip usernames, profile photos, and identifying information
+      - Labeled datasets should not be shared externally without consent
+      - Regular audits for demographic bias in labeling panels
+
+      Let's now design the data pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "What data would you use to train a content moderation system?"
+      - speaker: candidate
+        text: "A combination of expert-labeled samples, user reports, and appeal outcomes. Expert labels are the gold standard but expensive. User reports provide scale but are noisy. Appeal outcomes are especially valuable because they represent model errors."
+      - speaker: interviewer
+        text: "How do you handle the subjectivity in labeling hate speech?"
+      - speaker: candidate
+        text: "Multiple labelers per item with majority vote, clear policy guidelines with examples for each decision, and separate labeling panels for different cultural contexts. We also track inter-annotator agreement and re-train labelers when it drops."
+      - speaker: interviewer
+        text: "What about the labeler well-being issue?"
+      - speaker: candidate
+        text: "Essential to address. Content exposure limits per shift, mandatory breaks, access to counseling, and using AI pre-filtering to blur or summarize the most extreme content so labelers see descriptions rather than raw material."
+    next: data_pipeline
+
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      Let's design the data pipeline. Content moderation training data has unique challenges.
+
+      **Data sources:**
+
+      | Source | Volume | Quality | Bias Risk |
+      |--------|--------|---------|-----------|
+      | Human-labeled samples | ~1M items/month | Highest (expert reviewers) | Labeler subjectivity |
+      | User reports | ~3M reports/day | Medium (noisy, weaponized) | Brigading, false reports |
+      | Appeals outcomes | ~100K/month | High (reviewed decisions) | Self-selected sample |
+      | Synthetic data | Generated as needed | Varies | May not reflect real distribution |
+      | Transfer learning data | Public datasets (HateXplain, etc.) | Medium | Domain/platform mismatch |
+
+      **Labeling pipeline (critical for quality):**
+      - **3-labeler majority vote** for standard categories
+      - **5-labeler vote** for ambiguous/sensitive categories (hate speech, misinformation)
+      - **Expert escalation**: If labelers disagree significantly (no majority), escalate to policy specialists
+      - **Labeler training**: 40-hour certification program with ongoing calibration tests
+      - **Labeler well-being**: Exposure to harmful content causes psychological harm -- rotation, counseling, and content limits are essential
+
+      **Handling class imbalance:**
+      - Violation rate varies by category: spam (~5%) vs hate speech (~0.5%) vs CSAM (~0.01%)
+      - **Stratified sampling**: Oversample violation examples in training data
+      - **Hard negative mining**: Include borderline non-violating content that's similar to violations
+      - **Data augmentation**: Paraphrasing, back-translation, and character substitution for rare categories
+
+      **Multilingual data:**
+      - English: ~40% of training data (over-represented)
+      - Top 10 languages: ~80% of data
+      - Long tail (100+ languages): <1% each -- rely on multilingual models and translation augmentation
+
+      Now let's decide on the feature engineering approach.
+    dialogue:
+      - speaker: interviewer
+        text: "What's the biggest challenge with content moderation training data?"
+      - speaker: candidate
+        text: "Labeler subjectivity. Two trained reviewers can disagree on whether something is hate speech versus offensive-but-allowed. We need multiple labelers per item and clear policy guidelines with examples."
+      - speaker: interviewer
+        text: "How do you handle the long tail of languages?"
+      - speaker: candidate
+        text: "Multilingual transformer models like XLM-R that share representations across languages, plus targeted data collection for high-risk languages where model performance is weak."
+    next: feat_overview
+
+  # ============ FEATURES ============
+  - id: feat_overview
+    stage: features
+    type: info
+    label: "Feature Engineering Overview"
+    speaker: interviewer
+    content: |
+      Feature engineering for content moderation determines both **accuracy** and **latency** of the system. The approach differs significantly from traditional NLP classification.
+
+      **Feature categories for content moderation:**
+
+      1. **Text content features**: The actual words, phrases, and semantic meaning of the content
+      2. **Structural features**: Text length, formatting, caps ratio, emoji density, URL presence
+      3. **User features**: Account age, previous violations, trust score, posting frequency
+      4. **Context features**: Thread toxicity, conversation history, community norms
+      5. **Engagement features**: Early engagement signals (rapid spread, reports)
+      6. **Adversarial-resistant features**: Character-level patterns, homoglyph detection, encoded text
+
+      **Key design decisions:**
+      - **Pre-compute vs real-time**: User features and community scores are pre-computed. Text features are computed per-request.
+      - **Feature versioning**: Each model version is tied to specific feature definitions. Changing features requires retraining and evaluation.
+      - **Multilingual handling**: Features must work across 30+ languages. Character-level features generalize better than word-level features across scripts.
+
+      **The adversarial evasion challenge:**
+      Content moderation faces a uniquely adversarial environment. Users actively try to evade detection:
+      - **Leetspeak**: "h4t3" for "hate"
+      - **Homoglyphs**: Using Cyrillic "a" that looks identical to Latin "a"
+      - **Zero-width characters**: Invisible Unicode characters inserted between letters
+      - **Spacing tricks**: "h a t e" or "ha.te"
+      - **Coded language**: Dogwhistles and euphemisms understood by in-group members
+
+      The feature engineering must be robust to all these evasion techniques.
+
+      Let's choose the primary feature engineering strategy.
+    dialogue:
+      - speaker: interviewer
+        text: "What makes feature engineering for content moderation different from standard NLP?"
+      - speaker: candidate
+        text: "Three things: adversarial evasion is a first-class concern, context matters enormously (the same words can be hate speech or friendly banter), and multilingual support means features can't rely on language-specific patterns."
+      - speaker: interviewer
+        text: "How do you handle coded language and dogwhistles?"
+      - speaker: candidate
+        text: "Transformer embeddings are key -- they capture semantic meaning beyond surface text. We also maintain a living dictionary of coded terms updated by the trust and safety team. But the most sophisticated coded language requires contextual understanding that only large language models can provide."
+      - speaker: interviewer
+        text: "Let's dive into the specific approach."
+    next: feat_question
+
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Engineering Approach"
+    speaker: interviewer
+    content: |
+      For text content moderation, the feature engineering approach significantly impacts both accuracy and latency. What approach would you take?
+    choices:
+      - label: "Pre-trained language model embeddings (transformer-based)"
+        answer: |
+          I'd use **pre-trained transformer embeddings** as the primary feature representation:
+
+          **Model choice: XLM-RoBERTa (XLM-R)**
+          - Pre-trained on 100+ languages with 2.5TB of CommonCrawl data
+          - Supports **zero-shot transfer** -- a model trained on English hate speech data works reasonably well on German without German training data
+          - Base model: 270M parameters, produces 768-dim embeddings per token
+          - Fine-tuning on platform-specific data dramatically improves performance
+
+          **Feature extraction pipeline:**
+          1. Tokenize comment with SentencePiece tokenizer (handles all scripts)
+          2. Pass through XLM-R encoder to get contextualized embeddings
+          3. Apply **mean pooling** over token embeddings for sentence-level representation
+          4. Concatenate with metadata features (user history, comment context)
+
+          **Why transformer embeddings:**
+          - **Context-sensitive**: "You're killing it!" (positive) vs "I'll kill you" (threat) -- context matters and transformers capture it
+          - **Multilingual**: Single model handles 100+ languages, reducing operational complexity
+          - **Transfer learning**: Pre-trained on massive text corpora, fine-tune with relatively small labeled dataset (~100K examples)
+          - **State-of-art**: Perspective API (Google), Meta's RoBERTa-based classifiers all use transformer embeddings
+
+          **Latency optimization:**
+          - Use **DistilXLM-R** (40% smaller, 60% faster) for real-time scoring
+          - Cache embeddings for frequently reported comments
+          - TorchScript compilation for optimized inference
+          - Batch inference: Accumulate comments over 10ms windows for GPU efficiency
+        next: feat_transformer
+      - label: "Hybrid: Fast features + contextual signals"
+        answer: |
+          I'd use a **hybrid approach** combining fast traditional features with contextual signals:
+
+          **Fast features (computed in <5ms):**
+          - **Keyword matching**: Profanity list, slur detection, known harmful phrases (trie-based, O(n) scan)
+          - **Regex patterns**: URL patterns (phishing), email harvesting, phone number solicitation
+          - **Text statistics**: Length, caps ratio, special character ratio, emoji density
+          - **User features**: Account age, previous violations, report history, trust score
+          - **Engagement signals**: Comment on controversial post, replying to flagged user
+
+          **Embedding features (computed in <50ms):**
+          - **FastText embeddings** (300-dim): Pre-trained, very fast (~1ms), language-specific
+          - **Sentence-BERT** (384-dim): Efficient sentence embeddings for semantic similarity
+          - Semantic similarity to known violating content clusters
+
+          **Why hybrid:**
+          - **Speed**: Keyword + regex catches obvious violations in <5ms without any model inference
+          - **Layered defense**: Fast features catch 60% of violations; ML model catches the remaining 40% (subtle, contextual)
+          - **Interpretability**: Keyword matches are fully explainable; embedding features provide the nuance
+          - **Resource efficiency**: Only ~40% of comments need the expensive embedding computation
+
+          **Two-stage architecture:**
+          ```
+          Comment → Fast Features → Score > threshold? → Auto-action (60% of violations)
+                                   │
+                                   No
+                                   │
+                                   ▼
+                           Embedding Model → Score → Decision
+          ```
+
+          **Trade-off**: Slightly lower recall on subtle hate speech (coded language, dogwhistles) compared to full transformer approach, but significantly better latency and cost at scale.
+        next: feat_hybrid
+
+  - id: feat_transformer
+    stage: features
+    type: info
+    label: "Transformer Feature Details"
+    speaker: interviewer
+    content: |
+      Good choice. Let's detail the transformer feature pipeline.
+
+      **Feature architecture:**
+
+      ```
+      Comment Text
+           │
+           ▼
+      ┌──────────────────┐
+      │ Tokenizer         │  SentencePiece, max 256 tokens
+      │ (XLM-R)           │  Truncate longer comments
+      └────────┬─────────┘
+               ▼
+      ┌──────────────────┐
+      │ Transformer       │  12 layers, 768-dim
+      │ Encoder           │  Contextualized embeddings
+      └────────┬─────────┘
+               ▼
+      ┌──────────────────┐
+      │ Pooling +         │  Mean pool + [CLS] token
+      │ Feature Concat    │  + metadata (user, context)
+      └────────┬─────────┘
+               ▼
+      ┌──────────────────┐
+      │ Classification    │  Per-category sigmoid heads
+      │ Heads             │  (6 outputs: hate, violence,
+      └──────────────────┘   harassment, NSFW, spam, misinfo)
+      ```
+
+      **Metadata features concatenated with embeddings:**
+      - User trust score (0-1, based on account history)
+      - Account age (days, log-transformed)
+      - Previous violation count
+      - Comment context: Is this a reply to flagged content?
+      - Subreddit/group toxicity score (community-level risk)
+
+      **Handling adversarial evasion:**
+      - **Homoglyph normalization**: Convert lookalike characters (e.g., "h4te" -> "hate", Cyrillic "a" -> Latin "a")
+      - **Text normalization**: Expand leetspeak, decode Unicode tricks, strip zero-width characters
+      - **Adversarial training**: Augment training data with character substitutions, insertions, and spacing tricks
+      - **Character-level CNN**: Secondary model that operates on raw characters, catches visual evasion patterns
+
+      **Inference optimization:**
+      - **ONNX Runtime** with INT8 quantization: ~15ms per comment on CPU
+      - **Dynamic batching**: Accumulate comments in 5ms windows, batch process on GPU (~3ms per comment amortized)
+      - **Token length bucketing**: Group comments by similar length to minimize padding waste in batches
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle adversarial evasion techniques?"
+      - speaker: candidate
+        text: "Multi-layered defense: text normalization as preprocessing to handle homoglyphs and leetspeak, adversarial training data augmentation, and a secondary character-level CNN that catches visual tricks the tokenizer might miss."
+      - speaker: interviewer
+        text: "What about new evasion techniques that emerge after training?"
+      - speaker: candidate
+        text: "Continuous monitoring of false negatives from user reports, plus a dedicated adversarial analysis team that identifies new evasion patterns and creates targeted training data."
+    next: mod_question
+
+  - id: feat_hybrid
+    stage: features
+    type: info
+    label: "Hybrid Feature Details"
+    speaker: interviewer
+    content: |
+      Good approach. Let's detail the two-stage feature architecture.
+
+      **Stage 1: Fast features (all comments, <5ms)**
+
+      | Feature | Computation | Value |
+      |---------|------------|-------|
+      | Profanity score | Trie-based dictionary lookup | 0-1 (severity-weighted) |
+      | URL risk | Regex + domain reputation lookup | 0-1 |
+      | Caps ratio | `len(caps) / len(text)` | 0-1 (SHOUTING indicator) |
+      | User trust score | Pre-computed from history | 0-1 |
+      | Community toxicity | Pre-computed per group/thread | 0-1 |
+      | Previous violations | Redis counter lookup | Integer |
+      | Account age | User metadata | Days |
+
+      **Profanity detection with context:**
+      - Maintain a **severity-weighted profanity dictionary** with ~50K terms across 30 languages
+      - Each term has: severity (0-1), context-dependent flag, language
+      - Context rules: "This movie is killer" (positive) vs "You're a killer" (potential threat)
+      - Updated monthly from analyst feedback and new evasion patterns
+
+      **Stage 2: Embedding features (borderline comments, <50ms)**
+
+      ```
+      Borderline Comment (fast score 0.3-0.7)
+           │
+           ▼
+      ┌──────────────────┐
+      │ Sentence-BERT     │  384-dim embedding
+      │ (all-MiniLM-L6)   │  ~10ms inference
+      └────────┬─────────┘
+               ▼
+      ┌──────────────────┐
+      │ Concatenate:      │
+      │ - Embedding (384) │
+      │ - Fast feats (20) │  Total: ~404 features
+      │ - Metadata (10)   │
+      └────────┬─────────┘
+               ▼
+      ┌──────────────────┐
+      │ LightGBM or MLP   │  Per-category scores
+      └──────────────────┘
+      ```
+
+      **Cost savings:** At 500K comments/minute, only ~35% need Stage 2 (~175K/min need GPU inference). This reduces GPU costs by **~65%** compared to running transformers on everything.
+
+      Now let's choose the model architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you decide the threshold between Stage 1 and Stage 2?"
+      - speaker: candidate
+        text: "Empirically. I'd analyze the distribution of fast-feature scores and find the thresholds where Stage 1 alone achieves target precision. Comments below the low threshold are auto-approved, above the high threshold are auto-actioned, and the middle band goes to Stage 2."
+      - speaker: interviewer
+        text: "What's the risk of the two-stage approach?"
+      - speaker: candidate
+        text: "The main risk is that subtle violations with no keyword signals go directly to auto-approve without seeing the embedding model. I'd mitigate this with random sampling: send 1% of auto-approved comments through Stage 2 to estimate the miss rate."
+    next: mod_question
+
+  # ============ MODEL ============
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Model Architecture"
+    speaker: interviewer
+    content: |
+      Now let's design the classification model. Key considerations:
+      - Multi-label classification across 6+ policy categories
+      - Must handle 30+ languages
+      - Inference latency <200ms per comment
+      - Must be robust to adversarial inputs
+
+      What model architecture would you choose?
+    choices:
+      - label: "Fine-tuned multilingual transformer (single model)"
+        answer: |
+          I'd fine-tune a **single multilingual transformer** for all categories and languages:
+
+          **Base model: XLM-RoBERTa Large**
+          - 550M parameters, pre-trained on 100 languages
+          - Fine-tune the full model on platform-specific labeled data
+          - Replace the language model head with multi-label classification heads
+
+          **Architecture:**
+          ```
+          [CLS] Token Embedding ──► Linear(768, 256) ──► ReLU ──► Dropout(0.3)
+                                                                        │
+                                    ┌───────────────────────────────────┘
+                                    │
+                                    ├── Linear(256, 1) → σ → P(hate speech)
+                                    ├── Linear(256, 1) → σ → P(violence)
+                                    ├── Linear(256, 1) → σ → P(harassment)
+                                    ├── Linear(256, 1) → σ → P(NSFW)
+                                    ├── Linear(256, 1) → σ → P(spam)
+                                    └── Linear(256, 1) → σ → P(misinformation)
+          ```
+
+          **Training strategy:**
+          - **Multi-task learning**: All 6 classification heads trained jointly -- shared representations improve all tasks
+          - **Curriculum learning**: Start with easy examples (obvious violations/clean), progressively add borderline cases
+          - **Label smoothing** (0.1): Prevents overconfidence on noisy labels
+          - **Focal loss per head**: Handles class imbalance without explicit resampling
+
+          **Why single multilingual model:**
+          - **Operational simplicity**: One model to deploy, monitor, and update vs 30+ language-specific models
+          - **Cross-lingual transfer**: Training data in English improves performance in related languages (e.g., German, French)
+          - **Zero-shot languages**: Reasonable performance on unsupported languages via shared multilingual representations
+          - **Meta's approach**: Their published research uses multilingual models for content moderation
+
+          **Inference:** Distill to 6-layer model for production (~60ms per comment on CPU with ONNX). Keep the full model for offline batch processing and human review assistance.
+        next: mod_transformer
+      - label: "Ensemble of specialized models"
+        answer: |
+          I'd build an **ensemble of specialized models**, each optimized for specific categories:
+
+          **Model ensemble:**
+
+          | Model | Task | Architecture | Latency |
+          |-------|------|-------------|---------|
+          | Hate speech model | Hate + harassment | Fine-tuned HateBERT | ~30ms |
+          | Violence detector | Violence + threats | RoBERTa + keyword features | ~25ms |
+          | NSFW classifier | Sexual content | BERT + image signals | ~20ms |
+          | Spam detector | Spam + scam | FastText + LightGBM | ~5ms |
+          | Misinfo detector | Misinformation | DeBERTa + fact-check features | ~40ms |
+          | Toxicity baseline | All categories | Perspective API (Google) | ~50ms |
+
+          **Why specialized models:**
+          - Each category has **different linguistic patterns**: Hate speech relies on identity terms + context, spam uses URL patterns + repetition, misinformation needs factual grounding
+          - **Independent training cycles**: Spam model can be updated daily (fast-evolving), misinfo model updated with new claims weekly
+          - **Best-in-class per category**: HateBERT (pre-trained on hateful communities) significantly outperforms generic BERT for hate speech
+          - **Failure isolation**: If the spam model fails, other categories still work
+
+          **Ensemble combination:**
+          - Each model runs in parallel (total latency = max single model latency, ~50ms)
+          - Scores combined at the decision layer, not averaged -- each model's threshold is independent
+          - **Cascading**: If Perspective API (cheap, fast) gives >0.95 for a category, skip the expensive model
+
+          **Trade-off vs single model:**
+          - More operational complexity (6 models to maintain, deploy, monitor)
+          - Higher total compute cost (each model has its own inference)
+          - But better per-category accuracy and faster iteration on individual categories
+          - At Meta's scale, the accuracy improvement justifies the complexity
+        next: mod_ensemble
+
+  - id: mod_transformer
+    stage: model
+    type: info
+    label: "Transformer Model Details"
+    speaker: interviewer
+    content: |
+      Let's detail the transformer model architecture and distillation strategy.
+
+      **Training pipeline:**
+
+      ```
+      Teacher Model (XLM-R Large, 550M params)
+           │
+           ├── Train on 1M labeled examples, 30+ languages
+           │   - Multi-task: 6 classification heads
+           │   - Focal loss + label smoothing
+           │   - 4x A100 GPUs, ~12 hours
+           │
+           ▼
+      Knowledge Distillation
+           │
+           ├── Student: 6-layer XLM-R (66M params)
+           │   - Train on teacher soft labels + hard labels (α=0.5)
+           │   - Temperature T=4 for soft label softening
+           │   - Maintains ~95% of teacher accuracy
+           │
+           ▼
+      Production Model (66M params)
+           │
+           ├── ONNX export with INT8 quantization
+           │   - Inference: ~40ms CPU, ~8ms GPU
+           │   - Model size: ~130MB
+           └── Deploy to inference service
+      ```
+
+      **Handling edge cases:**
+      - **Long comments** (>256 tokens): Sliding window with max pooling over windows
+      - **Code-switching** (mixing languages): Multilingual model handles naturally
+      - **Emojis and special characters**: Include in vocabulary, train on emoji-heavy content
+      - **Quoted/shared content**: Detect quoted text and moderate separately from user's own words
+
+      **Calibration:**
+      - Post-training **temperature scaling** to ensure probabilities are well-calibrated
+      - A model outputting P(hate)=0.8 should be correct ~80% of the time
+      - Calibration verified per category and per language
+
+      **Model versioning:**
+      - New model version trained weekly with latest labels
+      - A/B test for 48 hours before full deployment
+      - Maintain 3 previous versions for instant rollback
+      - Version tied to specific policy version (policy changes require retraining)
+
+      Now let's design the training strategy.
+    dialogue:
+      - speaker: interviewer
+        text: "Why distillation instead of just deploying the smaller model?"
+      - speaker: candidate
+        text: "The large teacher model captures nuances that a small model trained directly on hard labels misses. Distillation transfers these dark knowledge patterns -- the soft probability distributions over categories that capture ambiguity and uncertainty in the data."
+      - speaker: interviewer
+        text: "How much accuracy do you lose with distillation?"
+      - speaker: candidate
+        text: "Typically 2-5% relative drop in F1, but with 60-70% latency reduction. For production serving at 500K comments/minute, this trade-off is essential. We keep the full teacher model for batch reprocessing and appeals."
+    next: train_strategy
+
+  - id: mod_ensemble
+    stage: model
+    type: info
+    label: "Ensemble Model Details"
+    speaker: interviewer
+    content: |
+      Let's detail the ensemble architecture.
+
+      **Parallel inference pipeline:**
+
+      ```
+      Comment
+           │
+           ├──────────────────────────────────────┐
+           │                                      │
+           ▼                                      ▼
+      ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
+      │ Hate/Harass  │  │ Violence    │  │ Spam        │
+      │ (HateBERT)   │  │ (RoBERTa)   │  │ (FastText)  │
+      └──────┬──────┘  └──────┬──────┘  └──────┬──────┘
+             │                │                │
+             ▼                ▼                ▼
+      ┌──────────────────────────────────────────┐
+      │           Score Aggregation               │
+      │  - Per-category independent thresholds    │
+      │  - Confidence-weighted combination        │
+      │  - Override rules for critical categories  │
+      └────────────────┬─────────────────────────┘
+                       │
+                       ▼
+                  Decision Engine
+      ```
+
+      **Specialized model details:**
+
+      **HateBERT (hate speech):**
+      - Pre-trained on 1.4M posts from banned Reddit communities
+      - Better at recognizing coded language and dogwhistles than generic BERT
+      - Fine-tuned on platform-specific hate speech examples
+      - Includes identity term detection for context-sensitive classification
+
+      **Spam detector (FastText + LightGBM):**
+      - FastText for speed (~1ms): Captures n-gram patterns in spam
+      - LightGBM features: URL count, emoji density, repetition metrics, user age
+      - Updated daily (spam patterns change rapidly)
+      - Handles 90% of spam with this lightweight model
+
+      **Cascading optimization:**
+      - Run Perspective API first (free for partner platforms, ~50ms)
+      - If any score >0.95: Use that score directly, skip specialized model
+      - If any score <0.05: Auto-approve for that category
+      - Only run specialized models for the uncertain band (0.05-0.95)
+      - This reduces total compute by ~40%
+
+      Now let's design the training strategy.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle the operational complexity of multiple models?"
+      - speaker: candidate
+        text: "Standardized MLOps pipeline: each model has the same training, evaluation, and deployment interface. Shared feature store for common features. Independent deployment with feature flags for each model. Centralized monitoring dashboard."
+      - speaker: interviewer
+        text: "What if the models disagree?"
+      - speaker: candidate
+        text: "If the specialized model and Perspective API give opposite signals, we route to human review. Persistent disagreement triggers a data investigation -- it often reveals an edge case or policy gap that needs addressing."
+    next: train_strategy
+
+  # ============ TRAINING ============
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: interviewer
+    content: |
+      Let's design the training pipeline for content moderation.
+
+      **Training data composition:**
+      - **Expert-labeled data**: 500K examples with 3-5 labeler votes (highest quality)
+      - **Policy-specific examples**: 100K curated examples per category illustrating boundary cases
+      - **Hard negatives**: 200K examples of content that's edgy but not violating (critical for precision)
+      - **Adversarial examples**: 50K examples with evasion techniques (homoglyphs, spacing, coded language)
+      - **Multilingual data**: Target 50K+ labeled examples per top-10 language
+
+      **Active learning pipeline:**
+      ```
+      Production Model
+           │
+           ├── Score all new content
+           │
+           ▼
+      ┌──────────────────┐
+      │ Uncertainty       │  Select comments where model is
+      │ Sampling          │  most uncertain (score 0.4-0.6)
+      └────────┬─────────┘
+               │
+               ▼
+      ┌──────────────────┐
+      │ Human Labeling    │  3 labelers per item
+      │ Queue             │  Priority: uncertain + diverse
+      └────────┬─────────┘
+               │
+               ▼
+      New Training Data (enriched with hard cases)
+      ```
+
+      **Training schedule:**
+      - **Full retrain**: Weekly on rolling 6-month data window
+      - **Quick update**: Daily fine-tuning on last 48 hours of labels (catch emerging patterns)
+      - **Policy change retrain**: Triggered when content policy is updated (new rules require new training data)
+      - **Emergency update**: Same-day when new attack pattern identified (e.g., new slur, viral harmful meme)
+
+      **Validation:**
+      - **Temporal split**: Train on months 1-5, validate month 6, test month 7
+      - **Per-language validation**: Minimum 1K test examples per supported language
+      - **Policy-version-specific test sets**: Each policy version has a golden test set maintained by policy team
+      - **Regression testing**: Ensure new model doesn't degrade on previously solved cases
+
+      Let's move to deployment.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle policy changes that redefine what's considered a violation?"
+      - speaker: candidate
+        text: "Policy changes require re-labeling a sample of training data under the new policy, creating new boundary examples, and a targeted retrain. We maintain versioned policy definitions linked to model versions."
+      - speaker: interviewer
+        text: "What about emerging threats like new slurs or harmful trends?"
+      - speaker: candidate
+        text: "Rapid response pipeline: policy team identifies the new pattern, creates ~100 labeled examples within hours, fine-tune the model on these plus recent data, deploy as a hot patch. The active learning system then fills in more examples over the next few days."
+    next: train_evaluation
+
+  - id: train_evaluation
+    stage: training
+    type: info
+    label: "Offline Evaluation & Validation"
+    speaker: interviewer
+    content: |
+      Before deploying a content moderation model, rigorous offline evaluation is essential. Errors in moderation have immediate, visible consequences.
+
+      **Evaluation methodology:**
+
+      | Aspect | Approach | Rationale |
+      |--------|----------|-----------|
+      | **Data split** | Temporal (never random) | Content trends evolve; random splits inflate metrics |
+      | **Train window** | Rolling 6 months | Balance coverage with recency |
+      | **Validation** | Last 2 weeks of window | Hyperparameter and threshold tuning |
+      | **Test** | Held-out 2 weeks | Unbiased final evaluation |
+      | **Per-language test** | Min 1K examples per language | Prevent English bias in reported metrics |
+
+      **Evaluation metrics (per category):**
+      1. **Per-category F1 score** -- harmonic mean of precision and recall, primary comparison metric
+      2. **Precision at fixed recall** -- operational metric for threshold setting
+      3. **Per-language F1** -- minimum threshold per supported language (prevents masking poor performance with English-dominated averages)
+      4. **Calibration error** (ECE) -- are probability outputs well-calibrated? Critical for threshold-based decisions
+      5. **Adversarial robustness** -- accuracy on adversarial test set with known evasion techniques
+
+      **Common evaluation pitfalls:**
+      - **English-dominated metrics**: If 60% of test data is English, aggregate F1 hides poor performance in smaller languages
+      - **Category imbalance**: High spam accuracy can mask poor hate speech performance
+      - **Temporal leakage**: Using future reports or policy updates in training data
+      - **Labeler inconsistency**: If test labels are noisy, evaluation is unreliable
+
+      **Pre-deployment checklist:**
+      - [ ] No regression on any category (F1 within 2% of champion)
+      - [ ] No regression on any of top-10 languages
+      - [ ] Adversarial robustness test passes
+      - [ ] Calibration error <0.05
+      - [ ] Latency benchmark passes (P99 <200ms)
+      - [ ] Policy team sign-off on boundary case review
+
+      Let's now discuss deployment architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "What's the most important evaluation step for content moderation?"
+      - speaker: candidate
+        text: "Per-language evaluation. Aggregate metrics are misleading because English dominates. A model could have 95% F1 overall but 60% F1 for Burmese, which was where the Myanmar crisis misinformation was concentrated."
+      - speaker: interviewer
+        text: "How do you validate a model before deployment?"
+      - speaker: candidate
+        text: "Shadow deployment for one week: the new model scores all traffic alongside the champion, but doesn't influence decisions. We compare scores on the same traffic, analyze disagreements, and have the policy team review a sample of cases where the models differ."
+      - speaker: interviewer
+        text: "What about adversarial evaluation?"
+      - speaker: candidate
+        text: "We maintain an adversarial test suite with known evasion techniques -- leetspeak, homoglyphs, spacing tricks, coded language. Every new model must pass this suite. We also run red-team exercises where trust and safety analysts try to evade the new model."
+    next: deploy_question
+
+  # ============ DEPLOYMENT ============
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Deployment Architecture"
+    speaker: interviewer
+    content: |
+      How would you deploy this content moderation system? Consider that:
+      - **500K comments/minute** need to be processed
+      - Some content should be caught **before publication** (pre-screening)
+      - Other content can be reviewed **after publication** (post-screening)
+      - The system must handle traffic spikes during viral events
+    choices:
+      - label: "Pre-publication screening (block before posting)"
+        answer: |
+          I'd implement **pre-publication screening** where every comment is scored before it appears:
+
+          **Architecture:**
+          ```
+          User Submits Comment
+               │
+               ▼
+          Content Service API
+               │
+               ▼
+          ┌──────────────────┐
+          │ Moderation Service │ ◄── Model Serving (K8s)
+          │ Score < low_t     │────► Publish immediately
+          │ Score > high_t    │────► Block + notify user
+          │ In between        │────► Publish with review flag
+          └──────────────────┘
+          ```
+
+          **Why pre-publication:**
+          - **Prevents harm before it occurs** -- harmful content never reaches an audience
+          - **Regulatory compliance**: EU DSA and UK Online Safety Act increasingly expect proactive moderation
+          - **Simpler content lifecycle**: No need to retroactively remove content that's already been seen/shared
+          - **Better user experience**: Innocent users never encounter harmful content
+
+          **Latency budget:** Adding moderation to the posting flow adds ~100-200ms. This is acceptable for comments (users won't notice), but needs optimization for real-time chat.
+
+          **Handling the latency constraint:**
+          - Fast-path for obvious content: Rule-based pre-filter catches clearly safe content in <5ms (auto-approve)
+          - GPU inference cluster: Auto-scaling from 50 to 500 pods based on queue depth
+          - Fallback: If moderation service is overloaded (P99 >500ms), temporarily switch to post-publication mode
+
+          **Trade-off:** Adds latency to every post. During viral events (Super Bowl, elections), the system must handle 3-5x normal traffic without degrading post latency.
+        next: deploy_pre
+      - label: "Post-publication review (score after posting)"
+        answer: |
+          I'd implement **post-publication review** where content is published immediately and scored asynchronously:
+
+          **Architecture:**
+          ```
+          User Submits Comment
+               │
+               ▼
+          Content Service ──► Publish Immediately
+               │
+               ▼
+          Kafka Queue ──► Moderation Workers
+                              │
+                              ▼
+                    Score and Classify
+                              │
+                    ┌─────────┼──────────┐
+                    │         │          │
+                    ▼         ▼          ▼
+                 Keep    Reduce Reach  Remove
+                              │          │
+                              ▼          ▼
+                         Update content state
+                         Notify user if removed
+          ```
+
+          **Why post-publication:**
+          - **Zero added latency** to the posting experience -- content appears instantly
+          - **Richer context**: Can analyze engagement signals (rapid spread, user reports) alongside content
+          - **Batch efficiency**: Process comments in batches of 256 on GPU for much better throughput
+          - **Graceful degradation**: Moderation lag during traffic spikes means slower review, not slower posting
+
+          **Time-to-action targets:**
+          - Critical content (CSAM, terrorism): <60 seconds
+          - High severity (hate speech, violence): <5 minutes
+          - Medium severity (harassment, NSFW): <30 minutes
+          - Low severity (spam): <1 hour
+
+          **Priority queue design:**
+          - Comments are prioritized by: (1) predicted severity from lightweight pre-filter, (2) reach (popular accounts first), (3) user report signals
+          - **High-reach content** from accounts with >100K followers gets priority scoring
+          - During traffic spikes, increase worker count and temporarily relax time-to-action SLAs for low severity
+
+          **Trade-off:** Harmful content is visible for seconds to minutes before removal. During that window, it can be seen, shared, and screenshotted. For critical categories, this window must be minimized.
+        next: deploy_post
+
+  - id: deploy_pre
+    stage: deployment
+    type: info
+    label: "Pre-publication Deployment Details"
+    speaker: interviewer
+    content: |
+      Let's detail the pre-publication architecture.
+
+      **Inference infrastructure:**
+
+      | Component | Technology | Replicas | Target |
+      |-----------|-----------|----------|--------|
+      | API Gateway | Envoy / Kong | 10 | Rate limiting, routing |
+      | Moderation Service | K8s + ONNX Runtime | 50-500 pods | P99 <150ms |
+      | Model Store | S3 + local cache | N/A | Model loading <10s |
+      | Decision Config | Redis | 3 replicas | Threshold configs |
+      | Result Cache | Redis | 6 nodes | Deduplicate repeat content |
+
+      **Content deduplication:**
+      - Hash incoming comments (SimHash for fuzzy matching)
+      - If a similar comment was recently scored, reuse the score (saves ~20% compute)
+      - Common in spam campaigns where the same message is posted thousands of times
+
+      **Scaling strategy:**
+      - **GPU pods** for transformer inference: Auto-scale based on queue depth
+      - **CPU pods** for fast-feature pre-filter: Always-on, handles 80% of traffic
+      - **Spot instances** for batch reprocessing and training
+      - **Multi-region**: Deploy in regions close to user traffic (NA, EU, APAC)
+
+      **Rollout strategy for new models:**
+      - Shadow mode (1 week): New model scores all content alongside old model, scores compared offline
+      - Canary deployment (3 days): New model makes decisions for 5% of traffic
+      - Gradual rollout: 5% -> 25% -> 50% -> 100% over 1 week
+      - Automated rollback if false positive rate increases >1% or any P0 metric degrades
+
+      Now let's discuss monitoring.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle the additional latency for real-time features like live chat?"
+      - speaker: candidate
+        text: "For live chat, use a lightweight model -- the fast-feature classifier only, which runs in <5ms. Full transformer scoring happens async. If the fast model flags high-severity content, it's held for the 50ms transformer check before delivery."
+      - speaker: interviewer
+        text: "What about the cold-start problem for new model deployments?"
+      - speaker: candidate
+        text: "Model warm-up period: Load the model and process 1000 synthetic requests before accepting real traffic. This ensures the ONNX runtime is optimized and caches are warm."
+    next: deploy_infrastructure
+
+  - id: deploy_post
+    stage: deployment
+    type: info
+    label: "Post-publication Deployment Details"
+    speaker: interviewer
+    content: |
+      Let's detail the post-publication architecture.
+
+      **Priority queue system:**
+
+      ```
+      New Comment Published
+           │
+           ├──► Lightweight Pre-filter (CPU, <5ms)
+           │    - Keyword check
+           │    - User risk score
+           │    - Content type classification
+           │
+           ▼
+      ┌──────────────────┐
+      │ Priority Queue    │
+      │ (Kafka + priority │
+      │  partitions)      │
+      │                   │
+      │ P0: CSAM/terror  │ → Dedicated workers (immediate)
+      │ P1: Hate/violence │ → High-priority workers (<5 min)
+      │ P2: Harassment    │ → Standard workers (<30 min)
+      │ P3: Spam          │ → Batch workers (<1 hour)
+      └──────────────────┘
+      ```
+
+      **Worker pool sizing:**
+
+      | Priority | Workers | Throughput | Target Latency |
+      |----------|---------|-----------|----------------|
+      | P0 (Critical) | 20 dedicated | 10K/min | <60s |
+      | P1 (High) | 100 | 100K/min | <5 min |
+      | P2 (Medium) | 200 | 300K/min | <30 min |
+      | P3 (Low) | 50 | 100K/min | <1 hour |
+
+      **Engagement-triggered re-scoring:**
+      - If a post goes viral (>1000 views in 10 min), trigger re-scoring with full model ensemble
+      - If user reports accumulate (>3 reports), escalate priority and re-score
+      - This catches content that was borderline at posting time but harmful in context of viral spread
+
+      **Batch processing advantages:**
+      - Group comments into batches of 256 for GPU inference: **4x throughput** vs individual scoring
+      - GPU utilization stays high (>80%) even during low-traffic periods
+      - Cost: ~$30K/month for 500K comments/minute vs ~$80K for synchronous per-request
+
+      **Fallback during spikes:**
+      - If queue depth exceeds 5 minutes of SLA for any priority level, auto-scale workers
+      - If auto-scaling is insufficient, temporarily raise thresholds (accept slightly higher false negative rate)
+      - Never degrade P0 (critical safety) scoring -- these have dedicated, non-shared resources
+
+      Now let's discuss monitoring.
+    dialogue:
+      - speaker: interviewer
+        text: "What's the biggest risk with post-publication moderation?"
+      - speaker: candidate
+        text: "The exposure window. A viral harmful post could be seen by millions before our system catches it. Mitigation: high-reach accounts get priority scoring, engagement-triggered re-scoring catches viral content, and critical categories have <60s SLA."
+      - speaker: interviewer
+        text: "How do you ensure the priority queue doesn't starve low-priority items?"
+      - speaker: candidate
+        text: "Separate worker pools per priority level with minimum allocations. Low-priority items have their own dedicated workers that are never stolen by higher priorities. During spikes, we add workers to all pools proportionally."
+    next: deploy_infrastructure
+
+  - id: deploy_infrastructure
+    stage: deployment
+    type: info
+    label: "CI/CD & Safety Infrastructure"
+    speaker: interviewer
+    content: |
+      Content moderation model deployment requires particularly careful safety infrastructure. A bad deployment can either expose users to harmful content (under-moderation) or suppress millions of legitimate posts (over-moderation).
+
+      **CI/CD pipeline for model deployment:**
+
+      ```
+      Model Training Complete
+           │
+           ▼
+      Automated Validation Gates:
+      1. Per-category F1 > minimum threshold
+      2. No regression vs champion on any category
+      3. Per-language F1 passes for all supported languages
+      4. Adversarial robustness test suite passes
+      5. Latency benchmark passes (P99 <200ms)
+      6. Policy team review of 200 randomly sampled decisions
+           │
+           ▼
+      Shadow Deployment (1 week):
+      - Score all content alongside champion
+      - Log scores, don't influence decisions
+      - Compare disagreement patterns
+           │
+           ▼
+      Canary (3 days):
+      - 5% traffic → 25% → 50% → 100%
+      - Automated rollback if:
+        * Removal rate changes >20%
+        * User report rate increases >30%
+        * Any P0 alert triggers
+      ```
+
+      **Emergency response playbook:**
+      - **Over-moderation detected**: Immediately raise all thresholds by 0.1, notify policy team, begin manual review of recent removals
+      - **Under-moderation detected**: Lower thresholds for affected category, increase human review queue capacity, issue public statement if needed
+      - **Model failure**: Fall back to keyword + rule-based system (catches ~60% of obvious violations)
+      - **New viral harmful content**: Activate "breaking glass" protocol with temporarily lower thresholds
+
+      **Model rollback capability:**
+      - Previous 3 model versions kept warm in memory
+      - Rollback via feature flag flip (<30 seconds)
+      - All rollbacks trigger automatic incident investigation
+
+      **Multi-region deployment:**
+      - Regional model variants for culturally specific content (separate thresholds per region)
+      - EU region complies with DSA transparency requirements
+      - APAC region uses region-specific language models for CJK content
+
+      Let's now design the monitoring system.
+    dialogue:
+      - speaker: interviewer
+        text: "What's the biggest risk when deploying a new content moderation model?"
+      - speaker: candidate
+        text: "Over-moderation at scale. If the new model's threshold is slightly too aggressive, it could suppress millions of legitimate posts within minutes. That's why shadow deployment and gradual rollout are essential."
+      - speaker: interviewer
+        text: "How do you handle urgent deployments, like when a new type of harmful content appears?"
+      - speaker: candidate
+        text: "Emergency pipeline: skip shadow deployment, but use a very conservative threshold (high precision, accept lower recall) and increase human review capacity. We can fine-tune the threshold over the next 24-48 hours as we gather data."
+      - speaker: interviewer
+        text: "Good balance between urgency and safety. Let's discuss monitoring."
+    next: mon_strategy
+
+  # ============ MONITORING ============
+  - id: mon_strategy
+    stage: monitoring
+    type: question
+    label: "Monitoring Strategy"
+    speaker: interviewer
+    content: |
+      Content moderation monitoring needs to track both **model quality** and **real-world impact**. What monitoring approach would you design?
+    choices:
+      - label: "Human-in-the-loop quality assurance"
+        answer: |
+          I'd build a **human-in-the-loop monitoring system** where ongoing human review provides the ground truth signal:
+
+          **Daily quality audit process:**
+          1. Sample **1,000 auto-approved** comments → human review → estimate false negative rate
+          2. Sample **1,000 auto-removed** comments → human review → estimate false positive rate
+          3. Sample **500 per language** for top-10 languages → per-language quality estimates
+          4. Review **all successful appeals** → identify systematic errors
+
+          **Quality metrics dashboard:**
+
+          | Metric | Frequency | Target | Owner |
+          |--------|-----------|--------|-------|
+          | Per-category recall estimate | Daily | >90% | ML team |
+          | Per-category precision | Daily | >85% | ML team |
+          | Appeal overturn rate | Daily | <10% | Policy team |
+          | Per-language F1 | Weekly | >0.80 | ML team |
+          | Time-to-action by severity | Real-time | Per-tier SLA | Ops team |
+          | Labeler agreement (IAA) | Weekly | Cohen's kappa >0.7 | Data team |
+
+          **Continuous calibration:**
+          - Compare model confidence with human labeler agreement: High-confidence predictions should have high labeler agreement
+          - If model says P(hate)=0.9 but labelers disagree 50/50, the model is poorly calibrated for that content type
+          - Weekly recalibration using Platt scaling on fresh human labels
+
+          **Error taxonomy:**
+          - Categorize every false positive and false negative by error type:
+            - Sarcasm/irony misunderstood
+            - Cultural context missed
+            - New slang/evasion technique
+            - Policy boundary ambiguity
+            - Language-specific issue
+          - This taxonomy drives targeted training data collection and model improvements
+        next: mon_human
+      - label: "Automated anomaly detection on model behavior"
+        answer: |
+          I'd build an **automated monitoring system** that detects model degradation without waiting for human review:
+
+          **Real-time model behavior monitoring:**
+
+          | Signal | Alert Threshold | Meaning |
+          |--------|----------------|---------|
+          | Score distribution shift | KL-divergence >0.05 | Input distribution or model changed |
+          | Removal rate change | >20% change from 7-day baseline | Over/under-moderation |
+          | Per-category removal rate | >2x or <0.5x baseline | Category-specific issue |
+          | User report rate after auto-approve | >50% increase | False negatives increasing |
+          | Appeal rate | >2x baseline | False positives increasing |
+          | Inference latency P99 | >300ms | Infrastructure issue |
+          | Per-language removal rate | >3x difference from English baseline | Language-specific bias |
+
+          **Automated root cause analysis:**
+          ```
+          Alert triggered (e.g., hate speech removal rate +40%)
+               │
+               ▼
+          Automated investigation:
+          1. Is this across all languages? (Likely model issue)
+          2. Is this one language only? (Likely language-specific)
+          3. Is this one region only? (Likely cultural event)
+          4. Did a new model deploy recently? (Likely deployment issue)
+          5. Is there a new viral trend? (Likely content shift)
+               │
+               ▼
+          Alert enriched with root cause hypothesis → On-call engineer
+          ```
+
+          **Adversarial evasion detection:**
+          - Monitor for new Unicode character combinations in flagged content
+          - Track emerging substitution patterns (which characters replace which)
+          - Cluster similar-looking but different content to find evasion campaigns
+          - Weekly adversarial report for ML team with new patterns
+
+          **Feedback loop automation:**
+          - When user reports consistently override auto-approve decisions, automatically adjust thresholds
+          - When appeal overturn rate exceeds target, trigger emergency model review
+          - Automated retraining triggered when feature drift exceeds PSI threshold >0.1
+        next: mon_auto
+
+  - id: mon_human
+    stage: monitoring
+    type: info
+    label: "Human-in-the-Loop Monitoring"
+    speaker: interviewer
+    content: |
+      Excellent approach. Human review is the gold standard for content moderation quality.
+
+      **Scaling the human review pipeline:**
+
+      | Review Type | Volume | Turnaround | Reviewer Tier |
+      |-------------|--------|-----------|---------------|
+      | Quality audit (random sample) | 3K/day | 24h | Trained reviewers |
+      | Appeals | ~100K/month | <24h | Senior reviewers |
+      | Escalations (model uncertain) | ~50K/day | <4h | Standard reviewers |
+      | Policy edge cases | ~1K/week | 48h | Policy specialists |
+
+      **Reviewer quality assurance:**
+      - Each reviewer's accuracy tracked against consensus labels
+      - Monthly calibration tests with known-answer items
+      - Reviewers who fall below 85% agreement are re-trained
+      - Cross-cultural review panels for content in non-English languages
+
+      **Closing the feedback loop:**
+      - Human review decisions feed directly into training data within 24 hours
+      - Appeals that are overturned create high-value training examples (model errors)
+      - Policy edge cases documented in a "policy encyclopedia" that informs both model training and reviewer training
+
+      **Transparency reporting:**
+      - Quarterly transparency report: Content removed by category, accuracy rates, appeal outcomes, geographic breakdown
+      - Required by EU DSA (Digital Services Act) for platforms operating in Europe
+      - Internal weekly report for ML and policy teams with detailed error analysis
+
+      **Key insight:** Content moderation is never "solved" -- it's an ongoing process of policy evolution, model improvement, and human judgment. The monitoring system should reflect this by emphasizing continuous learning over static thresholds.
+
+      You've designed a comprehensive content moderation system!
+    dialogue:
+      - speaker: interviewer
+        text: "How do you protect the well-being of human reviewers?"
+      - speaker: candidate
+        text: "Four key measures: limit exposure time to graphic content, mandatory breaks and rotation, access to counseling services, and use ML to pre-blur the most extreme content so reviewers see a summary rather than the raw material."
+      - speaker: interviewer
+        text: "What happens when the policy team and ML team disagree on what should be moderated?"
+      - speaker: candidate
+        text: "Policy team has final authority on what constitutes a violation. ML team's job is to operationalize those decisions. Regular calibration sessions where both teams review borderline cases together help align understanding."
+    next: mon_terminal_human
+
+  - id: mon_auto
+    stage: monitoring
+    type: info
+    label: "Automated Monitoring Details"
+    speaker: interviewer
+    content: |
+      Great automated monitoring approach. Let's detail the alerting and response system.
+
+      **Tiered alerting:**
+
+      | Tier | Response | Examples |
+      |------|----------|---------|
+      | **P0** | <5 min, auto-mitigation | Model service down, critical category scoring 0%, removal rate 10x normal |
+      | **P1** | <30 min | Score distribution shift, per-language anomaly, latency SLA breach |
+      | **P2** | <4 hours | Feature drift, retraining failure, labeler quality drop |
+      | **P3** | Next day | Weekly fairness audit, model comparison report, cost analysis |
+
+      **Auto-mitigation actions:**
+      - If model service is down: Activate rule-based fallback (keyword + user risk scoring)
+      - If removal rate spikes: Temporarily raise thresholds, route uncertain content to human review
+      - If specific language model degrades: Route that language to human review, use English-translated model as backup
+
+      **A/B testing for continuous improvement:**
+      - Always run 1-2 challenger models alongside the champion
+      - Compare on sampled human-labeled data (same traffic, different models)
+      - Promotion requires: >2% F1 improvement AND no category regression AND policy team approval
+
+      **Long-term health metrics (tracked monthly):**
+      - User-reported content as % of total content (should decrease over time)
+      - Time from harmful content post to removal (should decrease)
+      - Repeat offender rate (should decrease with better detection)
+      - Reviewer workload per content decision (should decrease as automation improves)
+      - Cost per moderation decision (should decrease with efficiency)
+
+      You've designed a comprehensive automated content moderation system!
+    dialogue:
+      - speaker: interviewer
+        text: "What's the most important metric to track for content moderation?"
+      - speaker: candidate
+        text: "User-reported content that the system auto-approved. If this rate increases, it means our model is missing harmful content that real users are catching. It's the most direct signal of false negatives at scale."
+      - speaker: interviewer
+        text: "How do you handle the fact that moderation policies change frequently?"
+      - speaker: candidate
+        text: "Policy versioning. Every model is tagged with the policy version it was trained on. When policy changes, we create new training data reflecting the change, retrain, and deploy with A/B testing. Old models remain active until the new model is validated."
+    next: mon_terminal_auto
+
+  # ============ TERMINALS ============
+  - id: mon_terminal_human
+    stage: monitoring
+    type: terminal
+    label: "Human-in-the-Loop Path Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive **automated content moderation system** with human-in-the-loop quality assurance.
+
+      **Your design summary:**
+      - **Problem**: Multi-label classification of policy-violating content across 30+ languages
+      - **Metrics**: Safety/expression trade-off with per-category and per-language evaluation
+      - **Data**: Expert-labeled pipeline with active learning and multilingual coverage
+      - **Features**: Rich text representations handling adversarial evasion
+      - **Model**: Scalable architecture supporting 500K comments/minute
+      - **Training**: Weekly retraining with active learning and emergency update capability
+      - **Deployment**: Optimized for latency with graceful degradation
+      - **Monitoring**: Human-in-the-loop quality assurance with continuous feedback loops
+
+      **Key strengths:**
+      - Human review provides reliable ground truth for model improvement
+      - Multi-layered defense against adversarial evasion
+      - Per-language quality tracking prevents biased moderation
+      - Transparent reporting meets regulatory requirements
+
+      Outstanding system design that balances automation with human judgment!
+
+  - id: mon_terminal_auto
+    stage: monitoring
+    type: terminal
+    label: "Automated Monitoring Path Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive **automated content moderation system** with proactive automated monitoring.
+
+      **Your design summary:**
+      - **Problem**: Multi-label classification of policy-violating content at massive scale
+      - **Metrics**: Clear optimization targets with per-category thresholds
+      - **Data**: Robust labeling pipeline with quality assurance
+      - **Features**: Advanced text representations with evasion resistance
+      - **Model**: Production-optimized architecture with distillation or ensemble
+      - **Training**: Continuous learning with active sampling and emergency updates
+      - **Deployment**: Scalable infrastructure handling traffic spikes
+      - **Monitoring**: Automated anomaly detection with root cause analysis
+
+      **Key strengths:**
+      - Automated detection catches model degradation within minutes
+      - Continuous A/B testing enables rapid model improvement
+      - Auto-mitigation reduces blast radius of failures
+      - Scalable monitoring that doesn't depend on human review capacity
+
+      Outstanding system design with robust automated quality assurance!

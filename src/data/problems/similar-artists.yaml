@@ -1,0 +1,587 @@
+id: similar-artists
+title: "Similar Artists Recommendation"
+description: "Create a system to recommend 'Similar Artists' on a music platform."
+companies: ["Spotify", "Apple", "SoundCloud"]
+domains: ["Recommendation", "NLP"]
+root: pd_start
+
+nodes:
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we will design a **"Similar Artists"** recommendation system for a music streaming platform like Spotify.
+
+      When a user visits an artist's page, they see a "Fans Also Like" or "Similar Artists" section showing **10-20 related artists**. This feature serves multiple purposes:
+      - **Discovery**: Help users find new artists they might enjoy based on one they already like
+      - **Navigation**: Let users explore the music catalog via artist-to-artist connections
+      - **Creator growth**: Help emerging artists gain listeners through association with established acts
+
+      **Scale context:**
+      - Catalog: **~10 million artists** on Spotify (though only ~200K have significant listener bases)
+      - The Similar Artists section is loaded **billions of times per day** (every artist page view)
+      - Latency requirement: **<100ms** end-to-end (this is a page element, not a search query)
+      - Results should be **mostly static** for a given artist (updated daily) but can be **personalized** per user (a jazz fan visiting a rock artist might see different "similar" artists than a pop fan visiting the same page)
+
+      **Key challenge**: "Similarity" is subjective. Two artists can be similar in musical style (sound alike), in audience overlap (fans listen to both), or in cultural context (same scene, same era, same playlist placement). Different users have different notions of "similar."
+
+      Let's define the problem more precisely.
+    dialogue:
+      - speaker: interviewer
+        text: "We're designing the Similar Artists feature on a music platform. When you visit an artist page, you see 10-20 related artists."
+      - speaker: candidate
+        text: "What's the scale? How many artists and how often is this feature loaded?"
+      - speaker: interviewer
+        text: "About 10 million artists in the catalog, though only 200K have significant listenership. The feature loads billions of times daily. Results can be mostly static per artist with optional per-user personalization."
+      - speaker: candidate
+        text: "The definition of 'similar' is interesting - it could mean sound alike, audience overlap, or cultural proximity."
+      - speaker: interviewer
+        text: "Exactly, and different users may have different expectations. Let's define this more precisely."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: info
+    label: "Problem Scope"
+    speaker: interviewer
+    content: |
+      Let's formalize the Similar Artists problem.
+
+      **ML formulation options:**
+      1. **Pairwise similarity**: For every pair of artists (A, B), compute a similarity score. Then for a given artist A, return the top-K most similar artists. This is a **nearest-neighbor retrieval** problem.
+      2. **User-conditioned ranking**: For a given (user, seed_artist) pair, rank all other artists by how much this user would enjoy them given their interest in the seed artist. This is a **personalized ranking** problem.
+
+      Most platforms use approach (1) as the baseline (it is cacheable and fast) with approach (2) as an optional personalization layer.
+
+      **Key design decisions ahead:**
+      - How to define and measure "similarity" (what signals to use)
+      - Whether to use collaborative filtering, content-based methods, or both
+      - How to handle the **long tail**: 95% of artists have <1,000 monthly listeners and very sparse data
+      - How to balance **exploitation** (showing well-known similar artists) vs **exploration** (surfacing emerging artists)
+
+      **Constraints:**
+      - Similar Artists lists are relatively stable (updated daily, not real-time)
+      - Must cover all 200K+ active artists (cannot leave any without similar artists)
+      - Results must feel "reasonable" - even if the algorithm is sophisticated, users should intuitively understand why an artist appears
+
+      Now, what should we optimize for?
+    dialogue:
+      - speaker: interviewer
+        text: "The core ML formulation is nearest-neighbor retrieval: compute pairwise artist similarity, return top-K. Optionally add per-user personalization."
+      - speaker: candidate
+        text: "How do we handle the long tail? 95% of artists have sparse data."
+      - speaker: interviewer
+        text: "That's a key challenge. Long-tail artists often lack sufficient listening data for collaborative filtering. Content-based signals become essential for them."
+      - speaker: candidate
+        text: "And the results need to feel intuitive to users - they should understand why an artist appears."
+      - speaker: interviewer
+        text: "Right. Now, what optimization objective would you use?"
+    next: met_question
+
+  - id: met_question
+    stage: metrics
+    type: question
+    label: "Optimization Objective"
+    speaker: interviewer
+    content: |
+      How would you define and measure the quality of Similar Artists recommendations?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you define what makes a good Similar Artists recommendation? What should we optimize for?"
+      - speaker: candidate
+        text: "We could optimize for listener overlap, user engagement with the recommended artists, or some notion of musical similarity."
+      - speaker: interviewer
+        text: "Walk me through the trade-offs."
+    choices:
+      - label: "Listener co-occurrence and streaming overlap"
+        answer: |
+          I would define artist similarity primarily through **listener co-occurrence** - how much overlap exists between two artists' listener bases.
+
+          **Core metric: Jaccard-like similarity**
+          ```
+          Sim(A, B) = |Listeners(A) ∩ Listeners(B)| / |Listeners(A) ∪ Listeners(B)|
+          ```
+          But raw Jaccard is biased toward popular artists (everyone listens to Drake, so Drake appears "similar" to everyone). Use a **normalized co-occurrence** metric:
+          ```
+          NormalizedSim(A, B) = P(listen_B | listen_A) / P(listen_B)
+          ```
+          This is essentially **Pointwise Mutual Information (PMI)**, which measures how much more likely a user is to listen to B given they listen to A, compared to the baseline probability of listening to B.
+
+          **Evaluation metrics:**
+          - **Offline**: For held-out users, if they listen to artist A, how often do they also listen to artists in A's similar list? Measure **Hit Rate@10** (does at least one of the top 10 similar artists appear in the user's listening history?). Target: > 0.60.
+          - **Precision@10**: What fraction of the top 10 similar artists does the user actually listen to? Target: > 0.15.
+          - **Coverage**: What fraction of the 200K active artists appear in at least one other artist's similar list? Target: > 95%.
+
+          **Online metrics:**
+          - **Click-through rate** on Similar Artists: Do users click on recommended artists? Baseline: ~8-12%.
+          - **Post-click engagement**: After clicking a similar artist, does the user play a track? Follow the artist? Higher downstream engagement validates the recommendation.
+
+          **Key benefit**: Co-occurrence is based on actual listener behavior at massive scale. It captures cultural similarity that audio analysis cannot.
+
+          **Key risk**: Popularity bias (mainstream artists dominate) and cold-start (new artists with few listeners have no co-occurrence data).
+        next: met_details
+      - label: "User engagement after discovery (follows, plays)"
+        answer: |
+          I would optimize for **downstream user engagement** after the user discovers an artist through the Similar Artists feature.
+
+          **Why engagement over similarity?** Similarity is a means to an end. The real goal is: when a user clicks a similar artist, do they enjoy the experience? A "similar" artist that nobody clicks on or listens to is useless. An artist that is not obviously similar but generates high engagement is a valuable recommendation.
+
+          **Engagement signals to optimize:**
+          - **P(follow)**: Probability the user follows the recommended artist after clicking. Follows represent genuine, lasting interest. Typical follow rate from Similar Artists: ~2-4%.
+          - **P(play_3_tracks)**: Probability the user plays at least 3 tracks by the recommended artist. This indicates more than casual sampling.
+          - **P(add_to_playlist)**: Probability the user adds the recommended artist's tracks to a personal playlist. Strong commitment signal.
+
+          **Composite engagement score:**
+          ```
+          Score = 0.2 * P(click) + 0.3 * P(play_3_tracks) + 0.3 * P(follow) + 0.2 * P(add_to_playlist)
+          ```
+
+          **Evaluation:**
+          - **Offline**: Train the model to predict engagement outcomes on historical data. Measure AUC for each engagement type. Target: AUC > 0.72 for click, > 0.68 for follow.
+          - **Online**: A/B test engagement rates. Primary: follow rate from Similar Artists clicks. Secondary: streaming hours attributed to Similar Artists discoveries over 30 days.
+
+          **Key benefit**: Directly optimizes for user value and creator growth, not an abstract notion of similarity.
+
+          **Key risk**: Engagement optimization can bias toward popular artists (users are more likely to follow popular artists they already somewhat know). Need explicit long-tail promotion mechanisms.
+        next: met_details
+
+  - id: met_details
+    stage: metrics
+    type: info
+    label: "Metrics Framework"
+    speaker: interviewer
+    content: |
+      Good choice. Let's round out the metrics framework.
+
+      **Offline evaluation suite:**
+      - **Similarity quality**: Hit Rate@10, Precision@10, NDCG@10 against held-out listener overlap data
+      - **Diversity**: Average pairwise genre diversity among the 10 recommended similar artists. Too homogeneous = boring. Target: at least 2-3 distinct sub-genres represented.
+      - **Novelty**: Average inverse popularity of recommended artists. Higher novelty = more discovery of lesser-known artists.
+      - **Coverage**: Fraction of active artists that appear in at least one similar artist list. Target: >95%.
+      - **Fairness**: Do emerging artists get fair representation? Compute Gini coefficient of appearances across artists.
+
+      **Online A/B test metrics:**
+      - **Primary**: Click-through rate on Similar Artists section (baseline: ~8-12%)
+      - **Secondary**: Post-click streaming time, follow rate, playlist additions within 7 days
+      - **Guardrails**: User satisfaction (no increase in "Not Interested" rate), no decrease in artist page visit duration
+      - **Long-term**: 30-day streaming hours attributed to Similar Artists discoveries, new artist follows per user per month
+
+      **Key tension - Popularity vs. Discovery:**
+      If you show users similar artists they already know (safe, popular choices), CTR will be high but discovery value is low. If you show unknown artists, CTR drops but discovery value is high. The sweet spot: **70% familiar-adjacent artists, 30% genuine discoveries**. This ratio should be tunable and A/B tested.
+
+      Let's discuss data.
+    dialogue:
+      - speaker: interviewer
+        text: "The metrics framework balances similarity quality, diversity, novelty, and coverage. Key tension: 70% familiar-adjacent, 30% genuine discoveries."
+      - speaker: candidate
+        text: "How do we measure whether the 'discovery' slots are actually working?"
+      - speaker: interviewer
+        text: "Track the conversion rate of discovery slots specifically - do users who click on unknown similar artists go on to become regular listeners? If discovery CTR is low but the users who do click become loyal fans, that's still a win."
+      - speaker: candidate
+        text: "That's a good long-term perspective. The 30-day streaming attribution metric captures this."
+      - speaker: interviewer
+        text: "Exactly. Now let's talk about data sources."
+    next: data_pipeline
+
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Sources"
+    speaker: interviewer
+    content: |
+      Let's inventory the data available for building Similar Artists.
+
+      **Listening behavior data:**
+      - **User-artist play counts**: For each user, how many times they have played each artist. Core signal for collaborative filtering. ~600M users x ~500 artists per user on average = ~300 billion (user, artist) pairs.
+      - **Sequential listening**: What artists users listen to in sequence within a session. If a user goes from Artist A to Artist B frequently, that implies a connection.
+      - **Playlist co-occurrence**: Which artists appear together in user-created playlists. Spotify has **4+ billion user-created playlists** - a massive source of human-curated taste information.
+      - **Radio/autoplay transitions**: When autoplay or radio suggests a transition from Artist A to Artist B and the user does not skip, it is a positive signal.
+
+      **Audio content data:**
+      - **Audio embeddings**: 128-dim embeddings from a CNN or Audio Spectrogram Transformer trained on track spectrograms. Average across an artist's tracks to get an **artist audio embedding**.
+      - **Audio features**: Per-track features (tempo, key, energy, valence, etc.) averaged across an artist's catalog.
+      - **Genre/subgenre tags**: Multi-label genre annotations. An artist might be tagged as ["indie rock", "dream pop", "shoegaze"].
+
+      **Metadata and cultural signals:**
+      - **Artist bio and descriptions**: Text features extracted from artist bios via NLP.
+      - **Concert co-headlining**: Artists who tour together or play the same festivals are culturally related.
+      - **Wikipedia/MusicBrainz**: External knowledge about artist relationships, influences, genres.
+      - **Social media**: Artist collaborations, mutual follows, shared fan communities.
+
+      **Data challenges:**
+      - **Sparsity**: The user-artist matrix is extremely sparse (~0.005% density). Most users listen to <200 artists; most artists have <1,000 listeners.
+      - **Popularity skew**: Top 1% of artists account for 90%+ of total plays. Collaborative signals are rich for popular artists but near-zero for long-tail artists.
+      - **Temporal dynamics**: Artist similarity evolves. A rock artist who pivots to electronic music should see their similar artists update accordingly.
+
+      Let's decide on the similarity computation approach.
+    dialogue:
+      - speaker: interviewer
+        text: "We have rich data: 300 billion user-artist play pairs, 4 billion user playlists, audio embeddings, genre tags, and cultural signals."
+      - speaker: candidate
+        text: "The sparsity is a major challenge - 0.005% density in the user-artist matrix. How does that affect collaborative filtering?"
+      - speaker: interviewer
+        text: "It means collaborative filtering only works well for the top 5-10% of artists by popularity. For the long tail, we need content-based signals - audio embeddings, genre tags, metadata."
+      - speaker: candidate
+        text: "So a hybrid approach is almost certainly needed."
+      - speaker: interviewer
+        text: "Right. Let's decide on the similarity computation approach."
+    next: feat_question
+
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Similarity Computation Approach"
+    speaker: interviewer
+    content: |
+      How would you compute artist similarity? This is the core of the system.
+    dialogue:
+      - speaker: interviewer
+        text: "How would you compute artist similarity? This determines the entire system's quality."
+      - speaker: candidate
+        text: "I see three main approaches: collaborative filtering from listening data, content-based from audio features, or a learned embedding that combines both."
+      - speaker: interviewer
+        text: "Walk me through your preferred approach."
+    choices:
+      - label: "Artist2Vec from playlist co-occurrence"
+        answer: |
+          I would train an **Artist2Vec embedding model** using playlist co-occurrence data as the primary similarity signal.
+
+          **Method**: Treat each user-created playlist as a "document" and each artist appearing in the playlist as a "word." Train **Word2Vec (skip-gram)** with negative sampling on the 4 billion playlists to learn 256-dim artist embeddings.
+
+          **Training details:**
+          - Window size: 5 (artists within 5 positions of each other in a playlist are considered context)
+          - Negative sampling: 10 negative samples per positive pair
+          - Minimum artist frequency: 50 (artists appearing in fewer than 50 playlists are excluded, handled separately via content features)
+          - Training: ~2-3 hours on a single GPU for the full 4 billion playlist corpus
+
+          **Why playlist co-occurrence?** Playlists are **curated by humans** who understand musical relationships. When someone puts Radiohead and Arcade Fire in the same playlist, they are making an explicit taste judgment. This captures nuances that pure listening counts miss - two artists might have very different listener demographics but appear in similar playlists because music curators recognize a stylistic connection.
+
+          **Similarity computation**: For any two artists, their similarity is the **cosine similarity** between their 256-dim embeddings. Build a FAISS index (IVF-PQ) over all 200K active artists for fast nearest-neighbor retrieval.
+
+          **Handling the long tail**: Artists with <50 playlist appearances lack reliable embeddings. For these, use a **content-based fallback**: compute audio embeddings from their tracks, find the closest well-embedded artist in audio space, and initialize the long-tail artist's embedding as a weighted average of nearby well-embedded artists.
+
+          **Key benefit**: Playlist-based embeddings capture cultural and taste relationships that go beyond musical similarity. They understand that "fans of indie rock also like certain hip-hop artists" - connections that audio similarity alone would miss.
+        next: feat_details
+      - label: "Multi-modal embedding (audio + collaborative + text)"
+        answer: |
+          I would train a **multi-modal embedding model** that jointly learns from audio content, collaborative signals, and text metadata to produce a unified artist representation.
+
+          **Architecture - Multi-modal fusion network:**
+          - **Audio tower**: Takes average audio spectrogram features (or pre-computed audio embeddings) across an artist's top 20 tracks. 3-layer CNN or MLP -> 128-dim audio embedding.
+          - **Collaborative tower**: Takes the artist's listener co-occurrence vector (sparse, top-1000 co-occurring artists). 2-layer MLP -> 128-dim collaborative embedding.
+          - **Text tower**: Takes artist bio, genre tags, and description text. Pass through a pre-trained sentence transformer (MiniLM-L6) -> 128-dim text embedding.
+          - **Fusion layer**: Concatenate all three 128-dim embeddings -> 2-layer MLP (384 -> 256 -> 256) -> final 256-dim unified artist embedding.
+
+          **Training objective**: Contrastive learning. Positive pairs: artists that frequently co-occur in playlists. Negative pairs: random artist pairs. Use **InfoNCE loss** with temperature 0.07 and in-batch negatives.
+          ```
+          L = -log(exp(sim(A,B+)/τ) / Σ exp(sim(A,Bi-)/τ))
+          ```
+
+          **Why multi-modal?** Each modality covers different aspects of similarity:
+          - **Audio**: Captures "sounds like" - essential for music discovery. Two unknown artists that sound similar to Radiohead should appear similar even with zero listening overlap.
+          - **Collaborative**: Captures "fans also like" - the cultural taste relationship. Two artists might sound different but share a fan base (e.g., Kendrick Lamar and J. Cole).
+          - **Text**: Captures "described similarly" - genre, era, influences. Handles cold-start for new artists who have metadata but no listening data.
+
+          **Cold-start handling**: New artists with zero listens still have audio and text features. The multi-modal model produces meaningful embeddings from audio+text alone, with the collaborative tower contributing zero signal. As the artist gains listeners, the collaborative signal gradually activates, improving the embedding.
+
+          **Key benefit**: Handles the full artist spectrum from mega-popular (rich collaborative data) to brand-new (audio+text only). No separate cold-start fallback needed.
+
+          **Trade-off**: More complex training pipeline. Need to balance the three modalities (collaborative signal tends to dominate if unchecked). Use **gradient-based modality balancing** to prevent any single tower from dominating.
+        next: feat_details
+
+  - id: feat_details
+    stage: features
+    type: info
+    label: "Feature Engineering Details"
+    speaker: interviewer
+    content: |
+      Good approach. Let's discuss the features used for the optional **personalization layer** on top of base similarity.
+
+      While the base similar artists list is the same for all users visiting an artist page, we can **re-rank** the list per user to surface artists most relevant to their individual taste.
+
+      **User features for personalization:**
+      - **User taste embedding** (256 dims): Average embedding of the user's top 50 most-listened artists, weighted by recency (exponential decay, half-life 30 days)
+      - **Genre affinity vector** (30 dims): User's listening hours normalized across 30 genres
+      - **Exploration appetite**: Ratio of unique new artists discovered per month to total listening. High = user likes discovery, low = user prefers familiar artists.
+      - **Listening depth**: Average number of tracks per artist. Deep listeners want more specialized recommendations; shallow listeners want broadly appealing artists.
+
+      **Candidate re-ranking features:**
+      - **User-candidate similarity**: Cosine similarity between user taste embedding and candidate artist embedding
+      - **Genre overlap**: How much does the candidate's genre match the user's genre affinities?
+      - **Familiarity**: Has the user heard of this candidate before (played any tracks)? Familiar candidates ranked higher for low-exploration users, lower for high-exploration users.
+      - **Popularity match**: Does the candidate's popularity level match the user's typical listening? Users who listen to indie artists might prefer lesser-known similar artists.
+
+      **Personalization model**: A lightweight LambdaMART or logistic regression model that re-ranks the base similar artists list using these features. Trained on historical click-through data from the Similar Artists section.
+
+      **Important constraint**: Personalization should not completely override base similarity. The top 3-5 similar artists should always be the "canonical" similar artists (high base similarity) to ensure the list feels intuitive. Personalization affects positions 5-20.
+
+      Let's choose the core model architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "The personalization layer re-ranks the base similar artists list per user. It uses the user's taste embedding, genre affinities, and exploration appetite."
+      - speaker: candidate
+        text: "I like that personalization doesn't completely override the base list. The top 3-5 should always be canonical similar artists."
+      - speaker: interviewer
+        text: "Right - if you visit The Beatles page, the top results should always include other classic rock acts. But a user who listens to a lot of indie might see more indie-adjacent Beatles-similar artists in positions 5-20."
+      - speaker: candidate
+        text: "What model would you use for the personalization re-ranking?"
+      - speaker: interviewer
+        text: "A lightweight model - logistic regression or small LambdaMART. It needs to be fast since it runs at request time. Let's choose the core model architecture."
+    next: mod_question
+
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Model Architecture"
+    speaker: interviewer
+    content: |
+      What model architecture would you use for computing the base artist similarity?
+    dialogue:
+      - speaker: interviewer
+        text: "What's the core model architecture for computing artist similarity? Remember, we need to compute similarity for 200K active artists."
+      - speaker: candidate
+        text: "The embedding approach we discussed gives us artist vectors. The question is how to go from embeddings to the final similar artists list."
+      - speaker: interviewer
+        text: "Right. There are different approaches to training and using those embeddings."
+    choices:
+      - label: "Graph Neural Network on artist co-listening graph"
+        answer: |
+          I would use a **Graph Neural Network (GNN)** operating on the artist co-listening graph to produce artist embeddings.
+
+          **Graph construction:**
+          - **Nodes**: 200K active artists
+          - **Edges**: Weighted by normalized listener overlap (PMI). Connect artists A and B if their PMI > threshold (typically top 50 neighbors per artist). Results in ~5M edges.
+          - **Node features**: Audio embedding (128 dims), genre vector (30 dims), popularity (1 dim), catalog size (1 dim), years active (1 dim).
+
+          **GNN architecture - GraphSAGE with attention:**
+          - **2-layer GraphSAGE** with attention-based aggregation (similar to GAT)
+          - Each layer aggregates neighbor features: `h_v^(l+1) = σ(W * MEAN(α_u * h_u^(l) for u in N(v)))`
+          - Attention weights α learn to weigh different neighbors by importance
+          - Output: 256-dim embedding per artist
+
+          **Training**: Link prediction task. Predict whether two artists are connected (positive = high PMI edge) vs not connected (random negative pair). Use **margin-based triplet loss**: `L = max(0, sim(A,neg) - sim(A,pos) + margin)`.
+
+          **Why GNN?** The artist similarity graph has rich structure. A GNN captures **multi-hop relationships**: if Artist A is similar to B, and B is similar to C, the GNN can learn that A and C are indirectly related. This is especially powerful for **bridging genres** - discovering connections between artists in different genres that share a common cultural thread.
+
+          **Graph structure also handles the long tail**: A long-tail artist with few listeners but connected to well-known artists via genre or audio similarity inherits information from its graph neighbors. The GNN **smooths** the embedding space, filling in gaps for sparse artists.
+
+          **Inference**: Run the GNN once (batch job, ~2 hours on 4 GPUs) to produce embeddings for all 200K artists. Then use FAISS for nearest-neighbor retrieval. Update weekly.
+
+          **Trade-off**: GNNs can **over-smooth** - after too many layers, all embeddings converge, making artists indistinguishable. Mitigation: use only 2 layers, add skip connections, and mix with content features.
+        next: train_strategy
+      - label: "Metric learning with contrastive loss"
+        answer: |
+          I would use **metric learning** with a contrastive loss to learn artist embeddings in a space where similar artists are close and dissimilar artists are far apart.
+
+          **Architecture: Siamese network**
+          - **Encoder**: Takes artist features (audio embedding + genre vector + collaborative features) and produces a 256-dim embedding. Architecture: 4-layer MLP (512-256-256-256) with batch normalization and dropout (0.2).
+          - **Siamese setup**: Two copies of the encoder (shared weights) process two artists simultaneously.
+
+          **Training with multiple contrastive objectives:**
+          1. **Playlist co-occurrence loss**: Positive pairs from playlists, negative pairs randomly sampled. Use **NT-Xent loss** (normalized temperature-scaled cross-entropy):
+             ```
+             L = -log(exp(sim(a,b+)/τ) / Σ_j exp(sim(a,bj)/τ))
+             ```
+          2. **Audio similarity loss**: Positive pairs of artists with high audio similarity (cosine > 0.8 in audio embedding space). This teaches the model that "sounds like" matters.
+          3. **Hard negative mining**: After initial training, mine hard negatives (artists that are close in embedding space but should be far apart, e.g., a metal band and a jazz group with confusingly similar audio features). Retrain with these hard negatives for 5 additional epochs.
+
+          **Combined loss**: `L_total = L_playlist + 0.5 * L_audio + 0.3 * L_hard_neg`
+
+          **Why metric learning?** The learned embedding space directly optimizes for the downstream task: nearest-neighbor retrieval. Unlike classification models, metric learning scales to **any number of artists** without needing to retrain when new artists are added (just compute their embedding and add to the index).
+
+          **ANN index**: Build a FAISS IVF-PQ index over 200K artist embeddings. Retrieval: <1ms per query for top-20 similar artists. Index size: ~50MB (fits in memory on any machine).
+
+          **Handling new artists**: When a new artist joins, compute their embedding from their audio and metadata features (no collaborative data needed initially). As they accumulate listeners, update their embedding to incorporate collaborative signals.
+
+          **Trade-off**: Metric learning requires careful negative sampling strategy. Random negatives are too easy; hard negatives can be noisy. Use **semi-hard negative mining** (negatives that are within the margin but not the hardest) for stable training.
+        next: train_strategy
+
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: interviewer
+    content: |
+      Good model choice. Let's discuss training strategy.
+
+      **Training data construction:**
+      - **Positive pairs**: Artist pairs that co-occur frequently in playlists (PMI > 2.0). Yields ~10M positive pairs from 4 billion playlists.
+      - **Negative pairs**: Random artist pairs (overwhelmingly dissimilar). Sample 50 negatives per positive for initial training, then switch to hard negatives for fine-tuning.
+      - **Validation set**: Hold out 10% of positive pairs. Also create a **human-labeled evaluation set** of 5,000 artist pairs rated by music experts on a 1-5 similarity scale.
+
+      **Training schedule:**
+      - **Phase 1 - Pre-training** (2 epochs): Train on all positive/negative pairs with random negatives. Large batch size (4096). Learning rate: 1e-3 with cosine decay.
+      - **Phase 2 - Hard negative mining** (5 epochs): Mine hard negatives from the current embedding space. Smaller batch size (1024). Learning rate: 1e-4.
+      - **Phase 3 - Fine-tuning with human labels** (3 epochs): If human-labeled data is available, fine-tune with supervised contrastive loss. This calibrates the embedding space to match human perception.
+
+      **Training infrastructure:**
+      - Single GPU (A100) is sufficient. Artist embeddings fit in memory.
+      - Training time: ~4-6 hours for the full pipeline.
+      - Retraining: **Weekly** to incorporate new listening patterns and new artists.
+
+      **Evaluation before deployment:**
+      - **Offline metrics**: Recall@10 on held-out pairs (target >0.45), correlation with human similarity ratings (target Spearman r > 0.60), genre consistency (similar artists should share at least one genre tag, target >85%)
+      - **Sanity checks**: Manually inspect the top 10 similar artists for 50 well-known artists across genres. Are they reasonable? Any egregious errors?
+      - **Regression tests**: Compare new model's similar artists lists with production lists. Flag cases where >50% of the top 10 changed (potential instability).
+
+      **Cold-start protocol:**
+      - New artists (day 0): Embedding from audio + metadata only
+      - After 1 week (~100 listeners): Update embedding with initial collaborative signal
+      - After 1 month (~1,000 listeners): Full embedding with all modalities
+      - Embedding update frequency scales with listener growth rate
+
+      Let's discuss deployment.
+    dialogue:
+      - speaker: interviewer
+        text: "Training follows three phases: pre-training with random negatives, hard negative mining, and optional fine-tuning with human labels."
+      - speaker: candidate
+        text: "The human-labeled evaluation set is important for calibration. How do you collect those labels?"
+      - speaker: interviewer
+        text: "Music experts rate 5,000 artist pairs on a 1-5 scale. It's expensive but essential for evaluating whether the embedding space matches human perception. We also run sanity checks on 50 well-known artists."
+      - speaker: candidate
+        text: "The cold-start protocol is elegant - gradually incorporating more signals as the artist grows."
+      - speaker: interviewer
+        text: "Right. Day-zero artists get audio-only embeddings. After a month with 1,000 listeners, they get the full multi-modal treatment. Now, deployment."
+    next: deploy_question
+
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Serving Architecture"
+    speaker: interviewer
+    content: |
+      How would you deploy the Similar Artists system?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you serve Similar Artists recommendations? Remember: billions of page views daily, under 100ms latency."
+      - speaker: candidate
+        text: "The key decision is whether to pre-compute the lists or compute them on-the-fly."
+      - speaker: interviewer
+        text: "Consider both approaches."
+    choices:
+      - label: "Pre-computed lists with CDN caching"
+        answer: |
+          I would **pre-compute** Similar Artists lists for all 200K active artists and serve them from a cache/CDN.
+
+          **Pre-computation pipeline (daily batch job):**
+          1. Compute/update all artist embeddings (~30 minutes)
+          2. For each of 200K artists, query FAISS index for top 50 nearest neighbors (~20 seconds total)
+          3. Apply diversity filters: no more than 3 artists from the same genre, ensure at least 2 genres represented, cap popularity (no more than 5 of the top-50 most popular artists)
+          4. Store the final top-20 similar artists per artist in a key-value store (Redis or DynamoDB)
+          5. Total pre-computation time: ~1 hour
+
+          **Serving architecture:**
+          - When a user visits an artist page, fetch the pre-computed list from Redis (latency: **<5ms**)
+          - Optionally apply the **personalization re-ranker** using the user's taste profile (latency: **<10ms** for a lightweight model)
+          - Total serving latency: **<15ms**, well within the 100ms budget
+
+          **CDN caching**: For the most popular 10K artists (covering ~80% of page views), cache the Similar Artists response at the CDN edge. This eliminates even the Redis lookup for most requests. TTL: 24 hours (matches daily refresh).
+
+          **Storage requirements**: 200K artists x 20 similar artists x 8 bytes per artist ID = ~32MB. Trivially small. Even with metadata (artist name, image URL, similarity score), it fits in a few hundred MB.
+
+          **Advantages**: Extremely simple serving infrastructure. Near-zero latency. Highly reliable (cache is never "down"). Compute cost is minimal (1 hour daily batch job).
+
+          **Trade-off**: Lists are stale for up to 24 hours. If a new viral artist emerges, they will not appear in similar lists until the next batch run. Mitigation: run the batch twice daily, or implement a **triggered refresh** for artists whose listening patterns change significantly.
+        next: mon_setup
+      - label: "Real-time ANN retrieval with personalization"
+        answer: |
+          I would serve Similar Artists via **real-time approximate nearest-neighbor (ANN) retrieval** with per-user personalization.
+
+          **Serving architecture:**
+          - **FAISS index in memory**: Load the 200K artist embeddings into a FAISS IVF-HNSW index on each serving instance. Index size: ~200MB (fits easily in RAM). Retrieval latency: **<2ms** per query for top-50 neighbors.
+          - **User personalization**: At request time, compute a **query embedding** that blends the seed artist's embedding with the user's taste embedding:
+            ```
+            query = 0.7 * artist_embedding + 0.3 * user_taste_embedding
+            ```
+            This shifts the retrieval toward artists that are similar to both the seed artist AND the user's taste.
+          - **Re-ranking**: Apply lightweight re-ranking with diversity constraints on the top-50 results. Return top-20.
+          - **Total latency**: Feature fetch (5ms) + ANN retrieval (2ms) + re-ranking (3ms) = **~10ms**
+
+          **User embedding serving**: User taste embeddings (256 dims, ~1KB per user) are pre-computed daily and stored in a feature store (Redis). For 600M users: ~600GB total. Distributed across a Redis cluster.
+
+          **Advantages:**
+          - **Real-time personalization**: Two users visiting the same artist page see different similar artists based on their taste profiles. A jazz fan visiting Miles Davis sees contemporary jazz artists; a hip-hop fan sees jazz-influenced hip-hop artists.
+          - **Instant updates**: When artist embeddings are refreshed (e.g., new viral artist), the FAISS index can be hot-swapped without downtime. No stale cache to invalidate.
+          - **Experimentation flexibility**: Easy to change the blending weights, add new features, or experiment with different query formulations without changing the serving infrastructure.
+
+          **Scaling**: At 100K QPS peak, with 10ms per request, each serving instance handles ~100 QPS. Need ~1,000 instances. At ~$0.20/hour per instance, that is ~$200/hour = ~$150K/month. Moderate cost, justified by the personalization quality.
+
+          **Trade-off**: More complex than pre-computed lists. Requires maintaining the FAISS index, user embedding store, and serving instances. But the personalization benefit is significant - A/B tests at Spotify showed **+12% click-through** with personalized similar artists vs static lists.
+        next: mon_setup
+
+  - id: mon_setup
+    stage: monitoring
+    type: info
+    label: "Monitoring & Iteration"
+    speaker: interviewer
+    content: |
+      Let's discuss monitoring for the Similar Artists system.
+
+      **Quality monitoring:**
+      - **Click-through rate**: Track CTR on Similar Artists section daily, segmented by genre and artist popularity tier. Alert if CTR drops >5% vs trailing 7-day average.
+      - **Post-click engagement**: Track follow rate, streaming hours from Similar Artists clicks. These are leading indicators of recommendation quality.
+      - **Coverage dashboard**: Monitor what fraction of the catalog appears in similar lists. Alert if coverage drops (model collapsing to a few popular cliques).
+      - **Genre consistency**: Ensure similar artists share at least some genre overlap. An artist page showing completely unrelated genres indicates an embedding problem.
+
+      **Embedding health:**
+      - **Embedding drift**: Track the average movement of artist embeddings between weekly retraining runs. Large sudden shifts may indicate data pipeline issues.
+      - **Embedding quality metrics**: Compute cluster silhouette score on artist embeddings using genre labels as ground truth. Should remain stable week-over-week.
+      - **Nearest neighbor stability**: For top 1000 artists, track what fraction of their top-10 similar artists changed since last update. Normal churn: 10-20%. If >40% change, investigate.
+
+      **A/B testing:**
+      - Test every model change for **2 weeks** minimum (sufficient volume given billions of daily page views)
+      - Primary metric: CTR on Similar Artists
+      - Secondary: 7-day follow rate from Similar Artists discoveries, streaming hours attributed
+      - Guardrails: Page load time (must not increase), artist page bounce rate
+      - **Interleaving**: For faster signal, interleave results from two models in the same Similar Artists section
+
+      **Long-tail monitoring:**
+      - Specifically track engagement and coverage for long-tail artists (bottom 50% by popularity). These are the artists who benefit most from good similar artists but are also most prone to being excluded.
+      - **Creator fairness audit**: Monthly review of whether similar artists recommendations disproportionately favor certain demographics, labels, or genres.
+
+      Let's wrap up.
+    dialogue:
+      - speaker: interviewer
+        text: "Monitoring covers CTR, post-click engagement, embedding health, and long-tail artist coverage. A/B tests run for 2 weeks minimum."
+      - speaker: candidate
+        text: "The embedding stability metric is important - tracking how much the top-10 changes between retraining runs."
+      - speaker: interviewer
+        text: "Right. If more than 40% of the top-10 changes, something may be wrong with the data pipeline or training. Normal churn is 10-20%."
+      - speaker: candidate
+        text: "The creator fairness audit is also critical - ensuring the system doesn't systematically disadvantage certain types of artists."
+      - speaker: interviewer
+        text: "Exactly. Let's summarize the full design."
+    next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Design Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You have designed a comprehensive Similar Artists recommendation system. Let's summarize.
+
+      **Architecture summary:**
+      - **Similarity definition**: Listener co-occurrence or downstream engagement optimization
+      - **Embedding approach**: Artist2Vec from playlist co-occurrence or multi-modal embedding (audio + collaborative + text)
+      - **Model**: Graph Neural Network on co-listening graph or metric learning with contrastive loss
+      - **Personalization**: Lightweight re-ranker blending seed artist similarity with user taste
+      - **Serving**: Pre-computed lists with CDN caching or real-time ANN retrieval with personalization
+      - **Monitoring**: CTR, embedding health, coverage, and long-tail fairness audits
+
+      **Strengths of your design:**
+      - Handles the full spectrum from mega-popular artists (rich collaborative data) to long-tail artists (content-based fallback)
+      - Balances computational efficiency (daily batch for embeddings) with serving speed (<15ms)
+      - Addresses the key tension between familiar/safe recommendations and genuine discovery
+      - Clear cold-start strategy for new artists
+
+      **Key challenges and further considerations:**
+      - **Cross-language and cross-cultural similarity**: Should Korean pop artists be "similar" to Japanese pop? To Western pop? Cultural boundaries affect similarity perception.
+      - **Temporal evolution**: Artists evolve their style over time. Taylor Swift's early country music is very different from her recent pop. Should similar artists reflect current or historical style?
+      - **Label and industry dynamics**: Major labels may want their artists to appear as similar to popular competitors. How to maintain independence from business pressures.
+      - **Symmetry**: If A is similar to B, should B always be similar to A? Not necessarily - a small indie band might be "similar to Radiohead" but Radiohead's similar list may not include them.
+      - **Diversity across the catalog**: How to prevent "rich get richer" dynamics where popular artists dominate similar lists, starving emerging artists of discovery traffic.
+
+      This design shows strong understanding of embedding-based recommendation systems, practical handling of the long-tail problem, and awareness of production system concerns. Well done!

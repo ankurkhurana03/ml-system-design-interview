@@ -1,0 +1,672 @@
+id: maps-eta
+title: "Google Maps ETA Prediction"
+description: "Design an ETA (Estimated Time of Arrival) system for a maps application like Google Maps."
+companies: ["Google", "Uber", "Apple"]
+domains: ["Time Series", "Tabular/Structured", "Graph/Network"]
+root: pd_start
+
+nodes:
+  # ============ PROBLEM DEFINITION ============
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design an **ETA prediction system** for a maps application like Google Maps.
+
+      **Business context:**
+      - Google Maps processes **1B+ kilometers of routes daily** across 220+ countries
+      - ETA accuracy directly impacts user trust, navigation decisions, and downstream products (ride-sharing, delivery, logistics)
+      - Current systems must return predictions in **<200ms** at query time
+      - Routes vary from 2-minute walks to 12-hour cross-country drives
+
+      **Key challenges:**
+      - Traffic is **non-stationary** -- rush hour, accidents, weather, construction, special events all shift patterns
+      - Road networks are **graphs** with complex topology (one-ways, turn restrictions, speed limits)
+      - The system must handle **real-time updates** -- a crash on the highway 5 minutes ago should change ETAs immediately
+      - Different transportation modes (driving, transit, walking, cycling) have fundamentally different dynamics
+
+      **Scale:** Google Maps serves ~1B monthly active users with ~25M route requests per minute at peak. Apple Maps and Uber have similar scale challenges.
+
+      Let's start by scoping the problem.
+    dialogue:
+      - speaker: interviewer
+        text: "Welcome! Today we'll design an ETA prediction system for a maps application like Google Maps. Google Maps processes over 1 billion kilometers of routes daily."
+      - speaker: candidate
+        text: "That's a massive scale problem. What's the primary use case -- navigation in progress, or pre-trip planning?"
+      - speaker: interviewer
+        text: "Both, actually. Pre-trip ETAs help users decide when to leave, and in-navigation ETAs update continuously. The system must return predictions in under 200 milliseconds."
+      - speaker: candidate
+        text: "Got it. And we need to handle real-time events like traffic incidents?"
+      - speaker: interviewer
+        text: "Exactly. A crash on the highway 5 minutes ago should immediately change ETAs for affected routes. Let's start by scoping the problem."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: info
+    label: "Problem Scope"
+    speaker: interviewer
+    content: |
+      Let's define the scope of our ETA system:
+
+      **What we're building:**
+      - Given an origin, destination, departure time, and transportation mode, predict the travel time in minutes
+      - Must handle **pre-trip queries** (ETAs for future departure) and **in-navigation updates** (ETAs that update every 30-60 seconds as the user drives)
+      - Focus on **driving** as the primary mode (most complex due to traffic)
+
+      **Data available:**
+      - **Historical GPS traces**: Billions of anonymized trip records with timestamps per road segment
+      - **Road network graph**: OpenStreetMap-based graph with ~1B road segments globally, each with speed limits, road type, number of lanes
+      - **Real-time traffic**: Aggregated speed data from active users (crowdsourced), updated every 1-2 minutes per segment
+      - **External signals**: Weather forecasts, event calendars, construction schedules, school calendars
+      - **Routing engine output**: The planned route as a sequence of road segments with distances
+
+      **Key constraint:** The ETA model receives a **pre-computed route** (sequence of road segments) from the routing engine. We predict travel time for that specific route, not which route is optimal.
+
+      Now, how should we frame this as an ML problem?
+    dialogue:
+      - speaker: interviewer
+        text: "Let's scope this. We're predicting travel time given an origin, destination, departure time, and mode. Focus on driving."
+      - speaker: candidate
+        text: "So the routing engine picks the route, and our ML model predicts how long that route will take?"
+      - speaker: interviewer
+        text: "Exactly. The route is a sequence of road segments. We have historical GPS traces, the road graph, real-time traffic, and external signals like weather."
+      - speaker: candidate
+        text: "That's a rich feature set. The key challenge is combining the graph structure with temporal patterns."
+      - speaker: interviewer
+        text: "Right. Now let's think about how to frame this as an ML problem."
+    next: pd_formulation
+
+  - id: pd_formulation
+    stage: problem_definition
+    type: question
+    label: "ML Formulation"
+    speaker: interviewer
+    content: |
+      How should we frame the ETA prediction as an ML problem? There are fundamentally different approaches to predicting travel time for a route.
+    dialogue:
+      - speaker: interviewer
+        text: "How would you frame this as an ML problem? There are several fundamentally different approaches."
+      - speaker: candidate
+        text: "The two main approaches I see are predicting end-to-end travel time directly, or decomposing it into per-segment predictions and summing them up."
+      - speaker: interviewer
+        text: "Good framing. What are the trade-offs?"
+    choices:
+      - label: "Segment-level: Predict travel time per road segment, then sum"
+        answer: |
+          I'd decompose the problem into **per-segment travel time prediction** and aggregate.
+
+          **Approach:**
+          - For each road segment in the route, predict the expected traversal time
+          - Sum all segment times to get the total ETA: `ETA = sum(segment_time_i for i in route)`
+          - Each segment prediction uses: segment length, speed limit, road type, current traffic speed, historical patterns
+
+          **Why segment-level?**
+          - **Composable**: Any route is just a sequence of segments -- once we can predict segment times accurately, we handle all routes
+          - **Data-rich**: We have billions of GPS observations per segment. Even rare routes have common segments
+          - **Interpretable**: Can show users "traffic is slow on I-95 for 3 miles, adding 12 minutes"
+          - **Reusable**: Same segment predictions feed the routing engine's cost function
+
+          **Challenge:** Segment times are **not independent**. A red light at segment i causes delay at segment i+1 (queuing). Simply summing independent predictions tends to **underestimate** variance and miss correlated delays. We'll need to model these dependencies somehow.
+
+          **Google's DeepMind ETA paper (2021)** uses a hybrid: segment-level features processed by a graph neural network that captures inter-segment dependencies.
+        next: met_segment
+      - label: "Route-level: Predict total travel time end-to-end"
+        answer: |
+          I'd predict **total route travel time directly** as a single regression target.
+
+          **Approach:**
+          - Input: Route representation (sequence of segments with features, plus context like time of day, weather)
+          - Output: Single scalar -- predicted travel time in seconds
+          - The model learns to map from route features to total time without explicit per-segment decomposition
+
+          **Why route-level?**
+          - **Captures correlations**: Traffic delays are correlated across segments. A highway backup affects 10+ segments simultaneously. An end-to-end model naturally learns these correlations
+          - **Simpler pipeline**: One model, one prediction, no aggregation step
+          - **Learns non-additive effects**: Turn penalties, traffic light synchronization, merge delays -- these are properties of segment *sequences*, not individual segments
+          - **Uber's approach**: Uber's DeepETA (2022) uses a route-level transformer that processes the entire segment sequence and predicts total time
+
+          **Challenge:** Route-level models need to generalize to **novel routes** (segment combinations never seen in training). With billions of possible routes, most routes at test time are unique. The model must learn transferable representations from segment features, not memorize specific routes.
+
+          **Data efficiency concern:** Each training example only provides one label (total time), whereas segment-level approaches get one label per segment per trip -- much more supervision signal.
+        next: met_route
+
+  # ============ METRICS ============
+  - id: met_segment
+    stage: metrics
+    type: info
+    label: "Segment-Level Metrics"
+    speaker: interviewer
+    content: |
+      Good choice on segment-level decomposition. Let's define our evaluation metrics.
+
+      **Segment-level metrics:**
+      - **MAE per segment** (seconds): Average absolute error per road segment. Target: <5 seconds for urban segments, <10 seconds for highway segments
+      - **MAPE per segment**: Percentage error. Careful -- short segments (10s traversal) amplify MAPE. Use **symmetric MAPE** or filter to segments >30s
+
+      **Route-level metrics** (what users actually care about):
+      - **Mean Absolute Error (MAE)** on total route time: Target <2 minutes for trips <30 min, <5 minutes for trips >30 min
+      - **Mean Absolute Percentage Error (MAPE)**: Target <10% across all trip durations
+      - **P90 absolute error**: 90% of predictions within X minutes of actual. This measures worst-case user experience
+      - **Directional bias**: Are we systematically over- or under-predicting? Users tolerate arriving early (over-prediction) better than arriving late (under-prediction)
+
+      **Business metrics:**
+      - **User re-query rate**: If users check ETA multiple times before leaving, our initial estimate may not be trusted
+      - **Navigation completion rate**: Do users follow the suggested route or deviate? Deviations suggest the ETA felt wrong
+      - **Late arrival rate**: For time-sensitive trips (meetings, flights), how often do users arrive after ETA?
+
+      We want to optimize for route-level MAE as the primary metric while monitoring MAPE and P90.
+    dialogue:
+      - speaker: interviewer
+        text: "Now let's define metrics. What do we measure at the segment level and the route level?"
+      - speaker: candidate
+        text: "At the segment level, MAE in seconds. But what users care about is route-level accuracy -- total trip time error."
+      - speaker: interviewer
+        text: "Exactly. We target under 10% MAPE across all trips. We also track business metrics like user re-query rate and navigation completion rate."
+      - speaker: candidate
+        text: "Makes sense. Under-prediction is worse than over-prediction from a user trust perspective."
+      - speaker: interviewer
+        text: "Good insight. Let's move to data considerations."
+    next: data_pipeline
+
+  - id: met_route
+    stage: metrics
+    type: info
+    label: "Route-Level Metrics"
+    speaker: interviewer
+    content: |
+      Good choice on route-level prediction. Let's define our evaluation metrics.
+
+      **Primary metrics:**
+      - **Mean Absolute Error (MAE)**: Average |predicted - actual| in minutes. Target: <2 minutes for trips <30 min, <5 minutes for 30-120 min trips
+      - **MAPE**: Mean Absolute Percentage Error. Target <10%. Important caveat: MAPE penalizes errors on short trips disproportionately (2 min error on a 5 min trip = 40% MAPE)
+      - **Weighted MAPE**: Weight by trip duration to avoid short-trip bias
+
+      **Distribution metrics:**
+      - **P50 / P90 / P95 absolute error**: Characterize the error distribution. P90 <8 minutes means 90% of trips are within 8 minutes of actual
+      - **Calibration**: For predicted quantiles (P10, P50, P90), check if actual coverage matches. If we say "90% chance arrival by 5:30 PM", does it hold 90% of the time?
+
+      **Segmented evaluation** (critical for fairness):
+      - By **trip duration bucket**: Short (<10 min), medium (10-30 min), long (>30 min) -- error patterns differ
+      - By **road type**: Highway-heavy vs urban vs mixed routes
+      - By **time of day**: Rush hour accuracy matters most
+      - By **geography**: Different cities have different traffic patterns
+
+      **Business metrics:**
+      - **On-time arrival rate**: Percentage of users arriving within 5 minutes of predicted ETA
+      - **User trust score**: Survey-based, correlated with re-query rates
+      - **Downstream impact**: If ETAs feed into ride-sharing pricing, how does ETA error affect fare accuracy?
+    dialogue:
+      - speaker: interviewer
+        text: "For route-level prediction, we focus on MAE and MAPE as primary metrics, targeting under 10% MAPE."
+      - speaker: candidate
+        text: "We should evaluate across segments -- trip duration buckets, road types, time of day. Rush hour accuracy is critical."
+      - speaker: interviewer
+        text: "Absolutely. And calibration matters too -- if we predict 90% chance of arriving by 5:30, that should hold 90% of the time."
+      - speaker: candidate
+        text: "Business metrics like on-time arrival rate and user trust score tie it back to real impact."
+      - speaker: interviewer
+        text: "Perfect. Let's discuss the data pipeline."
+    next: data_pipeline
+
+  # ============ DATA ============
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      Let's design the data pipeline for ETA prediction.
+
+      **Data sources and scale:**
+
+      | Source | Description | Volume |
+      |--------|------------|--------|
+      | GPS traces | Anonymized trip records with per-segment timestamps | ~50M trips/day |
+      | Road graph | Segments with speed limits, road type, geometry | ~1B segments globally |
+      | Real-time traffic | Crowdsourced speeds per segment | Updated every 1-2 min |
+      | Weather | Forecasts per region (temperature, precipitation, visibility) | Hourly updates |
+      | Events | Concerts, sports, construction, school schedules | Daily ingestion |
+      | Incidents | Accidents, road closures, police activity | Real-time stream |
+
+      **Data processing pipeline:**
+      1. **Map matching**: Raw GPS pings -> snapped to road segments (Hidden Markov Model-based)
+      2. **Segment time extraction**: From matched GPS traces, compute actual traversal time per segment
+      3. **Aggregation**: For each (segment, time_bucket), compute historical speed distributions
+      4. **Feature materialization**: Pre-compute features into online (Redis) and offline (Hive) feature stores
+      5. **Label generation**: For route-level, actual trip time; for segment-level, actual segment traversal time
+
+      **Data quality challenges:**
+      - GPS noise causes incorrect map matching (~5% error rate)
+      - Stops (gas stations, drive-throughs) inflate segment times -- need filtering
+      - Selection bias: We only observe trips that actually happened on routes people chose
+      - Privacy: All data aggregated and anonymized; no individual tracking
+
+      Now let's engineer features.
+    dialogue:
+      - speaker: interviewer
+        text: "The data pipeline processes about 50 million trips per day. GPS traces are map-matched to road segments using Hidden Markov Models."
+      - speaker: candidate
+        text: "Map matching quality is critical. A 5% error rate in matching could propagate into systematic ETA errors."
+      - speaker: interviewer
+        text: "Good point. We also need to filter stops -- gas stations and drive-throughs inflate segment times. And there's selection bias in which routes people choose."
+      - speaker: candidate
+        text: "For labels, we extract actual traversal times from the GPS traces. What about the real-time traffic signals?"
+      - speaker: interviewer
+        text: "Real-time speeds are crowdsourced from active users and updated every 1-2 minutes per segment. Let's move to feature engineering."
+    next: feat_question
+
+  # ============ FEATURES ============
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Strategy"
+    speaker: interviewer
+    content: |
+      What feature engineering strategy would you prioritize for the ETA model?
+    dialogue:
+      - speaker: interviewer
+        text: "What features would you engineer for the ETA model? There's a rich set of signals to work with."
+      - speaker: candidate
+        text: "The two main strategies I see are building rich spatial-temporal features from the road graph, or focusing on real-time traffic signals and external context."
+      - speaker: interviewer
+        text: "Tell me about the trade-offs."
+    choices:
+      - label: "Spatial-temporal: Road graph features + historical patterns"
+        answer: |
+          I'd prioritize **spatial-temporal features** derived from the road graph and historical patterns.
+
+          **Per-segment static features:**
+          - Road type (highway, arterial, residential), speed limit, number of lanes, surface type
+          - Segment length, curvature, elevation change
+          - Presence of traffic signals, stop signs, merge points, toll booths
+          - **Functional road class** (1-7 scale): Captures road hierarchy
+
+          **Historical speed profiles:**
+          - For each segment, compute the **typical speed profile**: average speed for each (day-of-week, 15-minute-bucket)
+          - This gives 672 speed values per segment (7 days x 96 buckets)
+          - Also compute P25, P50, P75, P90 speeds per bucket for uncertainty
+          - **Residual features**: Current speed minus historical expected speed -- captures anomalies
+
+          **Graph-structural features:**
+          - Degree of intersections along route (high-degree = more conflict points)
+          - Number of traffic signals per km
+          - Proportion of highway vs arterial vs residential segments
+          - Route compactness (straight-line distance / route distance)
+
+          **Temporal features:**
+          - Time of day (sinusoidal encoding), day of week, is_holiday, is_school_day
+          - Minutes since last real-time traffic update per segment
+          - Seasonal indicators (summer vs winter affects daylight, driving patterns)
+
+          This approach leverages the **deep historical context** to provide strong baseline predictions even when real-time signals are sparse.
+        next: mod_question
+      - label: "Real-time: Live traffic + external context signals"
+        answer: |
+          I'd prioritize **real-time signals** that capture current conditions.
+
+          **Live traffic features (per segment):**
+          - **Current speed**: Crowdsourced from active GPS users (1-2 min freshness)
+          - **Speed ratio**: current_speed / free_flow_speed -- 1.0 means no congestion, 0.3 means severe
+          - **Speed trend**: Is speed increasing or decreasing over last 15 minutes? (Congestion building vs clearing)
+          - **Coverage confidence**: Number of recent GPS probes on this segment. Low-coverage segments get uncertain estimates
+
+          **Traffic propagation features:**
+          - Speed on **upstream segments** (traffic approaching our route)
+          - Speed on **parallel routes** (if parallel is congested, expect spillover)
+          - **Queue length estimation**: How far back does congestion extend from bottlenecks?
+
+          **External context:**
+          - **Weather**: Precipitation type/intensity, visibility, temperature. Rain reduces speeds by 10-15%, snow by 20-40% (FHWA data)
+          - **Incidents**: Active accidents within 2 km of route, with estimated clearance time
+          - **Events**: Concerts, sports games within 5 km of route, with expected attendance and start/end times
+          - **Construction**: Active work zones with lane closures
+
+          **Derived features:**
+          - **Congestion index**: Weighted average speed_ratio across route segments
+          - **Bottleneck count**: Number of segments with speed_ratio < 0.5
+          - **Estimated free-flow time** vs **current estimated time**: The delta is the "delay" component
+
+          This approach captures **what's happening right now**, which is the strongest predictor for near-term ETAs.
+        next: mod_question
+
+  # ============ MODEL ============
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Model Architecture"
+    speaker: interviewer
+    content: |
+      What model architecture would you choose for ETA prediction? This is a core design decision that affects accuracy, latency, and maintainability.
+    dialogue:
+      - speaker: interviewer
+        text: "Now for model architecture. This is a critical choice that affects accuracy, latency, and how maintainable the system is."
+      - speaker: candidate
+        text: "The main trade-off is between simpler gradient boosting models that are fast and interpretable, versus deep learning models that can capture graph structure and sequential patterns."
+      - speaker: interviewer
+        text: "Walk me through your recommendation."
+    choices:
+      - label: "Graph Neural Network processing the route as a subgraph"
+        answer: |
+          I'd use a **Graph Neural Network (GNN)** that processes the route as a subgraph of the road network.
+
+          **Architecture (inspired by Google's ETA paper, NeurIPS 2021):**
+
+          1. **Segment encoder**: Each road segment gets a feature vector from its static + real-time features. FC(128) -> ReLU -> FC(64)
+
+          2. **Graph attention network**: The route segments form a path graph. Apply 3 layers of Graph Attention (GAT):
+             - Each segment attends to its neighbors (predecessor and successor in route)
+             - Also attends to segments on **intersecting roads** (captures cross-traffic effects)
+             - Multi-head attention (4 heads) learns different spatial relationships
+
+          3. **Supersegment aggregation**: Group consecutive segments into "supersegments" (e.g., same road name) and pool features. This captures that "I-95 for 20 miles" behaves as a unit.
+
+          4. **Route-level readout**: Attention-weighted pooling over all segment embeddings -> FC(256) -> FC(1) for final ETA
+
+          **Why GNN?**
+          - **Captures spatial dependencies**: A traffic jam on segment i affects segments i+1, i+2, ..., i+k. GNN propagates this information naturally
+          - **Google's results**: Their GNN reduced ETA errors by **40-50%** compared to the previous system in some regions
+          - **Transfer across routes**: The GNN learns segment-level representations that transfer to any route combination
+
+          **Latency concern**: GNN inference for a 50-segment route takes ~20-30ms on GPU. Acceptable within the 200ms budget when combined with feature fetching.
+        next: train_strategy
+      - label: "Gradient Boosted Trees with engineered features"
+        answer: |
+          I'd use **LightGBM/XGBoost** with carefully engineered aggregate features per route.
+
+          **Feature vector per route (~200 features):**
+          - **Segment aggregates**: Mean/median/P90 speed ratio, total distance, segment count, highway fraction
+          - **Historical baseline**: Sum of historical median segment times along route (strong baseline)
+          - **Residual from baseline**: Sum of (current speed - historical speed) per segment -- captures current deviation
+          - **Congestion features**: Number of congested segments (speed_ratio < 0.5), max consecutive congested segments, total congested distance
+          - **Turn/intersection features**: Number of turns, traffic lights, stop signs along route
+          - **Context**: Time of day, day of week, weather, holiday flag
+
+          **Why gradient boosting?**
+          - **Speed**: Inference in <1ms per route. Can serve 25M requests/minute without GPUs
+          - **Simplicity**: Well-understood training, tuning, and monitoring. SHAP explanations for debugging
+          - **Strong baseline**: With good feature engineering, XGBoost achieves within 5-10% of deep learning on tabular ETA data
+          - **Production-proven**: Many mapping services started with and still use boosting models
+
+          **Two-stage approach:**
+          1. **Baseline predictor**: Sum historical median segment times -> "free-flow ETA" + "historical delay"
+          2. **Residual model**: XGBoost predicts the residual (actual - baseline). This is easier to learn than raw ETA
+
+          **Trade-off**: We lose the ability to model fine-grained segment interactions. The aggregate features compress away some information. But the speed and reliability advantages are significant for a v1 system.
+        next: train_strategy
+      - label: "Transformer/Sequence model over the route's segment sequence"
+        answer: |
+          I'd use a **Transformer-based sequence model** that processes the route as an ordered sequence of road segments.
+
+          **Architecture (inspired by Uber's DeepETA, 2022):**
+
+          1. **Segment embedding**: Each segment -> concat(static_features, real_time_features, positional_encoding) -> FC(128)
+
+          2. **Transformer encoder** (4 layers, 8 heads, dim=128):
+             - Self-attention over the segment sequence captures long-range dependencies
+             - A highway segment 10km away affects the current segment if traffic is propagating
+             - Positional encoding helps the model understand sequence order
+
+          3. **Cross-attention with context**: Route-level context (time of day, weather, events) attends to segment embeddings, modulating predictions based on global conditions
+
+          4. **Regression head**: CLS token -> FC(256) -> FC(1) for total ETA. Also produce per-segment time estimates as auxiliary output
+
+          **Why Transformer?**
+          - **Long-range dependencies**: Self-attention connects any two segments regardless of distance. A bottleneck 50 segments away directly influences ETA
+          - **Uber's results**: DeepETA reduced P90 errors by ~20% over their previous model globally
+          - **Flexible input length**: Handles routes from 5 to 500 segments with the same architecture
+          - **Multi-task**: Can jointly predict total ETA + segment times + uncertainty, sharing representations
+
+          **Latency**: ~15ms for a 100-segment route on GPU (Uber's reported numbers). Within budget.
+
+          **Trade-off**: Requires more training data and compute than GBM, but the accuracy gains justify it for a Maps product where ETA is the core value proposition.
+        next: train_strategy
+
+  # ============ TRAINING ============
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: interviewer
+    content: |
+      Let's discuss the training strategy for our ETA model.
+
+      **Training data construction:**
+      - Each training example: (route_segments[], segment_features[], context_features, actual_travel_time)
+      - Extract from historical GPS traces: ~50M trips/day, use 6 months = ~9B examples
+      - **Temporal split**: Train on months 1-5, validate on month 6 week 1-2, test on month 6 week 3-4
+
+      **Critical training considerations:**
+
+      **1. Loss function:**
+      - **Huber loss** (robust to outliers) rather than MSE. Trips with accidents or wrong turns create extreme outliers
+      - Alternative: **Quantile regression** to predict P10, P50, P90 simultaneously. Users want "likely" ETA and "worst case" ETA
+      - **Asymmetric loss**: Penalize under-prediction (late arrival) 1.5x more than over-prediction (early arrival) -- aligns with user preferences
+
+      **2. Data filtering:**
+      - Remove trips with stops >5 minutes (gas, food) -- they don't reflect travel time
+      - Remove trips with unusual detours (user deviated from route) using route-matching score
+      - Remove very short trips (<500m) -- noisy GPS dominates
+
+      **3. Multi-task learning:**
+      - **Primary task**: Predict total route time
+      - **Auxiliary tasks**: Predict per-segment time, predict whether traffic state is congested/free-flow
+      - Auxiliary tasks provide richer gradients and improve segment-level representations
+
+      **4. Handling distribution shift:**
+      - Traffic patterns change seasonally, with road construction, and during events
+      - **Continuous training**: Retrain daily with a sliding 6-month window
+      - **Feature versioning**: When road graph changes (new roads, speed limit updates), invalidate and recompute historical features
+
+      **Training infrastructure:**
+      - Distributed training on 8-16 GPUs (for deep models) or Spark cluster (for GBM)
+      - Training time: ~4 hours for GBM, ~12 hours for GNN/Transformer on full dataset
+      - MLflow for experiment tracking, model versioning, and comparison
+    dialogue:
+      - speaker: interviewer
+        text: "For training, we use temporal splits -- never random. Train on months 1-5, validate and test on month 6."
+      - speaker: candidate
+        text: "Huber loss makes sense given the outliers from accidents and wrong turns. And I'd use asymmetric loss to penalize late arrivals more."
+      - speaker: interviewer
+        text: "Good reasoning. Multi-task learning with auxiliary per-segment predictions also helps. The model retrains daily with a sliding 6-month window."
+      - speaker: candidate
+        text: "What about new roads or construction? That changes the graph structure."
+      - speaker: interviewer
+        text: "When the road graph changes, we invalidate and recompute historical features for affected segments. Let's move to deployment."
+    next: deploy_question
+
+  # ============ DEPLOYMENT ============
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Deployment Architecture"
+    speaker: interviewer
+    content: |
+      How would you deploy this ETA model to handle 25M requests per minute at peak with <200ms latency?
+    dialogue:
+      - speaker: interviewer
+        text: "We need to serve 25 million route requests per minute at peak with under 200 milliseconds latency. How would you architect this?"
+      - speaker: candidate
+        text: "The key constraint is that feature assembly and inference both need to be fast. Let me think about the options."
+      - speaker: interviewer
+        text: "Consider the trade-offs between pre-computation and real-time inference."
+    choices:
+      - label: "Pre-computed segment speeds + lightweight aggregation"
+        answer: |
+          I'd **pre-compute segment-level predictions** and aggregate at query time.
+
+          **Architecture:**
+          ```
+          Background (every 1-2 min):
+          Real-time traffic + Features -> ML Model -> Predicted speed per segment -> Speed Cache (Redis)
+
+          Query time:
+          Route request -> Routing engine -> Segment list -> Sum(segment_distance / cached_speed) -> ETA
+          ```
+
+          **Why pre-computation?**
+          - The heavy ML inference runs offline against ~100M active road segments every 1-2 minutes
+          - At query time, ETA is a simple summation: `ETA = sum(distance_i / speed_i)` -- takes <5ms
+          - No ML model on the critical path -- eliminates inference latency entirely
+          - Works beautifully with the segment-level decomposition approach
+
+          **Speed cache design:**
+          - Redis cluster storing predicted speed per segment, keyed by segment ID
+          - Each entry: `{speed_kmh: 65.3, confidence: 0.92, updated_at: 1707300000}`
+          - Entries expire after 5 minutes (fall back to historical average if stale)
+          - Total memory: ~100M segments x 20 bytes = ~2GB -- fits easily in Redis
+
+          **Batch prediction job:**
+          - Runs every 60 seconds on GPU cluster
+          - Processes all segments with fresh traffic data
+          - Updates Redis atomically per-city to avoid partial updates
+          - If job fails, cached speeds gracefully degrade (slightly stale but still usable)
+
+          **Advantages**: Extremely low query latency, simple serving infrastructure, easy to monitor. The 1-2 minute staleness is acceptable since traffic changes gradually.
+        next: mon_strategy
+      - label: "Real-time per-route inference with model serving"
+        answer: |
+          I'd serve **real-time model inference per route request** using optimized model serving.
+
+          **Architecture:**
+          ```
+          Route Request -> Feature Assembly (Redis, <10ms) -> Model Inference (GPU, <30ms) -> Post-processing -> ETA
+          ```
+
+          **Feature serving layer:**
+          - **Pre-computed features** in Redis: segment static features, historical speed profiles, current traffic speeds
+          - **Feature assembly**: Given a route (list of segment IDs), batch-fetch all segment features in one `MGET` call (<10ms)
+          - **Context features**: Time of day, weather, events -- fetched from separate cache
+
+          **Model serving:**
+          - Model exported to **TensorRT** (NVIDIA) or **ONNX Runtime** for optimized inference
+          - Deployed on Kubernetes with GPU nodes (A100 or T4)
+          - **Dynamic batching**: Accumulate requests for 5ms, batch forward pass. Amortizes GPU overhead
+          - Typical latency: 15-30ms for a 100-segment route with batch size 32
+
+          **Auto-scaling:**
+          - Kubernetes HPA targeting <70% GPU utilization
+          - Pre-scale before known peak times (rush hour, holidays)
+          - Geographic routing: Requests go to nearest data center with warm model
+
+          **Fallback stack:**
+          1. Primary: Real-time model inference
+          2. Secondary: Pre-computed segment speeds (updated every 2 min)
+          3. Tertiary: Historical average speeds for time-of-day
+          4. Last resort: Free-flow speed * distance / speed_limit
+
+          **Advantages**: Freshest possible predictions, can incorporate route-level interactions (GNN/Transformer), supports per-route features like turn count.
+        next: mon_strategy
+
+  # ============ MONITORING ============
+  - id: mon_strategy
+    stage: monitoring
+    type: question
+    label: "Monitoring Strategy"
+    speaker: interviewer
+    content: |
+      What monitoring would you implement to ensure ETA quality in production?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you monitor ETA quality in production? This is a system that millions of people rely on every day."
+      - speaker: candidate
+        text: "We need both real-time operational monitoring and longer-term accuracy tracking."
+      - speaker: interviewer
+        text: "Tell me about your approach."
+    choices:
+      - label: "Real-time accuracy tracking with automated alerting"
+        answer: |
+          I'd implement **real-time accuracy monitoring** with automated alerting and rollback.
+
+          **Real-time accuracy pipeline:**
+          - When a user completes a trip, compare predicted ETA vs actual travel time
+          - Compute rolling MAE and MAPE over 15-minute windows, segmented by city, road type, trip duration bucket
+          - **Alerting thresholds**:
+            - MAPE > 15% for any city for >30 minutes -> Page on-call
+            - MAE > 5 minutes for short trips (<15 min) -> Warning
+            - Systematic bias (consistently late/early by >10%) -> Trigger model investigation
+
+          **Data quality monitoring:**
+          - **Feature freshness**: Alert if any segment's traffic data is >5 minutes stale
+          - **GPS probe coverage**: Monitor the number of active GPS probes per segment. Low coverage means uncertain speed estimates
+          - **Map matching error rate**: Track the percentage of GPS traces that fail map matching -- indicates map data issues
+
+          **Segment-level monitoring:**
+          - Track ETA error per road segment over time
+          - **Anomaly detection**: Flag segments where error suddenly increases (construction, speed limit change, new traffic pattern)
+          - Dashboard showing top-50 worst-performing segments by city -- prioritize for investigation
+
+          **Automated remediation:**
+          - If model error exceeds thresholds, automatically fall back to historical averages
+          - If a specific segment's predictions are consistently wrong, override with real-time crowd-sourced speed
+          - Automatic retraining trigger when error degrades >5% from baseline for >24 hours
+        next: mon_terminal
+      - label: "A/B testing and user experience metrics"
+        answer: |
+          I'd center monitoring on **user experience metrics** and continuous **A/B testing**.
+
+          **A/B testing framework:**
+          - Permanently hold back 5% of traffic on the previous model version
+          - Compare new model vs baseline on: MAE, MAPE, P90 error, user satisfaction
+          - When testing major model changes, run for 2+ weeks across all time patterns
+
+          **User experience metrics:**
+          - **"ETA surprise" rate**: How often does the actual arrival differ from predicted by >20%? Target: <5% of trips
+          - **ETA stability during navigation**: How much does the ETA change during a trip? Frequent large jumps (e.g., "12 min" -> "22 min" -> "15 min") erode trust. Track ETA volatility index
+          - **Re-routing rate**: If the system suggests a new route mid-navigation, it implies the original ETA was wrong. Track re-route triggers
+          - **User complaints**: NLP analysis of support tickets mentioning "ETA", "late", "arrival time"
+
+          **Cohort analysis:**
+          - Compare ETA accuracy across user segments: daily commuters vs occasional users, urban vs rural, peak vs off-peak
+          - Ensure no demographic or geographic bias in accuracy
+
+          **Long-term trend monitoring:**
+          - Monthly accuracy reports per city showing trends
+          - Seasonal accuracy patterns (is the model worse in winter? During construction season?)
+          - Accuracy vs trip distance curve -- are we better at short or long trips?
+
+          **Feedback loop:**
+          - Every completed trip provides a ground-truth label
+          - This creates a natural **continuous learning** loop -- we get millions of new labels daily
+          - Monthly model refreshes incorporate the latest data, and we track whether accuracy improves release over release
+        next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "ETA System Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive **ETA prediction system** for a maps application.
+
+      **Your key design decisions:**
+      - Framed as segment-level decomposition or end-to-end route prediction
+      - Defined MAE/MAPE metrics with business-aligned targets (<10% MAPE)
+      - Built data pipeline processing 50M daily trips with map matching and quality filtering
+      - Engineered spatial-temporal or real-time traffic features
+      - Selected GNN, gradient boosting, or Transformer architecture
+      - Deployed with pre-computed segment speeds or real-time per-route inference
+      - Monitored with real-time accuracy tracking or A/B testing with UX metrics
+
+      **Strengths of this design:**
+      - **Scale-aware**: Handles 25M requests/minute with clear latency budget
+      - **Multi-signal**: Combines historical patterns, real-time traffic, and external context
+      - **Robust**: Fallback stack ensures predictions even when components fail
+      - **Continuously improving**: Daily retraining with millions of new ground-truth labels
+
+      **Key challenges addressed:**
+      - Non-stationary traffic patterns through continuous retraining
+      - Graph structure through GNN or segment-aware features
+      - Real-time requirements through pre-computation or optimized serving
+      - Data quality through GPS filtering and map matching quality monitoring
+
+      This is a strong end-to-end design that demonstrates understanding of both the ML challenges and the production engineering required for a maps-scale ETA system. Great job!
+    dialogue:
+      - speaker: interviewer
+        text: "Excellent work! You've covered the full system -- from problem formulation through deployment and monitoring."
+      - speaker: candidate
+        text: "Thanks! The key insight is that ETA prediction is fundamentally a spatial-temporal problem where real-time signals and historical patterns must work together."
+      - speaker: interviewer
+        text: "Exactly. And the production considerations -- latency, fallbacks, continuous retraining -- are just as important as the model architecture. Great job!"

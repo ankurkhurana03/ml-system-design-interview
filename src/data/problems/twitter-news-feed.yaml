@@ -1,0 +1,589 @@
+id: twitter-news-feed
+title: "Twitter/X News Feed"
+description: "Design a personalized news feed for a social media app like X (Twitter)."
+companies: ["X/Twitter", "Meta", "LinkedIn"]
+domains: ["Ranking/Search", "Recommendation", "NLP"]
+root: pd_start
+
+nodes:
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we will design the **personalized "For You" feed** for a social media platform like X (formerly Twitter).
+
+      X has approximately **550 million monthly active users** and **250 million daily active users**. Users collectively post **500 million+ tweets per day**, including text, images, videos, links, and quote tweets. The "For You" timeline is the default view, mixing content from accounts the user follows with **recommended content from accounts they do not follow**.
+
+      **The core challenge**: For each user opening the app, select and rank **50-100 tweets** from potentially millions of candidates (tweets from followed accounts + recommended tweets). The feed must balance:
+      - **Relevance**: Show tweets the user will find interesting
+      - **Timeliness**: Tweets are time-sensitive; a tweet about breaking news from 12 hours ago is stale
+      - **Diversity**: Mix of followed content, recommended content, trending topics, and different content types
+      - **Safety**: Filter misinformation, harassment, spam, and policy-violating content
+
+      **Key difference from Instagram/Facebook**: Twitter content is primarily **text-based and time-sensitive**. A tweet's relevance decays much faster than a photo post. Breaking news, live events, and trending conversations drive engagement.
+
+      **Latency requirement**: The feed must load in **<300ms** (users expect near-instant refresh on pull-to-refresh).
+
+      Let's scope the problem.
+    dialogue:
+      - speaker: interviewer
+        text: "We're designing the 'For You' feed for X/Twitter. 550 million MAUs, 500 million tweets per day, mixing followed content with recommendations."
+      - speaker: candidate
+        text: "What makes this different from other social media feeds like Instagram or Facebook?"
+      - speaker: interviewer
+        text: "Twitter content is primarily text-based and extremely time-sensitive. A tweet about breaking news from 12 hours ago is stale. The content lifecycle is hours, not days."
+      - speaker: candidate
+        text: "So freshness is a much bigger factor in ranking than on photo/video platforms."
+      - speaker: interviewer
+        text: "Exactly. Let's scope the system."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: info
+    label: "Problem Scope"
+    speaker: interviewer
+    content: |
+      Let's define the system scope. Twitter open-sourced their recommendation algorithm in 2023, giving us real insight into the architecture.
+
+      **Feed composition targets** (based on Twitter's published data):
+      - **~50% in-network tweets**: From accounts the user follows (but not all - only the most relevant)
+      - **~50% out-of-network tweets**: Recommended content from accounts the user does not follow
+      - Mixed with **ads** (approximately 1 ad per 5-7 organic tweets)
+
+      **Pipeline architecture (following Twitter's published design):**
+      1. **Candidate sourcing** (~1,500 candidates from billions of tweets):
+         - In-network: Recent tweets from followed accounts (last 24 hours)
+         - Out-of-network: Tweets engaged with by the user's social graph, topic-based recommendations, trending content
+      2. **Ranking** (~1,500 to ~50-100): Heavy ML model scores each candidate
+      3. **Filtering**: Remove policy-violating content, apply user blocks/mutes, dedup similar content
+      4. **Mixing/blending**: Combine ranked in-network and out-of-network tweets, insert ads, apply diversity rules
+
+      **Key constraints:**
+      - Tweets are ephemeral: 90% of a tweet's engagement happens within **4 hours** of posting
+      - Users expect **real-time updates** - new tweets should appear within minutes
+      - Conversations/threads need special handling (show context, not just individual tweets)
+      - Multimedia tweets (images, videos) have different engagement patterns than text-only tweets
+
+      What should we optimize for?
+    dialogue:
+      - speaker: interviewer
+        text: "Twitter open-sourced their algorithm in 2023. The feed is roughly 50% in-network and 50% out-of-network content, with ads interspersed."
+      - speaker: candidate
+        text: "The candidate sourcing is interesting - how do we find the out-of-network tweets?"
+      - speaker: interviewer
+        text: "Multiple sources: tweets liked or retweeted by people the user follows, topic-based recommendations, trending content. Candidate sourcing generates about 1,500 candidates, then the ranking model picks the best 50-100."
+      - speaker: candidate
+        text: "And 90% of a tweet's engagement happens within 4 hours. That's a very tight content lifecycle."
+      - speaker: interviewer
+        text: "Right. Freshness is critical. Now, what should we optimize for?"
+    next: met_question
+
+  - id: met_question
+    stage: metrics
+    type: question
+    label: "Optimization Objective"
+    speaker: interviewer
+    content: |
+      What should the "For You" feed ranking model optimize for?
+    dialogue:
+      - speaker: interviewer
+        text: "What should the ranking model optimize? Twitter has gone through multiple iterations on this - from reverse chronological to engagement-based to the current system."
+      - speaker: candidate
+        text: "There's a big debate between engagement optimization and what's sometimes called 'healthy conversations.' Let me discuss both approaches."
+      - speaker: interviewer
+        text: "Walk me through the trade-offs."
+    choices:
+      - label: "Multi-action engagement (likes, retweets, replies, dwell)"
+        answer: |
+          I would optimize for a **weighted combination of engagement actions**: P(like), P(retweet), P(reply), P(bookmark), and E[dwell_time_ms].
+
+          **Value model** (based on Twitter's published algorithm):
+          ```
+          Score = 0.5*P(like) + 1.0*P(retweet) + 11.0*P(reply) + 22.0*P(profile_click) + ...
+          ```
+          Twitter's actual published weights (from their open-source) show that **replies are weighted 11x likes** and **profile clicks are weighted 22x likes**. This reflects Twitter's goal of driving conversations and exploration, not just passive consumption.
+
+          **Why these specific weights?** Likes are cheap (one tap). Retweets indicate the user found it worth sharing. Replies indicate genuine conversation engagement - the core of Twitter's value proposition. Profile clicks indicate the user discovered someone new. Bookmarks indicate lasting value.
+
+          **Key benefit**: All signals are immediate (available within seconds of impression), abundant (billions per day), and directly trainable. The model can be evaluated and iterated quickly.
+
+          **Key risk**: Pure engagement optimization on Twitter is known to amplify **outrage and controversy**. Inflammatory tweets generate more replies (hate-replies are still replies) and more quote-tweets (often to argue). Twitter's own research showed engagement optimization increased exposure to divisive political content.
+
+          **Mitigation**: Apply a **quality filter** after ranking - demote tweets that generate disproportionately negative replies (high reply-to-like ratio is a signal of controversy). Also demote tweets flagged by content integrity models.
+        next: met_engagement
+      - label: "Informed engagement (quality-weighted actions)"
+        answer: |
+          I would optimize for **informed, quality-weighted engagement** that distinguishes between positive and negative interactions.
+
+          **Why not raw engagement?** On Twitter specifically, raw engagement optimization is dangerous. Hate speech generates replies. Misinformation generates quote-tweets. Outrage generates high dwell time (people reading heated threads). Optimizing raw engagement inadvertently promotes the worst content on the platform.
+
+          **Quality-weighted scoring:**
+          ```
+          Score = w1*P(like) + w2*P(positive_retweet) + w3*P(constructive_reply)
+                + w4*P(bookmark) + w5*E[dwell_time]
+                - w6*P(report) - w7*P(mute_author) - w8*P(block_author) - w9*P(negative_reply)
+          ```
+
+          Key differences from raw engagement:
+          - **Retweets classified as positive vs negative**: A retweet that adds commentary like "Great thread!" is positive. A quote-tweet saying "This is the worst take I've ever seen" is negative. Use a sentiment classifier on quote-tweet text.
+          - **Replies classified by quality**: Use a toxicity model (like Perspective API) to score reply quality. Constructive replies get full weight; toxic replies get zero or negative weight.
+          - **Negative feedback signals**: Reports, mutes, and blocks are **strong negative signals** that are subtracted from the score. A tweet that generates 100 likes but 10 reports is a bad recommendation.
+
+          **Key benefit**: This directly addresses Twitter's biggest criticism - that the algorithm promotes divisive content. By penalizing negative interactions and rewarding constructive ones, the model learns to surface tweets that generate positive conversations.
+
+          **Key risk**: Classifying reply quality is imperfect. The toxicity model has biases (may flag sarcasm or AAVE as toxic). Positive/negative retweet classification adds noise. The system is only as good as these classifiers.
+
+          **Training challenge**: The quality-weighted labels are more complex to construct and noisier than raw engagement labels. Need careful calibration of the classifier confidence thresholds.
+        next: met_quality
+
+  - id: met_engagement
+    stage: metrics
+    type: info
+    label: "Engagement Metrics Framework"
+    speaker: interviewer
+    content: |
+      Good choice. Let's define the metrics framework.
+
+      **Offline metrics:**
+      - **Per-action AUC**: AUC for P(like) > 0.80, P(retweet) > 0.75, P(reply) > 0.72. Replies are hardest to predict because they depend on conversation context.
+      - **Ranking quality**: NDCG@50 using the weighted engagement score as relevance. Target: > 0.60.
+      - **Calibration**: ECE < 0.03 for each engagement prediction. Critical for the value model to correctly weight actions.
+
+      **Online A/B test metrics:**
+      - **Primary**: Total weighted engagement per user per day. Baseline: ~15-20 engagements per DAU.
+      - **Secondary**: Time spent in feed per session, tweets consumed per session, content diversity (unique topics seen)
+      - **Guardrails**: Mute/block rate (must not increase), report rate (must not increase), DAU (must not decrease), "See Less Often" usage
+      - **Topline business**: DAU/MAU ratio, ad impressions per user (directly ties to revenue)
+
+      **Critical Twitter-specific metric - "Healthy Conversations":**
+      - **Reply quality score**: Average Perspective API score of replies generated by shown tweets. Higher = more civil discourse.
+      - **Misinformation exposure**: Fraction of impressions that are later community-noted or removed for misinformation.
+      - **Echo chamber index**: How diverse are the political viewpoints and topics in a user's feed? Measure using topic and viewpoint classifiers.
+
+      **Twitter tracks these but they often conflict with engagement**. Higher engagement ≠ healthier platform. The weights in the value model represent a policy decision about how to balance growth vs safety.
+
+      Let's discuss data.
+    dialogue:
+      - speaker: interviewer
+        text: "Key offline metrics: per-action AUC targeting 0.80 for likes, 0.75 for retweets. Online: total weighted engagement per user per day."
+      - speaker: candidate
+        text: "The 'healthy conversations' metrics are interesting. How do engagement and health metrics typically trade off?"
+      - speaker: interviewer
+        text: "They often conflict. Showing more controversial content increases engagement but decreases reply quality scores and increases reports. The value model weights are essentially a policy decision about this trade-off."
+      - speaker: candidate
+        text: "So the weights encode the platform's values, not just an ML optimization."
+      - speaker: interviewer
+        text: "Exactly. Now let's discuss data."
+    next: data_pipeline
+
+  - id: met_quality
+    stage: metrics
+    type: info
+    label: "Quality Metrics Framework"
+    speaker: interviewer
+    content: |
+      Excellent thinking. Let's define the quality-weighted metrics framework.
+
+      **Offline metrics:**
+      - **Quality-weighted AUC**: AUC for the composite quality score. Target: > 0.75 (harder than raw engagement AUC because quality labels are noisier).
+      - **Negative interaction prediction**: AUC for P(report), P(mute_author). Target: > 0.70. These are critical for the penalty terms.
+      - **Reply quality prediction**: AUC for predicting whether replies to a tweet will be constructive. Target: > 0.68.
+
+      **Online A/B test metrics:**
+      - **Primary**: Quality-weighted engagement per user per day
+      - **Secondary**: Average reply Perspective API score (civility), user-reported satisfaction (periodic surveys), content diversity
+      - **Guardrails**: Raw engagement must not drop more than 3% (some engagement loss is expected when removing divisive content), DAU must not decrease, ad revenue per user must not decrease
+      - **North star**: 7-day retention AND quality-weighted engagement (must improve both)
+
+      **The 3% engagement guardrail is critical**: When you penalize divisive content, raw engagement typically drops because those tweets were highly engaging. Leadership must accept this trade-off. Twitter's own experiments showed that reducing controversial content decreased engagement by **~2-4%** but improved user satisfaction surveys by **~8-10%** and reduced report rates by **~15%**.
+
+      **User survey integration**: Periodically ask users "Was this feed worth your time?" on a 1-5 scale. This is the gold standard for feed quality. Sparse but invaluable. Collect ~100K surveys per week.
+
+      Let's discuss data.
+    dialogue:
+      - speaker: interviewer
+        text: "Quality-weighted metrics are harder to optimize. The key trade-off: removing divisive content decreases raw engagement by 2-4% but improves satisfaction by 8-10%."
+      - speaker: candidate
+        text: "That's a tough business call. How do you get leadership buy-in for an engagement drop?"
+      - speaker: interviewer
+        text: "Show the retention data. Users who see healthier feeds retain better over 30-90 days, even if short-term engagement dips. And advertiser brand safety improves, which supports ad revenue."
+      - speaker: candidate
+        text: "The user surveys are the gold standard but very sparse."
+      - speaker: interviewer
+        text: "Right, about 100K per week. Use them to calibrate the quality-weighted model. Let's talk about data."
+    next: data_pipeline
+
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      Let's inventory the data for the Twitter/X feed ranking system.
+
+      **Tweet-level data:**
+      - **Content**: Tweet text (up to 280 chars / 25,000 for subscribers), attached media (images, videos, GIFs, links), hashtags, mentions, language
+      - **Engagement stats**: Like count, retweet count, reply count, quote-tweet count, bookmark count, view count. Available in near-real-time (updated every few seconds).
+      - **Content signals**: NLP-derived topic labels, sentiment score, toxicity score, misinformation risk score, spam probability
+      - **Thread context**: Is this tweet part of a thread? What position? Is it a reply to another tweet?
+
+      **User data:**
+      - **Profile**: Follower/following counts, account age, verification status, subscriber status
+      - **Social graph**: Who the user follows, who follows them, mutual follows. X has ~500 billion follow edges.
+      - **Interest model**: Topics the user has explicitly followed or shown interest in (based on engagement history). X has ~10,000 topic nodes in their interest graph.
+      - **Engagement history**: Last 1,000 engagements (likes, retweets, replies) with timestamps. Critical for understanding recent interests.
+
+      **Author data:**
+      - **Author reputation**: Account quality score (not a bot? not a spammer? produces quality content?)
+      - **Author-user relationship**: How often has this user engaged with this author's tweets? Mutual follows? Direct messages?
+
+      **Real-time signals:**
+      - **Trending topics**: What is trending right now in the user's country/globally?
+      - **Breaking news**: Is there a breaking news event? Tweets about it should be boosted.
+      - **Social context**: "7 people you follow liked this tweet" - powerful social proof signal.
+
+      **Data scale**: ~500M tweets/day x 7 days = ~3.5 billion tweets in the candidate pool. Each tweet has ~50 features. User features for 250M DAUs. Total training data: **~100 billion impression-engagement pairs** per month.
+
+      **Data freshness is paramount**: A ranking model trained on data from 1 week ago may already be stale because the conversation topics have changed. Twitter retrains their ranking model **daily**.
+
+      Let's discuss feature engineering.
+    dialogue:
+      - speaker: interviewer
+        text: "Twitter has massive data: 500 million tweets per day, 500 billion follow edges in the social graph, and 10,000 topic nodes. Real-time signals like trending topics and social proof are critical."
+      - speaker: candidate
+        text: "The real-time aspect is key. How fresh does the training data need to be?"
+      - speaker: interviewer
+        text: "Twitter retrains their ranking model daily. Week-old data is already stale because conversation topics shift so quickly."
+      - speaker: candidate
+        text: "The social proof signal - '7 people you follow liked this' - seems very powerful for out-of-network tweets."
+      - speaker: interviewer
+        text: "It is. It's one of the strongest signals for out-of-network content discovery. Let's discuss feature engineering."
+    next: feat_question
+
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Engineering"
+    speaker: interviewer
+    content: |
+      How would you approach feature engineering for the feed ranker?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you engineer features for the ranking model? Twitter's open-sourced algorithm revealed some surprising feature choices."
+      - speaker: candidate
+        text: "I'd think about user-tweet features, author-user features, and real-time context features. Let me walk through two approaches."
+      - speaker: interviewer
+        text: "Go ahead."
+    choices:
+      - label: "Graph-based features + SimClusters embeddings"
+        answer: |
+          I would use **graph-based features** leveraging Twitter's social graph, combined with **SimClusters embeddings** (Twitter's published approach).
+
+          **SimClusters** (Twitter's community detection system):
+          - Run community detection on the user-user follow graph to identify ~150,000 **interest communities** (clusters of users with similar interests). Each user gets a 150K-dim sparse vector of community memberships.
+          - Each tweet is mapped to communities based on which community members engaged with it. Tweet community vector: the weighted sum of engaging users' community vectors.
+          - **User-tweet similarity**: Cosine similarity between user's community vector and tweet's community vector. This is the primary relevance feature.
+
+          **Graph-based features:**
+          - **Social proof count**: How many of the user's followees engaged with this tweet? (Liked, retweeted, or replied)
+          - **Social proof strength**: Weighted by how close these followees are to the user (interaction frequency). A like from a user's best friend is worth more than a like from a barely-known followee.
+          - **Author graph distance**: Shortest path between user and author in the follow graph. 1-hop (direct follow) is strongest. 2-hop (friend of friend) is typical for out-of-network.
+          - **Mutual connections**: How many mutual follows do the user and author share?
+
+          **Tweet embedding features:**
+          - **Tweet text embedding** (128 dims): From a fine-tuned BERT model trained on tweet engagement prediction
+          - **User interest embedding** (128 dims): Weighted average of text embeddings of user's recent liked tweets
+          - **User-tweet text similarity**: Cosine similarity between user interest embedding and tweet text embedding
+
+          **Why SimClusters?** It captures interests at a **community level**, which is more robust than individual user-user similarity. A user might not have directly engaged with an author, but if they belong to the same interest community (e.g., "machine learning practitioners"), the tweet is likely relevant. This is how Twitter surfaces out-of-network content so effectively.
+
+          **Scale**: SimClusters are pre-computed weekly. The sparse community vectors (typically 50-200 non-zero entries per user) are small and fast to compute similarity with.
+        next: mod_question
+      - label: "Real-time behavioral features + content understanding"
+        answer: |
+          I would emphasize **real-time behavioral features** and **deep content understanding**, since Twitter's feed is extremely time-sensitive.
+
+          **Real-time behavioral features (~30 features):**
+          - **Session recency signals**: What topics has the user engaged with in the last 1 hour? Last 24 hours? Use exponentially-weighted moving averages of topic engagement rates.
+          - **Trending alignment**: Is this tweet about a topic that is trending right now? How trending? (Top 10 trending = huge boost, top 100 = moderate boost)
+          - **Conversation velocity**: How fast is this tweet gaining engagement? Tweets with high engagement velocity in the first 30 minutes are more likely to be interesting. Compute likes_per_minute, replies_per_minute.
+          - **Freshness signals**: Minutes since tweet was posted. Apply a **time-decay function** - Twitter uses an exponential decay where tweets lose ~50% of their ranking boost every 6 hours.
+          - **Feed position fatigue**: Has the user seen similar content recently? Track topic repetition within the current session.
+
+          **Content understanding features (~40 features):**
+          - **Topic classification**: Multi-label topic predictions from a fine-tuned RoBERTa model. ~100 topic categories (politics, sports, tech, entertainment, etc.)
+          - **Sentiment analysis**: Is the tweet positive, negative, or neutral? Helps quality filtering.
+          - **Toxicity score**: From a Perspective API-like model. Score from 0-1 for toxicity, profanity, harassment.
+          - **Information quality**: Is this a factual claim? Is the source reliable? Does it have a community note? These features support quality filtering.
+          - **Content richness**: Has images? Has video? Has links? Thread length? Media content typically gets 2-3x engagement vs text-only.
+          - **Conversation depth**: Number of replies, depth of reply tree, ratio of unique repliers to total replies. Deep, diverse conversations indicate interesting content.
+
+          **Why real-time focus?** On Twitter, a 30-minute-old tweet about a breaking news event is extremely valuable; the same tweet 6 hours later is old news. Real-time features capture this urgency. A model trained on behavioral features can adapt to **emerging trends within minutes**, while embedding-based features (like SimClusters) update weekly.
+
+          **Trade-off**: Real-time features are powerful but expensive to compute at serving time. Need a streaming feature pipeline (Kafka + Flink) to maintain real-time feature stores. More infrastructure complexity than batch-computed embeddings.
+        next: mod_question
+
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Model Architecture"
+    speaker: interviewer
+    content: |
+      What model architecture would you use for the feed ranking model?
+    dialogue:
+      - speaker: interviewer
+        text: "What model would you use for the feed ranker? It needs to score ~1,500 candidates within a tight latency budget."
+      - speaker: candidate
+        text: "Twitter's published algorithm uses a specific architecture. Let me discuss the options and trade-offs."
+      - speaker: interviewer
+        text: "Go ahead. Consider both the published approach and alternatives."
+    choices:
+      - label: "Multi-task MaskNet (Twitter's published approach)"
+        answer: |
+          I would use **MaskNet**, the architecture Twitter published when they open-sourced their algorithm, with multi-task prediction heads.
+
+          **MaskNet architecture:**
+          - **Input**: All features concatenated into a single vector (~500 features after embedding lookups)
+          - **Mask blocks** (3 blocks): Each block applies a learned **feature mask** (element-wise multiplication) followed by a feed-forward layer. The mask learns to selectively attend to different feature subsets for different prediction tasks.
+            ```
+            mask = sigmoid(W_mask * input + b_mask)
+            output = ReLU(W_ff * (mask ⊙ input) + b_ff)
+            ```
+          - **Multi-task heads**: Separate prediction heads for each engagement type:
+            - P(like), P(retweet), P(reply), P(profile_click), P(bookmark)
+            - P(negative_feedback): P(mute_author), P(block_author), P(report), P("See Less Often")
+            - E[dwell_time_ms]: Regression head for time spent reading the tweet
+
+          **Why MaskNet?** Twitter specifically chose this over standard MLPs because the **mask mechanism** allows different tasks to focus on different feature subsets. For example, the P(reply) head might mask to focus on conversation features and author-user relationship, while P(like) focuses on content quality features. This is more parameter-efficient than having entirely separate networks per task.
+
+          **Multi-task training**: Joint loss with **uncertainty-weighted task balancing** (learned task weights). Negative feedback predictions are critical - they directly enable the penalty term in the value model.
+
+          **Model size**: ~5-10M parameters. Inference: ~3ms per candidate on GPU. For 1,500 candidates with batching: ~15-20ms total. Well within latency budget.
+
+          **Training**: Trained on 24-48 hours of engagement data, retrained daily. Uses **in-batch negatives** (other users' impressions) plus hard negatives (tweets shown but not engaged with).
+
+          **Value model integration**: The final feed score combines all head predictions using the weighted value model formula. Weights are tuned via online A/B testing, not learned by the model.
+        next: train_strategy
+      - label: "Transformer-based contextual ranker"
+        answer: |
+          I would use a **Transformer-based contextual ranker** that considers the relationships between tweets in the candidate set, not just individual tweet scores.
+
+          **Architecture: Set Transformer for Feed Ranking**
+          - **Input**: Each of the ~1,500 candidate tweets is represented as a feature vector (~200 dims after embedding). Plus the user's context vector (~100 dims).
+          - **Self-attention layer** (2 layers, 8 heads): Processes all candidate tweets simultaneously. The attention mechanism allows the model to capture **inter-tweet dependencies**:
+            - Two tweets about the same topic should not both appear at the top (diversity)
+            - A reply tweet should appear near the original tweet (context)
+            - Tweets from the same author should be spread out
+          - **User-tweet cross-attention** (1 layer): Each tweet attends to the user's context to compute personalized relevance.
+          - **Multi-task heads**: Same engagement prediction heads as MaskNet, but now each prediction is **context-aware** (informed by what else is in the feed).
+
+          **Why Transformer?** Standard pointwise rankers score each tweet independently. But feed quality depends on the **set of tweets shown together**. A feed of 10 great tweets about the same topic is worse than 10 great tweets about different topics. The Transformer's self-attention naturally models these **set-level interactions**.
+
+          **Latency concern**: Self-attention over 1,500 items is O(n^2) = O(2.25M), which is expensive. Mitigations:
+          - Use **efficient attention** (Performer or linear attention) to reduce to O(n)
+          - Apply self-attention only to the top 200 candidates (pre-filtered by a lightweight model)
+          - Quantize to INT8 for inference. Total: ~40ms on GPU for top-200 re-ranking.
+
+          **Two-stage approach**: Use a pointwise model (MaskNet) for initial scoring of 1,500 candidates, then apply the Transformer re-ranker to the top 200 for context-aware final ranking.
+
+          **Key benefit**: The Transformer directly optimizes for **list-level quality**, not just individual tweet relevance. This naturally produces diverse, well-structured feeds without post-hoc diversity heuristics.
+
+          **Trade-off**: Significantly more complex and expensive than pointwise ranking. The quality gain is typically +1-3% in online engagement, but with 250M DAUs, that translates to millions more engagements per day.
+        next: train_strategy
+
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: interviewer
+    content: |
+      Good model choice. Let's discuss training strategy.
+
+      **Training data:**
+      - Source: **Last 24-48 hours** of feed impressions and engagement outcomes. Freshness is critical - training on week-old data produces a model that doesn't understand current trends.
+      - Volume: ~250M DAUs x ~200 tweets per session x ~3 sessions per day = **~150 billion impression-engagement pairs per day**. Sample to ~5 billion for training.
+      - Each example: (user features, tweet features, author features, context features, position, engagement labels)
+
+      **Label construction:**
+      - **Positive labels**: Like, retweet, reply, bookmark, profile click, >15 seconds dwell time
+      - **Negative labels**: Impressed but no engagement within the session, explicit negative feedback (mute, block, report)
+      - **Label timing**: Most engagement happens within minutes. Use a **30-minute join window** - if no engagement within 30 minutes of impression, label as negative.
+      - **Position bias correction**: Use **position as a training feature** and set to a neutral value during inference. Tweets at position 1 get 10-20x more engagement than position 50 regardless of quality.
+
+      **Training infrastructure:**
+      - **Daily retraining**: Full model retrain every 24 hours using the latest data. Old model serves while new model trains.
+      - **Hardware**: 16-32 A100 GPUs with data parallelism. Training time: ~4-8 hours.
+      - **Warm-start**: Initialize from yesterday's model checkpoint for faster convergence (~2-3 hours vs 8 hours from scratch).
+      - **Continuous evaluation**: During training, evaluate on a hold-out set every 30 minutes. Early stop if metrics degrade.
+
+      **Key Twitter-specific training challenges:**
+      - **Viral tweet bias**: A few viral tweets dominate engagement data each day. Without careful sampling, the model learns to predict "will this go viral?" rather than "will this user like this tweet?" Solution: cap the maximum number of training examples per tweet at 10,000.
+      - **Bot and spam data**: ~5-10% of engagement is from bots. Filter out suspected bot engagement before training using account quality scores.
+      - **Temporal non-stationarity**: News events cause sudden distribution shifts. Monday's model may be wrong by Wednesday. Daily retraining and freshness-weighted sampling (recent hours weighted more) help.
+
+      Let's discuss deployment.
+    dialogue:
+      - speaker: interviewer
+        text: "Training uses the last 24-48 hours of data with daily retraining. A critical challenge is viral tweet bias - a few tweets can dominate the training data."
+      - speaker: candidate
+        text: "How do we handle the temporal non-stationarity? News events can shift the distribution overnight."
+      - speaker: interviewer
+        text: "Daily retraining with warm-start, plus freshness-weighted sampling where the most recent hours get higher weight. The model from Monday may be wrong by Wednesday if a major event happens."
+      - speaker: candidate
+        text: "The bot filtering is important too - 5-10% of engagement being from bots could seriously distort the model."
+      - speaker: interviewer
+        text: "Exactly. Filter suspected bot engagement before training. Now let's talk about deployment."
+    next: deploy_question
+
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Serving Architecture"
+    speaker: interviewer
+    content: |
+      How would you deploy the feed ranking system?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you architect the serving system? Remember: 250M DAUs, sub-300ms feed load time, content that changes by the minute."
+      - speaker: candidate
+        text: "The serving architecture needs to balance freshness, latency, and compute cost. Let me walk through two approaches."
+      - speaker: interviewer
+        text: "Go ahead."
+    choices:
+      - label: "Real-time ranking with streaming features"
+        answer: |
+          I would serve the feed via **fully real-time ranking** with a streaming feature pipeline for maximum freshness.
+
+          **Request flow (target: <300ms end-to-end):**
+          1. **Candidate sourcing** (~100ms): In parallel:
+             - In-network: Query a **tweet index** for recent tweets from followed accounts (Lucene-based, partitioned by author). Returns ~500 tweets.
+             - Out-of-network: Query multiple sources (SimClusters, topic-based, social proof) each returning ~300-500 candidates. Total: ~1,000 out-of-network candidates.
+          2. **Feature assembly** (~50ms): For each ~1,500 candidates, assemble features from:
+             - **User feature store** (Redis): User embeddings, topic interests, recent engagement. Pre-computed hourly.
+             - **Tweet feature store** (Redis): Tweet embeddings, engagement counts, content scores. Updated in near-real-time via Kafka streaming.
+             - **Real-time features**: Social proof (who among user's follows engaged), freshness, trending alignment. Computed at request time.
+          3. **Model inference** (~50ms): Score all 1,500 candidates using the ranking model on GPU. Batched inference using TensorRT.
+          4. **Post-ranking** (~50ms): Apply diversity rules, safety filters, ad insertion, position optimization.
+          5. **Response** (~50ms budget for serialization and network)
+
+          **Streaming feature pipeline:**
+          - Every engagement event (like, retweet) is published to **Kafka**
+          - A **Flink** streaming job updates tweet engagement features in near-real-time (5-10 second lag)
+          - This means the ranking model sees that a tweet got 1,000 likes in the last 5 minutes, enabling fresh viral content detection
+
+          **Scaling:**
+          - At 250M DAUs with ~3 feed loads per day = ~750M requests per day = ~8,700 QPS average, ~30K QPS peak
+          - At 50ms per GPU inference, each GPU handles ~20 QPS. Need ~1,500 GPUs at peak.
+          - Cost: ~$3K/hour at peak = ~$2M/month. Significant but appropriate for a platform with ~$5B annual revenue.
+
+          **Advantage**: Maximum freshness. Breaking news tweets appear in feeds within minutes. Trending topics are reflected immediately.
+        next: mon_setup
+      - label: "Hybrid: pre-computed candidates + real-time scoring"
+        answer: |
+          I would use a **hybrid architecture**: pre-compute candidate lists in near-real-time, then apply a lightweight real-time scoring model at request time.
+
+          **Near-real-time candidate pipeline (runs every 5-15 minutes per user):**
+          - A **Spark Streaming** or **Flink** job continuously processes new tweets and maintains a **pre-computed candidate pool** per user
+          - For each active user, maintain a pool of ~500 relevant candidates in Redis (in-network recent tweets + out-of-network recommendations)
+          - Pool is refreshed every 5-15 minutes based on new tweets, trending topics, and engagement updates
+          - This amortizes the expensive candidate sourcing over many potential feed requests
+
+          **Request-time scoring (<200ms):**
+          1. **Fetch candidate pool** (~20ms): Read the user's pre-computed 500 candidates from Redis
+          2. **Feature refresh** (~30ms): Update tweet engagement counts (from streaming pipeline) and add session-level features (time of day, device, recent engagement)
+          3. **Lightweight model scoring** (~30ms): Score 500 candidates with a **distilled model** (~500K params) on CPU. This model is distilled from the full ranking model but 10x faster.
+          4. **Post-ranking** (~40ms): Diversity, safety, ad insertion
+          5. Total: ~120ms. Well within the 300ms budget.
+
+          **Advantages over full real-time:**
+          - **Cost**: CPU-based scoring of 500 candidates is 10-20x cheaper than GPU-based scoring of 1,500 candidates
+          - **Reliability**: If the scoring service has a hiccup, serve the pre-ranked candidate list as a fallback
+          - **Efficiency**: Many users open the app multiple times between candidate pipeline refreshes. Avoid redundant candidate sourcing.
+
+          **Freshness trade-off**: Candidates are up to 15 minutes stale. For breaking news, this means a 15-minute delay before the tweet appears. Mitigation: for trending events, trigger an **immediate candidate refresh** for affected users. Also add a "real-time injection" slot that bypasses the candidate pool for extremely trending tweets.
+
+          **Scaling**: At 30K QPS peak with CPU inference (~3ms per request), each CPU instance handles ~300 QPS. Need ~100 instances = ~$50/hour = ~$36K/month. **50x cheaper** than the GPU approach.
+        next: mon_setup
+
+  - id: mon_setup
+    stage: monitoring
+    type: info
+    label: "Monitoring & Evaluation"
+    speaker: interviewer
+    content: |
+      Let's discuss monitoring for the Twitter/X feed.
+
+      **Real-time dashboards:**
+      - **Engagement metrics**: Like rate, retweet rate, reply rate, dwell time - all tracked at **5-minute granularity**. The feed changes constantly; hourly metrics are too slow.
+      - **Content mix**: Fraction of in-network vs out-of-network content shown, topic distribution, content type distribution (text/image/video/link)
+      - **Feed health**: Average toxicity score of shown tweets, misinformation flag rate, report rate, mute/block rate
+      - **Infrastructure**: Inference latency p50/p95/p99, feature store staleness, cache hit rate, error rate
+
+      **Anomaly detection (automated):**
+      - Engagement drop >5% vs same hour yesterday -> immediate alert
+      - Report rate spike >20% -> pause latest model rollout, investigate
+      - Feed loading time p95 >500ms -> page infrastructure on-call
+      - Any single tweet shown to >10% of users -> investigate (potential model collapse or bug)
+
+      **A/B testing:**
+      - Every change A/B tested for **1-2 weeks** (Twitter has enough traffic for quick statistical power)
+      - Primary: Quality-weighted engagement per user per day
+      - Guardrails: Raw engagement (must not drop >3%), negative feedback rate, DAU, ad revenue
+      - **Interleaving for ranking experiments**: Alternate tweets from two models in the same feed for faster signal (2-3 days vs 2 weeks)
+
+      **Content-specific monitoring:**
+      - **Breaking news response time**: How quickly do trending event tweets appear in user feeds? Target: <5 minutes for top trending topics.
+      - **Political content balance**: Monitor exposure to different political viewpoints. Alert if any user segment shows >80% single-viewpoint exposure.
+      - **Creator economy health**: Track impression distribution across content creators. Ensure new creators get some minimum visibility.
+
+      **Long-term evaluation:**
+      - **90-day retention cohort analysis**: Compare retention for users exposed to different model versions
+      - **Platform health index**: Composite score of engagement, content diversity, user satisfaction (surveys), and safety metrics. Track quarterly.
+
+      Let's wrap up.
+    dialogue:
+      - speaker: interviewer
+        text: "Monitoring at 5-minute granularity is essential for a platform where content changes by the minute. Automated anomaly detection triggers alerts for engagement drops, report spikes, and latency issues."
+      - speaker: candidate
+        text: "The political content balance monitoring is important - it's a unique concern for a news-heavy platform."
+      - speaker: interviewer
+        text: "Right. Twitter/X has faced major criticism about algorithmic amplification of political content. Monitoring viewpoint diversity is both an ethical and business necessity."
+      - speaker: candidate
+        text: "The breaking news response time metric is also Twitter-specific - it needs to be measured in minutes."
+      - speaker: interviewer
+        text: "Exactly. Let's summarize the full design."
+    next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Design Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You have designed a comprehensive personalized news feed for a platform like Twitter/X. Let's summarize.
+
+      **Architecture summary:**
+      - **Feed composition**: ~50% in-network, ~50% out-of-network, with ads interspersed
+      - **Optimization objective**: Multi-action engagement or quality-weighted engagement with negative interaction penalties
+      - **Features**: Graph-based SimClusters embeddings or real-time behavioral features + content understanding
+      - **Model**: Multi-task MaskNet (Twitter's published approach) or Transformer-based contextual ranker
+      - **Serving**: Fully real-time ranking with streaming features or hybrid pre-computed candidates + real-time scoring
+      - **Monitoring**: 5-minute granularity dashboards, content health metrics, political balance monitoring
+
+      **Strengths of your design:**
+      - Addresses Twitter's unique challenges: time-sensitivity, text-heavy content, political content amplification
+      - Clear framework for balancing engagement and platform health
+      - Practical handling of real-time content through streaming feature pipelines
+      - Multi-task prediction enables nuanced value model with both positive and negative signals
+
+      **Key challenges and further considerations:**
+      - **Echo chambers**: How to expose users to diverse viewpoints without reducing engagement
+      - **Misinformation during events**: How to rapidly identify and demote misinformation during breaking news when fact-checks are not yet available
+      - **Algorithmic transparency**: How to explain to users why specific tweets appear in their feed (Twitter's "Why am I seeing this?" feature)
+      - **Power user dynamics**: A small number of high-follower accounts dominate the tweet supply. How to balance their content with smaller creators.
+      - **Multi-language feeds**: Many users are bilingual. How to rank content across languages appropriately.
+
+      This design demonstrates strong understanding of real-time ranking systems, the unique challenges of text-heavy social platforms, and the ethical dimensions of content ranking at scale. Well done!

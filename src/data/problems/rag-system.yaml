@@ -1,0 +1,918 @@
+id: rag-system
+title: "RAG System for Company Documents"
+description: "Design a Retrieval-Augmented Generation (RAG) system for internal company documents."
+companies: ["Google", "Microsoft", "Anthropic"]
+domains: ["NLP", "Ranking/Search", "GenAI"]
+root: pd_start
+
+nodes:
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design a **Retrieval-Augmented Generation (RAG)** system for a large enterprise. The company has ~500,000 internal documents spread across Confluence, Google Drive, SharePoint, and an internal wiki. Employees currently spend an average of **1.9 hours per day** searching for information (McKinsey research).
+
+      The goal is to build a system where employees can ask natural-language questions and get accurate, sourced answers drawn from company documents -- rather than generic LLM responses that may hallucinate.
+
+      **Current pain points:**
+      - Search returns keyword matches, not answers
+      - Knowledge is siloed across teams and tools
+      - New hires take 3-6 months to become productive due to tribal knowledge
+      - Experts get interrupted with repetitive questions
+
+      **Scale:** ~10,000 employees, ~2,000 queries/day expected, documents updated daily. Security is critical -- answers must respect document-level access controls.
+
+      Let's start by scoping the problem.
+    dialogue:
+      - speaker: interviewer
+        text: "Welcome! Today we'll design a RAG system for a large enterprise with 500K internal documents. Employees spend nearly 2 hours daily searching for information."
+      - speaker: candidate
+        text: "That's a significant productivity drain. What types of documents are we dealing with?"
+      - speaker: interviewer
+        text: "A mix of Confluence pages, Google Docs, SharePoint files, PDFs, and an internal wiki. They're updated daily, and we expect about 2,000 queries per day from 10,000 employees."
+      - speaker: candidate
+        text: "Got it. Are there any security requirements around who can see what?"
+      - speaker: interviewer
+        text: "Absolutely -- access control is critical. Answers must only reference documents the querying user has permission to view. Let's start by defining the problem scope."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: info
+    label: "Problem Scope"
+    speaker: candidate
+    content: |
+      Let me clarify the scope. A RAG system has two core components:
+
+      1. **Retrieval** -- Given a user query, find the most relevant document passages from the corpus
+      2. **Generation** -- Given the query plus retrieved passages, generate a natural-language answer with citations
+
+      **Key scoping decisions:**
+      - **Query types**: Factual lookups ("What is our PTO policy?"), procedural ("How do I request a new laptop?"), analytical ("What were Q3 revenue trends?"), and code-related ("How does the auth service handle OAuth?")
+      - **Response format**: Concise answers (1-3 paragraphs) with inline citations linking back to source documents
+      - **Freshness**: Documents updated within the last 24 hours should be searchable
+      - **Languages**: English-only for V1, with multilingual support planned for V2
+      - **Access control**: Row-level security -- the retrieval layer must filter results based on the user's document permissions
+
+      This is fundamentally a **search + generation** problem. The retrieval quality is the bottleneck -- even the best LLM produces poor answers if fed irrelevant context.
+    dialogue:
+      - speaker: candidate
+        text: "Let me break this into two core components: retrieval to find relevant passages, and generation to synthesize an answer with citations."
+      - speaker: interviewer
+        text: "Good framing. What types of queries should we support?"
+      - speaker: candidate
+        text: "We should handle factual lookups, procedural questions, analytical queries, and code-related questions. For V1, English only with multilingual planned for V2."
+      - speaker: interviewer
+        text: "What about freshness requirements?"
+      - speaker: candidate
+        text: "Documents updated within 24 hours should be searchable. And critically, retrieval must respect document-level access controls -- we can't leak confidential information."
+    next: met_question
+
+  - id: met_question
+    stage: metrics
+    type: question
+    label: "Evaluation Metrics"
+    speaker: interviewer
+    content: |
+      How would you evaluate the quality of this RAG system? What metrics would you prioritize?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you evaluate the quality of this RAG system? What metrics matter most?"
+      - speaker: candidate
+        text: "There are several dimensions to evaluate -- retrieval quality, generation quality, and end-to-end user experience. Let me think about which to prioritize."
+      - speaker: interviewer
+        text: "Walk me through your thinking on trade-offs between these dimensions."
+    choices:
+      - label: "Retrieval quality first (Recall@K, MRR)"
+        answer: |
+          I'd prioritize **retrieval quality** as the primary metric because it's the foundation -- if retrieval fails, generation cannot succeed regardless of the LLM's quality.
+
+          **Primary metrics:**
+          - **Recall@K (K=10)**: What fraction of relevant documents appear in the top 10 retrieved passages? Target: >0.85. This measures whether the answer *could* be generated from the retrieved context.
+          - **MRR (Mean Reciprocal Rank)**: Where does the first relevant document appear in the ranked list? MRR of 0.7 means the relevant doc is typically in positions 1-2. Higher MRR means less wasted context window.
+          - **Precision@K**: What fraction of the top K results are actually relevant? Precision matters because LLMs can be confused by irrelevant passages injected into the context.
+
+          **Secondary metrics:**
+          - **Answer correctness** (human eval, 1-5 scale): Does the final answer correctly address the question?
+          - **Faithfulness**: Does the answer only use information from retrieved passages, or does it hallucinate?
+          - **Citation accuracy**: Do the inline citations actually support the claims they're attached to?
+
+          **Evaluation approach**: Build a golden dataset of 500+ question-answer-source triples. Use this for offline evaluation during development. For production, collect user feedback (thumbs up/down, "was this helpful?") and track answer acceptance rate.
+
+          The key insight is that improving Recall@10 from 0.70 to 0.90 typically improves answer correctness more than switching from GPT-3.5 to GPT-4.
+        next: met_retrieval_detail
+      - label: "End-to-end answer quality (correctness, faithfulness)"
+        answer: |
+          I'd prioritize **end-to-end answer quality** because that's what users actually experience. The best retrieval is useless if the generated answer is wrong or unhelpful.
+
+          **Primary metrics:**
+          - **Answer correctness** (human-evaluated, binary or 1-5 scale): Does the answer correctly and completely address the user's question? This is the ground truth metric. Target: >80% of answers rated correct.
+          - **Faithfulness / Groundedness**: Does every claim in the answer have support in the retrieved passages? Use an LLM-as-judge (e.g., GPT-4 evaluating whether answer claims are entailed by context). Target: >95% faithfulness. Hallucination is the top risk in enterprise RAG.
+          - **Citation precision**: When the answer cites a source, is that source actually relevant? Users lose trust quickly if citations don't match.
+
+          **Secondary metrics:**
+          - **Retrieval Recall@10**: Track this to diagnose failures -- if answer quality drops, is it a retrieval or generation problem?
+          - **User satisfaction**: Thumbs up/down on answers, weekly NPS surveys
+          - **Task completion rate**: Did the user find what they needed without asking a follow-up or escalating to a human?
+
+          **Automated evaluation pipeline**: Use RAGAS framework (Retrieval Augmented Generation Assessment) which computes faithfulness, answer relevancy, and context precision automatically using LLM judges. Run this nightly on a sample of production queries.
+
+          The advantage of end-to-end metrics is they capture the full pipeline, including cases where retrieval was imperfect but the LLM still produced a correct answer, or where retrieval was perfect but the LLM failed.
+        next: met_e2e_detail
+
+  - id: met_retrieval_detail
+    stage: metrics
+    type: info
+    label: "Retrieval Metrics Deep Dive"
+    speaker: interviewer
+    content: |
+      Good choice prioritizing retrieval. Let me add some important nuances.
+
+      **Building the evaluation dataset** is itself a challenge. You'll need:
+      - **Query diversity**: Cover factual, procedural, analytical, and code queries
+      - **Relevance judgments**: For each query, annotate which documents/passages are relevant (binary or graded relevance). This requires domain experts, not just annotators.
+      - **Negative mining**: Include hard negatives -- documents that are topically related but don't answer the question
+
+      **Metrics to track at different levels:**
+      - **Chunk-level**: Recall@K, Precision@K, nDCG@K for retrieved chunks
+      - **Document-level**: Did we retrieve from the correct source document?
+      - **Latency**: P50 and P99 retrieval latency. Target: P99 <500ms for retrieval, <3s end-to-end including generation.
+
+      **Online metrics:**
+      - Query-to-answer rate (% of queries that get an answer vs "I don't know")
+      - Reformulation rate (user rephrasing = first answer was poor)
+      - Click-through on cited sources (users verifying the answer)
+
+      Now let's talk about the data pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "Good choice. Building the evaluation dataset is itself a challenge. You need query diversity, expert relevance judgments, and hard negatives."
+      - speaker: candidate
+        text: "For hard negatives, I'd include documents that share keywords or topics but don't actually answer the question. These test whether the retriever understands semantics."
+      - speaker: interviewer
+        text: "Exactly. You should also track online metrics like reformulation rate -- if users keep rephrasing, the first answer was likely poor. Let's move to the data pipeline."
+    next: data_pipeline
+
+  - id: met_e2e_detail
+    stage: metrics
+    type: info
+    label: "End-to-End Metrics Deep Dive"
+    speaker: interviewer
+    content: |
+      Good approach focusing on end-to-end quality. Let me elaborate on the evaluation framework.
+
+      **RAGAS (Retrieval Augmented Generation Assessment)** is the industry-standard framework. It computes:
+      - **Faithfulness**: Breaks the answer into claims, checks each against retrieved context. Score 0-1.
+      - **Answer Relevancy**: Is the answer relevant to the question? Uses cosine similarity of question and answer embeddings.
+      - **Context Precision**: Are the top-ranked retrieved passages actually useful for answering?
+      - **Context Recall**: Does the retrieved context contain all information needed to answer?
+
+      **Human evaluation protocol:**
+      - Sample 100 queries/week from production traffic
+      - Three annotators rate each answer on correctness (1-5), completeness (1-5), and hallucination (yes/no)
+      - Inter-annotator agreement (Cohen's kappa) should exceed 0.7
+      - Cost: ~$2-5 per annotated query using contract annotators
+
+      **LLM-as-judge is powerful but has biases:**
+      - GPT-4 tends to prefer longer, more verbose answers
+      - It may miss domain-specific errors (e.g., wrong internal project name)
+      - Use it for scale but calibrate against human eval quarterly
+
+      Let's move on to the data pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "RAGAS is the industry standard for automated RAG evaluation. It computes faithfulness, answer relevancy, context precision, and context recall."
+      - speaker: candidate
+        text: "I'd combine automated RAGAS evaluation running nightly with human evaluation on a weekly sample. The humans catch domain-specific errors the LLM judge misses."
+      - speaker: interviewer
+        text: "Smart approach. LLM-as-judge has known biases -- it prefers verbose answers and may miss domain errors. Calibrate against human eval quarterly. Let's move to data."
+    next: data_pipeline
+
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Ingestion Pipeline"
+    speaker: candidate
+    content: |
+      The data pipeline is the backbone of any RAG system. Here's how I'd architect it:
+
+      **Document ingestion:**
+      - **Connectors**: Build source-specific connectors for Confluence (REST API), Google Drive (Drive API), SharePoint (Graph API), and the internal wiki. Tools like **Unstructured.io** or **LlamaIndex** provide pre-built connectors.
+      - **Format handling**: Parse PDFs (PyMuPDF), DOCX (python-docx), HTML (BeautifulSoup), Markdown, and code files. Tables and images need special handling -- extract table data as structured text, use OCR or vision models for images.
+      - **Metadata extraction**: Title, author, last-modified date, team/department, access permissions, document type, tags.
+
+      **Chunking strategy** (critical decision):
+      - Split documents into passages of 256-512 tokens with 50-token overlap
+      - Respect natural boundaries: paragraphs, sections, code blocks
+      - Attach parent document metadata to each chunk for filtering and citation
+      - A 500K document corpus with average 5 pages each produces ~5-10 million chunks
+
+      **Incremental updates:**
+      - **Change detection**: Poll source APIs every 4 hours for modified documents (using last-modified timestamps or webhooks where available)
+      - **Delta processing**: Only re-chunk and re-embed modified documents, not the full corpus
+      - **Deletion handling**: Mark deleted document chunks as inactive; purge after 30 days
+
+      **Access control sync:**
+      - Mirror source system permissions into a metadata field on each chunk
+      - When Confluence page permissions change, propagate to all associated chunks within 1 hour
+      - At query time, filter retrieved chunks by the querying user's access groups
+    dialogue:
+      - speaker: candidate
+        text: "The data pipeline needs connectors for each source -- Confluence, Google Drive, SharePoint, and the wiki. I'd use tools like Unstructured.io for parsing diverse formats."
+      - speaker: interviewer
+        text: "How would you handle chunking? That's often the most impactful decision in RAG."
+      - speaker: candidate
+        text: "I'd split into 256-512 token chunks with 50-token overlap, respecting natural boundaries like paragraphs and code blocks. A 500K document corpus produces roughly 5-10 million chunks."
+      - speaker: interviewer
+        text: "What about keeping the index fresh as documents change?"
+      - speaker: candidate
+        text: "Incremental updates -- poll source APIs every 4 hours, only re-process changed documents. And crucially, sync access control metadata so we never leak unauthorized content."
+    next: feat_question
+
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Retrieval Strategy"
+    speaker: interviewer
+    content: |
+      Now let's discuss the retrieval strategy. How would you retrieve relevant passages for a given query?
+    dialogue:
+      - speaker: interviewer
+        text: "Now for the core retrieval strategy. How would you find the most relevant passages for a user query?"
+      - speaker: candidate
+        text: "There are several approaches, each with different trade-offs between semantic understanding, speed, and accuracy."
+      - speaker: interviewer
+        text: "Walk me through the options and which you'd recommend."
+    choices:
+      - label: "Dense vector search (embeddings + ANN)"
+        answer: |
+          I'd use **dense vector retrieval** as the primary search method.
+
+          **How it works**: Encode both queries and document chunks into dense vectors using an embedding model, then find the most similar vectors using approximate nearest neighbor (ANN) search.
+
+          **Embedding model selection:**
+          - **OpenAI text-embedding-3-large** (3072 dims, ~$0.13/M tokens): Best off-the-shelf quality, but requires sending data to external API -- potential privacy concern for internal docs
+          - **Cohere embed-v3** (1024 dims): Strong multilingual support, deployable on-prem
+          - **BGE-large** or **E5-large-v2** (1024 dims): Open-source, self-hosted, no data leaves your infrastructure. Performance within 5% of commercial models on MTEB benchmark
+
+          For an enterprise with sensitive documents, I'd recommend **self-hosted E5-large-v2** or **BGE-large** to keep data on-premises.
+
+          **Vector store**: Use **Pinecone** (managed, scales to billions of vectors), **Weaviate** (open-source, supports hybrid search), or **pgvector** (if already on PostgreSQL -- simpler ops). For 10M chunks with 1024-dim vectors, storage is ~40GB.
+
+          **ANN algorithm**: HNSW (Hierarchical Navigable Small World) provides sub-millisecond search at >95% recall. Configure ef_search=100 for a good speed-accuracy trade-off.
+
+          **Advantages**: Captures semantic similarity ("PTO policy" matches "vacation days"), handles paraphrases naturally, works well for fuzzy/conceptual queries.
+
+          **Limitations**: Can miss exact keyword matches (product names, error codes), requires GPU for embedding at scale, and embedding quality degrades for domain-specific jargon without fine-tuning.
+        next: feat_dense_detail
+      - label: "Hybrid search (dense vectors + sparse BM25)"
+        answer: |
+          I'd use **hybrid search** combining dense vector retrieval with sparse keyword search (BM25). This is the industry best practice for production RAG systems.
+
+          **Why hybrid?** Dense and sparse retrieval have complementary strengths:
+          - **Dense (embeddings)**: Understands semantics and paraphrases. "How do I take time off?" matches documents about "PTO policy" and "vacation request procedures."
+          - **Sparse (BM25)**: Excels at exact matches for specific terms. "Error code AUTH-403 in the payment-service" needs exact keyword matching, not semantic similarity.
+
+          **Architecture:**
+          1. **BM25 index**: Use Elasticsearch or OpenSearch. Index all chunks with full-text search. Fast, battle-tested, handles exact matches perfectly.
+          2. **Vector index**: Use Pinecone, Weaviate, or Qdrant. Embed chunks with BGE-large or E5-large-v2 (self-hosted for data privacy). HNSW index for sub-millisecond ANN search.
+          3. **Score fusion**: For each query, retrieve top-20 from both systems. Combine using **Reciprocal Rank Fusion (RRF)**: `score(d) = sum(1 / (k + rank_i(d)))` across retrieval methods. RRF is parameter-free and consistently outperforms simple score averaging.
+
+          **Weaviate** and **Qdrant** natively support hybrid search in a single system, simplifying the architecture. Alternatively, use Elasticsearch 8+ which has built-in vector search alongside BM25.
+
+          **Research backing**: Hybrid search consistently outperforms either method alone. Microsoft's study on RAG showed hybrid retrieval improved answer quality by 15-20% over dense-only on enterprise document sets. Google's REALM and Meta's Atlas both use hybrid approaches.
+        next: feat_hybrid_detail
+      - label: "Multi-stage retrieval (sparse recall + dense reranking)"
+        answer: |
+          I'd use a **multi-stage retrieval pipeline**: broad recall with sparse search, then precision reranking with a cross-encoder.
+
+          **Stage 1 -- Broad recall (BM25):**
+          - Retrieve top-100 candidate chunks using Elasticsearch BM25
+          - Fast (~10ms), high recall, catches exact keyword matches
+          - This is the "cast a wide net" phase -- we tolerate low precision here
+
+          **Stage 2 -- Reranking (cross-encoder):**
+          - Pass all 100 candidates through a cross-encoder reranker like **Cohere Rerank** (~$1/1000 queries), **BGE-reranker-v2-m3** (open-source), or **ColBERT v2**
+          - Cross-encoders jointly encode (query, passage) pairs and are much more accurate than bi-encoder similarity, but too slow for full-corpus search
+          - Reranking 100 passages takes ~50-100ms on GPU
+          - Select top-5 after reranking
+
+          **Why this approach?**
+          - BM25 is extremely fast and has near-perfect recall for keyword-heavy queries
+          - Cross-encoder reranking dramatically improves precision. Research shows reranking improves nDCG@10 by 20-30% over bi-encoder retrieval alone (Nogueira et al., 2020)
+          - This is the architecture Google uses internally -- broad retrieval followed by neural reranking
+
+          **Trade-off**: Requires maintaining both a search index and a reranking model. The reranking step adds 50-100ms latency. But the quality improvement is substantial.
+
+          **Optional Stage 3 -- Query expansion**: Before Stage 1, use the LLM to reformulate the query (e.g., expand acronyms, generate hypothetical document text with HyDE). This improves recall at Stage 1.
+        next: feat_rerank_detail
+
+  - id: feat_dense_detail
+    stage: features
+    type: info
+    label: "Dense Retrieval Details"
+    speaker: interviewer
+    content: |
+      Good approach. Let me add practical considerations for dense retrieval.
+
+      **Embedding at scale:**
+      - 10M chunks x 512 tokens each = 5B tokens to embed
+      - At ~1000 tokens/second per GPU (batch processing), this takes ~1.4 hours on a single A100
+      - Cost: ~$650 one-time using OpenAI embeddings, or ~$5 in GPU compute if self-hosted
+      - Incremental: Only re-embed changed chunks (~0.5% daily = 50K chunks, trivial cost)
+
+      **Query-time optimization:**
+      - Apply **metadata pre-filtering** before vector search: filter by user's access groups, document type, date range
+      - Use **query routing**: classify the query type (factual vs analytical vs code) and adjust retrieval parameters accordingly
+      - Consider **contextual compression**: after retrieval, use an LLM to extract only the relevant sentences from each chunk, reducing context length
+
+      **Improving dense retrieval quality:**
+      - **Fine-tune embeddings** on your domain data using contrastive learning (query, relevant_passage, irrelevant_passage triples). Even 1000 labeled pairs significantly improve domain-specific retrieval.
+      - **Matryoshka embeddings**: Models like E5-large support variable-dimension outputs. Use 256-dim for fast initial retrieval, full 1024-dim for reranking.
+
+      Let's discuss the model architecture for answer generation.
+    dialogue:
+      - speaker: interviewer
+        text: "Embedding 10 million chunks takes about 1.4 hours on a single A100, or costs about $650 with OpenAI. Incremental re-embedding is trivial."
+      - speaker: candidate
+        text: "For query-time optimization, I'd apply metadata pre-filtering to enforce access controls before vector search, and use query routing to handle different query types."
+      - speaker: interviewer
+        text: "Good. Fine-tuning embeddings on domain data is also important. Even 1000 labeled pairs significantly improve retrieval for your specific document corpus."
+    next: mod_question
+
+  - id: feat_hybrid_detail
+    stage: features
+    type: info
+    label: "Hybrid Search Details"
+    speaker: interviewer
+    content: |
+      Excellent choice. Hybrid search is the production standard. Here are practical details:
+
+      **Reciprocal Rank Fusion (RRF) tuning:**
+      - `score(d) = sum(1 / (k + rank_i(d)))` where k=60 is the standard default
+      - RRF is robust and rarely needs tuning, but you can A/B test k values (20-100)
+      - Alternative: Learn weights for each retrieval method using a small labeled dataset. Typical finding: 60% weight on dense, 40% on BM25
+
+      **Query analysis for routing:**
+      - **Keyword-heavy queries** (error codes, product names): Boost BM25 weight to 70%
+      - **Semantic/conceptual queries** ("how does X work?"): Boost dense weight to 80%
+      - **Mixed queries**: Use default 50/50 split
+      - A simple classifier (or regex patterns) can route queries to the optimal blend
+
+      **Practical architecture with Weaviate:**
+      ```
+      Weaviate collection "chunks":
+        - text: string (BM25-indexed)
+        - vector: float[1024] (HNSW-indexed)
+        - metadata: {doc_id, title, author, team, access_groups[], last_modified}
+        - Hybrid query: alpha=0.5 (balance dense/sparse), limit=10
+      ```
+
+      **Adding a reranker on top (recommended):**
+      - After hybrid retrieval of top-20, apply a cross-encoder reranker (Cohere Rerank or BGE-reranker) to re-sort and select top-5
+      - This "hybrid + rerank" pipeline is the current state-of-the-art
+
+      Let's discuss the generation model.
+    dialogue:
+      - speaker: interviewer
+        text: "RRF with k=60 is the standard default and rarely needs tuning. You can optionally learn retrieval weights from labeled data."
+      - speaker: candidate
+        text: "I'd also add query routing -- keyword-heavy queries get more BM25 weight, conceptual queries get more dense weight. A simple classifier can handle this."
+      - speaker: interviewer
+        text: "Smart. For best results, add a cross-encoder reranker on top of hybrid retrieval. The hybrid + rerank pipeline is current state-of-the-art. Let's discuss generation."
+    next: mod_question
+
+  - id: feat_rerank_detail
+    stage: features
+    type: info
+    label: "Multi-Stage Retrieval Details"
+    speaker: interviewer
+    content: |
+      Strong architecture choice. Multi-stage retrieval is battle-tested at search companies. Here are implementation details:
+
+      **Reranker model comparison:**
+      | Model | Latency (100 docs) | Quality (nDCG@10) | Cost |
+      |-------|-------------------|-------------------|------|
+      | Cohere Rerank v3 | ~80ms | 0.72 | $1/1K queries |
+      | BGE-reranker-v2-m3 | ~100ms (GPU) | 0.70 | Self-hosted |
+      | ColBERT v2 | ~30ms | 0.68 | Self-hosted |
+      | GPT-4 as reranker | ~2s | 0.74 | ~$0.05/query |
+
+      For enterprise with data privacy needs, **BGE-reranker-v2-m3** self-hosted is the sweet spot.
+
+      **HyDE (Hypothetical Document Embeddings) for query expansion:**
+      - Ask the LLM to generate a hypothetical document that would answer the query
+      - Embed that hypothetical document and search for similar real documents
+      - Dramatically improves recall for complex/abstract queries
+      - Adds ~500ms latency (one LLM call before retrieval)
+
+      **Caching for repeated queries:**
+      - Cache (query_hash -> retrieved_chunks) with 1-hour TTL
+      - ~30% of enterprise queries are repeated (same question from different users)
+      - Reduces both latency and compute cost
+
+      Now let's discuss the generation model.
+    dialogue:
+      - speaker: interviewer
+        text: "For enterprise with data privacy needs, BGE-reranker self-hosted is the sweet spot -- good quality without sending data externally."
+      - speaker: candidate
+        text: "I'd also implement HyDE for query expansion on complex queries. The LLM generates a hypothetical answer document, which we then use to search for similar real passages."
+      - speaker: interviewer
+        text: "HyDE adds latency but significantly improves recall for abstract queries. Caching repeated queries is also valuable -- about 30% of enterprise queries are repeats."
+    next: mod_question
+
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Generation Model Selection"
+    speaker: interviewer
+    content: |
+      Now for the generation component. Which LLM would you use to generate answers from retrieved context, and how would you architect the generation pipeline?
+    dialogue:
+      - speaker: interviewer
+        text: "Let's discuss the generation component. Which LLM would you use and how would you architect the generation pipeline?"
+      - speaker: candidate
+        text: "This is a critical decision with trade-offs between quality, cost, latency, and data privacy."
+      - speaker: interviewer
+        text: "Walk me through your thinking."
+    choices:
+      - label: "Cloud LLM API (GPT-4o / Claude)"
+        answer: |
+          I'd use a **cloud-hosted LLM** -- specifically **GPT-4o** or **Claude 3.5 Sonnet** -- for the generation component.
+
+          **Why cloud LLM?**
+          - **Quality**: GPT-4o and Claude 3.5 Sonnet are the strongest models for instruction-following, reasoning over long context, and producing well-structured answers with citations. For enterprise RAG where answer quality is paramount, these models significantly outperform smaller alternatives.
+          - **Context window**: GPT-4o supports 128K tokens, Claude supports 200K tokens. This allows stuffing 10-20 retrieved passages (each 512 tokens) with plenty of room for the system prompt and conversation history.
+          - **Cost**: At ~$5/M input tokens and ~$15/M output tokens (GPT-4o), with average query using ~3K input + ~500 output tokens, cost is ~$0.02/query. At 2,000 queries/day = ~$40/day = ~$1,200/month. Very reasonable.
+          - **Latency**: Time-to-first-token ~200ms, full response streaming in 2-3 seconds.
+
+          **Generation prompt engineering:**
+          ```
+          System: You are an internal knowledge assistant. Answer questions
+          using ONLY the provided context. Cite sources using [1], [2] format.
+          If the context doesn't contain the answer, say "I don't have enough
+          information to answer this." Never make up information.
+
+          Context:
+          [1] {chunk_1_text} (Source: {doc_title}, {doc_url})
+          [2] {chunk_2_text} (Source: {doc_title}, {doc_url})
+          ...
+
+          User: {query}
+          ```
+
+          **Data privacy concern**: You're sending internal documents to an external API. Mitigate by: using Azure OpenAI (data stays in your Azure tenant, not used for training), signing a BAA/DPA with the provider, only sending retrieved chunks (not the full corpus).
+        next: mod_cloud_detail
+      - label: "Self-hosted open-source LLM (Llama 3, Mistral)"
+        answer: |
+          I'd use a **self-hosted open-source LLM** to keep all data on-premises and eliminate per-query API costs.
+
+          **Model selection:**
+          - **Llama 3.1 70B**: Best open-source model for RAG. Strong instruction-following, 128K context window, and competitive with GPT-4 on many benchmarks. Requires 2x A100 80GB GPUs for inference.
+          - **Mistral Large 2 (123B)**: Excellent for enterprise use cases, strong at structured outputs and citations. Requires 4x A100 GPUs.
+          - **Qwen 2.5 32B**: Great quality-to-size ratio. Runs on a single A100 with 4-bit quantization. Good for cost-sensitive deployments.
+
+          **Serving infrastructure:**
+          - Use **vLLM** for efficient inference. PagedAttention achieves 2-4x throughput vs naive serving. Continuous batching handles concurrent requests efficiently.
+          - Hardware: 2x NVIDIA A100 80GB for Llama 3.1 70B (4-bit quantized). Cost: ~$3/hour on AWS (p4d.24xlarge) = ~$2,200/month.
+          - Latency: Time-to-first-token ~100ms, ~30 tokens/second throughput per user.
+
+          **Advantages:**
+          - **Complete data privacy**: No internal documents leave your infrastructure
+          - **No per-query cost**: Fixed infrastructure cost regardless of query volume
+          - **Customization**: Can fine-tune on your domain data for better performance
+          - **No vendor lock-in**: Switch models freely as open-source improves
+
+          **Trade-offs:** Requires ML ops expertise to maintain GPU infrastructure, model updates require manual deployment, quality gap vs frontier commercial models (narrowing rapidly).
+        next: mod_selfhost_detail
+
+  - id: mod_cloud_detail
+    stage: model
+    type: info
+    label: "Cloud LLM Architecture"
+    speaker: interviewer
+    content: |
+      Good reasoning. Let me add architectural details for cloud LLM integration.
+
+      **Structured output for citations:**
+      - Use GPT-4o's **structured output mode** (JSON schema) to force the response into a format like:
+        ```json
+        {
+          "answer": "The PTO policy allows...",
+          "citations": [{"text": "...", "source_id": 1, "doc_url": "..."}],
+          "confidence": "high"
+        }
+        ```
+      - This ensures reliable citation parsing vs regex-extracting `[1]` markers from free text
+
+      **Guardrails:**
+      - **Input validation**: Check query length (<500 tokens), filter PII from queries before logging
+      - **Output validation**: Verify all citations reference actual retrieved passages. Reject answers that reference sources not in the context (hallucinated citations).
+      - **Content filtering**: Apply the LLM's built-in safety filters plus custom rules for your domain
+
+      **Cost optimization:**
+      - **Prompt caching**: OpenAI and Anthropic both offer prompt caching -- the system prompt and retrieved context can be cached across similar queries, reducing input costs by 50-90%
+      - **Tiered models**: Route simple factual queries to GPT-4o-mini (~$0.15/M input tokens, 10x cheaper) and complex analytical queries to GPT-4o. A classifier can route based on query complexity.
+      - **Streaming**: Stream the response token-by-token for perceived latency improvement
+
+      Let's discuss training and fine-tuning strategies.
+    dialogue:
+      - speaker: interviewer
+        text: "Use structured output mode to force reliable citation formatting. Also implement guardrails -- verify all citations reference actual retrieved passages."
+      - speaker: candidate
+        text: "For cost optimization, I'd use prompt caching to reduce input costs by 50-90%, and route simple queries to a cheaper model like GPT-4o-mini."
+      - speaker: interviewer
+        text: "Exactly. Tiered model routing is standard practice. Let's move to training considerations."
+    next: train_strategy
+
+  - id: mod_selfhost_detail
+    stage: model
+    type: info
+    label: "Self-Hosted LLM Architecture"
+    speaker: interviewer
+    content: |
+      Smart choice for data-sensitive environments. Here are implementation details.
+
+      **vLLM deployment architecture:**
+      ```
+      Load Balancer (nginx)
+        -> vLLM Instance 1 (A100 GPU, Llama 3.1 70B-4bit)
+        -> vLLM Instance 2 (A100 GPU, Llama 3.1 70B-4bit)
+        -> Health check + auto-restart
+      ```
+      - **Quantization**: AWQ 4-bit quantization reduces memory from 140GB to ~40GB with <1% quality loss. Fits on single A100 80GB.
+      - **Continuous batching**: vLLM batches concurrent requests, achieving ~500 tokens/second aggregate throughput
+      - **KV cache management**: PagedAttention dynamically allocates GPU memory for KV caches, preventing OOM with long contexts
+
+      **Fine-tuning for your domain (recommended):**
+      - Collect 1000+ (query, retrieved_context, ideal_answer) triples from expert users
+      - Fine-tune using **LoRA** (Low-Rank Adaptation) -- trains in hours on a single GPU, adds <1% parameters
+      - Focus training on: citation formatting, "I don't know" responses, domain terminology
+      - Quality improvement: 10-20% better faithfulness vs base model
+
+      **Fallback strategy:**
+      - If self-hosted model is down or overloaded, fall back to a cloud API (with user consent for data sensitivity)
+      - Monitor GPU utilization -- auto-scale if queue depth exceeds threshold
+
+      Let's discuss training and optimization strategies.
+    dialogue:
+      - speaker: interviewer
+        text: "vLLM with AWQ 4-bit quantization fits Llama 3.1 70B on a single A100 with less than 1% quality loss."
+      - speaker: candidate
+        text: "I'd also fine-tune with LoRA on domain-specific data -- especially for citation formatting and knowing when to say 'I don't know.' Even 1000 training examples make a significant difference."
+      - speaker: interviewer
+        text: "Good. Also plan a fallback to cloud API for high-availability scenarios. Let's discuss training strategies."
+    next: train_strategy
+
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training & Optimization"
+    speaker: candidate
+    content: |
+      Training in a RAG system spans multiple components. Here's my strategy:
+
+      **1. Embedding model fine-tuning:**
+      - Collect positive pairs from user click data: (query, clicked_document_chunk)
+      - Generate hard negatives: chunks from the same topic/team but wrong answer
+      - Train using **contrastive loss** (InfoNCE) with in-batch negatives
+      - Dataset: 5,000-10,000 pairs is sufficient. Collect organically from production usage.
+      - Expected improvement: 10-15% better Recall@10 on domain-specific queries
+
+      **2. Reranker training (if using reranking):**
+      - Fine-tune a cross-encoder on (query, passage, relevance_label) triples
+      - Labels from expert annotations or implicit feedback (user clicked citation = relevant)
+      - Much smaller dataset needed: 1,000-2,000 labeled pairs
+
+      **3. LLM fine-tuning (LoRA for self-hosted, or custom model for cloud):**
+      - Create supervised fine-tuning data: (system_prompt + context + query -> ideal_answer)
+      - Focus on failure modes: hallucination reduction, proper citation, appropriate "I don't know"
+      - Use **DPO (Direct Preference Optimization)** with pairs of (good_answer, bad_answer) to teach the model to prefer faithful, concise responses
+      - 1,000-3,000 examples for LoRA fine-tuning, train for 3 epochs
+
+      **4. Prompt optimization:**
+      - Use **DSPy** framework to automatically optimize prompts via few-shot example selection
+      - A/B test prompt variations: instruction phrasing, number of few-shot examples, context ordering (most relevant first vs last)
+
+      **Evaluation during training:**
+      - Hold out 20% of labeled data for validation
+      - Track retrieval metrics (Recall@10, MRR) and generation metrics (faithfulness, correctness) separately
+      - Use the RAGAS framework for automated evaluation after each training iteration
+    dialogue:
+      - speaker: candidate
+        text: "Training spans multiple components: embedding fine-tuning, optional reranker training, LLM fine-tuning with LoRA, and prompt optimization."
+      - speaker: interviewer
+        text: "How much data do you need for each?"
+      - speaker: candidate
+        text: "5-10K pairs for embeddings, 1-2K for the reranker, and 1-3K for LLM fine-tuning. Much of this can be collected organically from production click data."
+      - speaker: interviewer
+        text: "Good. DPO is smart for teaching the model to prefer faithful responses over hallucinated ones. Let's talk deployment."
+      - speaker: candidate
+        text: "I'd also use DSPy to automatically optimize prompts -- it selects the best few-shot examples and instruction phrasings."
+    next: deploy_question
+
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Deployment Architecture"
+    speaker: interviewer
+    content: |
+      How would you architect the production deployment of this RAG system?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you deploy this RAG system in production? Think about the full request flow."
+      - speaker: candidate
+        text: "There are two main approaches -- a synchronous API for real-time Q&A, or an asynchronous pipeline that pre-computes answers."
+      - speaker: interviewer
+        text: "Describe your preferred approach with specifics."
+    choices:
+      - label: "Synchronous API with streaming responses"
+        answer: |
+          I'd deploy as a **synchronous REST/WebSocket API** with streaming token generation.
+
+          **Request flow (target: <3s end-to-end):**
+          1. **Query received** (5ms): Validate input, authenticate user, extract access control groups
+          2. **Query preprocessing** (50ms): Expand acronyms, correct typos, classify query type
+          3. **Retrieval** (100-200ms): Hybrid search + reranking, filtered by user's access groups
+          4. **Context assembly** (10ms): Format retrieved chunks with metadata for the prompt
+          5. **LLM generation** (1-3s): Stream response tokens. First token in ~200ms (cloud) or ~100ms (self-hosted)
+          6. **Post-processing** (10ms): Validate citations, format response, log for analytics
+
+          **Infrastructure:**
+          - **API layer**: FastAPI (Python) on Kubernetes, 4-8 replicas, auto-scaling on CPU/memory
+          - **Vector DB**: Weaviate cluster (3 nodes) or Pinecone (managed)
+          - **Search index**: Elasticsearch cluster (3 nodes) for BM25
+          - **Cache**: Redis for query result caching (1-hour TTL), embedding caching, and rate limiting
+          - **LLM**: Cloud API (GPT-4o via Azure) or self-hosted vLLM on GPU instances
+
+          **Streaming UX:**
+          - Use Server-Sent Events (SSE) or WebSocket to stream tokens to the frontend
+          - Show retrieved sources immediately (before generation starts) so users see citations while the answer streams
+          - Display a "thinking" indicator during the retrieval phase
+
+          **Reliability:**
+          - Circuit breaker on LLM calls (fallback to "sorry, try again" after 3 consecutive failures)
+          - Graceful degradation: if retrieval is slow, return top-3 document links without generated answer
+          - Health checks every 30s on all components
+        next: deploy_sync_detail
+      - label: "Asynchronous pipeline with pre-computed answers"
+        answer: |
+          I'd deploy an **asynchronous pipeline** that pre-computes answers for anticipated questions and serves them from a cache.
+
+          **Architecture:**
+          1. **Hot question detection**: Analyze query logs to identify frequently asked questions. Cluster similar queries using embeddings. In enterprise settings, ~40% of queries are variations of the same 500-1000 questions.
+          2. **Pre-computation pipeline**: For each hot question, run the full RAG pipeline offline and cache the answer with TTL based on source document freshness.
+          3. **Real-time fallback**: For novel queries not in the cache, run the synchronous pipeline (same as the other approach but only for cache misses).
+
+          **Benefits:**
+          - **Latency**: Cached answers served in <50ms vs 2-3s for real-time generation
+          - **Cost**: Pre-computed answers avoid per-query LLM costs for 40%+ of traffic
+          - **Quality**: Can run more expensive models (GPT-4) and more retrieval passes for pre-computed answers
+          - **Consistency**: Same question always gets the same answer (important for policy questions)
+
+          **Cache invalidation:**
+          - When a source document is updated, invalidate all cached answers that cited that document
+          - Run the pre-computation pipeline nightly, plus triggered re-computation on document changes
+          - TTL: 24 hours for policy docs, 4 hours for frequently-updated docs
+
+          **Question clustering:**
+          - Embed all historical queries, cluster with HDBSCAN
+          - For each cluster, select the canonical query and pre-compute the answer
+          - At query time, embed the new query and check if it's within distance threshold of any cluster centroid
+
+          **Hybrid serving**: ~40% served from cache (P99 <100ms), ~60% computed real-time (P99 <4s). Blended P99 <2s.
+        next: deploy_async_detail
+
+  - id: deploy_sync_detail
+    stage: deployment
+    type: info
+    label: "Synchronous Deployment Details"
+    speaker: interviewer
+    content: |
+      Good architecture. Let me add production hardening details.
+
+      **Conversation memory:**
+      - Users often ask follow-up questions: "What about for contractors?" after "What's the PTO policy?"
+      - Maintain a session-level conversation history (last 5 turns) passed to the LLM
+      - Use the LLM to resolve coreferences before retrieval: "What about for contractors?" -> "What is the PTO policy for contractors?"
+
+      **Feedback collection:**
+      - Thumbs up/down on every answer
+      - "Report incorrect answer" with free-text explanation
+      - Track citation clicks (user verifying the answer = engagement signal)
+      - Use feedback to build training data for continuous improvement
+
+      **Access control enforcement:**
+      ```
+      1. User authenticates -> get user's group memberships from LDAP/Okta
+      2. At retrieval time: WHERE access_groups && user_groups (array overlap)
+      3. Post-retrieval audit: verify each retrieved chunk is authorized
+      4. Log all (user, query, retrieved_docs) for compliance auditing
+      ```
+
+      **Rate limiting:**
+      - 20 queries/minute per user (prevent abuse)
+      - 100 queries/minute per department
+      - Graceful degradation at high load: skip reranking, reduce top-K
+
+      Now let's discuss monitoring.
+    dialogue:
+      - speaker: interviewer
+        text: "Don't forget conversation memory for follow-up questions. Use the LLM to resolve coreferences before retrieval."
+      - speaker: candidate
+        text: "Right -- 'What about for contractors?' needs to be resolved to the full question before searching. I'd also collect thumbs up/down feedback and track citation clicks."
+      - speaker: interviewer
+        text: "Access control enforcement needs to happen at retrieval time AND be audited. Rate limiting prevents abuse. Let's move to monitoring."
+    next: mon_question
+
+  - id: deploy_async_detail
+    stage: deployment
+    type: info
+    label: "Async Pipeline Details"
+    speaker: interviewer
+    content: |
+      Interesting approach. The cache-first architecture works well for enterprise Q&A. Some considerations:
+
+      **Cache architecture:**
+      ```
+      Redis (L1 cache, hot queries):
+        key: query_embedding_hash
+        value: {answer, citations, generated_at, source_doc_ids}
+        TTL: 4-24 hours based on document freshness
+
+      PostgreSQL (L2 cache, all pre-computed):
+        question_cluster_id -> {canonical_query, answer, citations, last_updated}
+        Indexed by embedding similarity for fuzzy matching
+      ```
+
+      **Freshness guarantees:**
+      - When a Confluence page is updated, a webhook triggers:
+        1. Re-chunk and re-embed the updated document
+        2. Find all cached answers citing this document (join on source_doc_ids)
+        3. Invalidate those cache entries
+        4. Priority queue: re-compute invalidated answers within 1 hour
+      - Display "Answer generated at {timestamp}" so users know freshness
+
+      **Quality control for pre-computed answers:**
+      - Run RAGAS evaluation on all pre-computed answers
+      - Answers below faithfulness threshold (0.8) are flagged for human review
+      - Maintain a "verified answers" tier for critical policy questions reviewed by subject matter experts
+
+      **Semantic similarity matching for cache hits:**
+      - Don't require exact query match -- use embedding cosine similarity >0.92 as cache hit
+      - This catches paraphrases: "How many vacation days do I get?" matches "What is the PTO allowance?"
+
+      Let's discuss monitoring.
+    dialogue:
+      - speaker: interviewer
+        text: "Use a two-level cache: Redis for hot queries, PostgreSQL for all pre-computed answers. Invalidate when source documents change."
+      - speaker: candidate
+        text: "Semantic similarity matching for cache hits is key -- cosine similarity above 0.92 catches paraphrases like 'vacation days' matching 'PTO allowance.'"
+      - speaker: interviewer
+        text: "Also run RAGAS evaluation on pre-computed answers and flag low-faithfulness ones for human review. Let's discuss monitoring."
+    next: mon_question
+
+  - id: mon_question
+    stage: monitoring
+    type: question
+    label: "Monitoring Strategy"
+    speaker: interviewer
+    content: |
+      How would you monitor this RAG system in production to ensure it stays healthy and improves over time?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you monitor this system in production? RAG systems can degrade silently if you're not watching the right things."
+      - speaker: candidate
+        text: "RAG monitoring needs to cover the full pipeline -- retrieval quality, generation quality, infrastructure health, and user satisfaction."
+      - speaker: interviewer
+        text: "What specific signals would trigger alerts?"
+    choices:
+      - label: "Automated quality monitoring with LLM judges"
+        answer: |
+          I'd implement **automated quality monitoring** using LLM-as-judge evaluation running continuously on production traffic.
+
+          **Real-time quality scoring:**
+          - Sample 10% of production queries (200/day)
+          - For each sampled query, run RAGAS evaluation (faithfulness, answer relevancy, context precision)
+          - Use a separate LLM (e.g., Claude as judge if using GPT-4 for generation, or vice versa) to avoid self-evaluation bias
+          - Store scores in a time-series database (InfluxDB/Prometheus) and dashboard (Grafana)
+
+          **Alert thresholds:**
+          - Faithfulness drops below 0.85 (7-day rolling average) -> **P1 alert** (hallucination risk)
+          - Answer relevancy drops below 0.70 -> **P2 alert** (retrieval degradation)
+          - "I don't know" rate exceeds 30% -> **P2 alert** (coverage gap)
+          - P99 latency exceeds 5 seconds -> **P2 alert** (infrastructure issue)
+
+          **Retrieval quality tracking:**
+          - Log (query, retrieved_chunks, final_answer) for every request
+          - Weekly: sample 50 queries, have domain experts rate retrieval relevance
+          - Track retrieval drift: embedding distribution of queries vs indexed chunks. If they diverge, fine-tune embeddings.
+
+          **Hallucination detection pipeline:**
+          - For each answer, check if every factual claim has support in retrieved context
+          - Flag answers where the LLM judge finds unsupported claims
+          - Route flagged answers to human review queue
+          - Trend: if hallucination rate increases, investigate (usually caused by retrieval quality degradation)
+        next: mon_automated_terminal
+      - label: "User feedback loops and A/B testing"
+        answer: |
+          I'd build a **user-centric monitoring system** centered on feedback loops and controlled experiments.
+
+          **Feedback collection:**
+          - **Explicit**: Thumbs up/down on every answer (target: 20%+ feedback rate). "Was this helpful?" Yes/No.
+          - **Implicit**: Citation click-through (user verifying answer), follow-up query rate (high = first answer was poor), session length (long = struggling to find answer), copy-to-clipboard (positive signal)
+          - **Escalation tracking**: How often do users give up and contact a human expert? This is the ultimate failure signal.
+
+          **Feedback-driven improvement:**
+          - Thumbs-down answers are reviewed weekly by the ML team
+          - Cluster failure modes: retrieval miss (right topic, wrong doc), hallucination, outdated answer, access control issue
+          - Each failure mode has a specific fix: add to training data, update chunking, refresh index, fix permissions sync
+
+          **A/B testing framework:**
+          - Test retrieval changes (chunk size, embedding model, reranker) on 10% of traffic
+          - Primary metric: user satisfaction rate (thumbs up / total feedback)
+          - Secondary: answer correctness (human-evaluated on sample), latency
+          - Minimum 2-week experiment duration, 1000+ queries per variant for statistical power
+
+          **Dashboard KPIs:**
+          - Daily: query volume, satisfaction rate, P50/P99 latency, error rate, "I don't know" rate
+          - Weekly: top-10 unanswered queries (coverage gaps), most-downvoted answers (quality issues)
+          - Monthly: overall answer accuracy trend, retrieval Recall@10 on evaluation set, cost per query
+
+          **Continuous improvement flywheel:**
+          Queries -> Answers -> Feedback -> Training data -> Better model -> Better answers -> More usage
+        next: mon_feedback_terminal
+
+  - id: mon_automated_terminal
+    stage: monitoring
+    type: terminal
+    label: "RAG System Complete (Automated Monitoring)"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive RAG system with automated quality monitoring.
+
+      **Your architecture summary:**
+      - **Retrieval**: Dense vectors / hybrid search / multi-stage retrieval with reranking
+      - **Generation**: Cloud LLM or self-hosted open-source with citation-aware prompting
+      - **Training**: Fine-tuned embeddings, optional reranker training, LLM fine-tuning with LoRA + DPO
+      - **Deployment**: Synchronous streaming API or async pre-computation pipeline
+      - **Monitoring**: LLM-as-judge quality scoring, hallucination detection, automated alerts
+
+      **Strengths of your design:**
+      - Focus on retrieval quality as the foundation
+      - Access control enforcement at every layer
+      - Automated evaluation catches quality degradation before users notice
+      - Clear alert thresholds tied to specific failure modes
+
+      **Areas to explore further:**
+      - **Multi-modal RAG**: Handling diagrams, screenshots, and video content in documents
+      - **Agentic RAG**: For complex queries, use a multi-step agent that decomposes the question, retrieves from multiple sources, and synthesizes
+      - **Evaluation dataset maintenance**: The golden evaluation set needs refreshing as the document corpus evolves
+      - **Cost optimization**: Semantic caching, tiered model routing, and prompt compression (LLMLingua) can reduce costs 50-80%
+
+      This is a strong end-to-end design that demonstrates deep understanding of RAG systems, retrieval architectures, and production ML systems. Great job!
+    dialogue:
+      - speaker: interviewer
+        text: "Excellent work! You've designed a comprehensive RAG system with automated quality monitoring."
+      - speaker: candidate
+        text: "Thank you! The key insight was prioritizing retrieval quality as the foundation -- even the best LLM can't compensate for poor retrieval."
+      - speaker: interviewer
+        text: "Exactly. Your automated evaluation pipeline with LLM judges and hallucination detection shows production maturity. Great job!"
+
+  - id: mon_feedback_terminal
+    stage: monitoring
+    type: terminal
+    label: "RAG System Complete (Feedback Monitoring)"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive RAG system with user-centric monitoring.
+
+      **Your architecture summary:**
+      - **Retrieval**: Dense vectors / hybrid search / multi-stage retrieval with reranking
+      - **Generation**: Cloud LLM or self-hosted open-source with citation-aware prompting
+      - **Training**: Fine-tuned embeddings, optional reranker training, LLM fine-tuning with LoRA + DPO
+      - **Deployment**: Synchronous streaming API or async pre-computation pipeline
+      - **Monitoring**: User feedback loops, A/B testing framework, continuous improvement flywheel
+
+      **Strengths of your design:**
+      - User feedback drives continuous improvement
+      - A/B testing validates changes before full rollout
+      - Failure mode clustering identifies specific areas for improvement
+      - The feedback flywheel creates a virtuous cycle of improvement
+
+      **Areas to explore further:**
+      - **Agentic RAG**: Multi-step agents for complex queries that require reasoning across multiple documents
+      - **Personalization**: Rank results based on user's team, role, and query history
+      - **Multi-turn conversations**: Maintain context across a conversation session for follow-up questions
+      - **Knowledge graph augmentation**: Extract entities and relationships from documents to improve retrieval for relational queries ("Who owns the payments service?")
+
+      This is a well-rounded design that balances technical depth with practical considerations around user experience and continuous improvement. Great job!
+    dialogue:
+      - speaker: interviewer
+        text: "Excellent work! You've designed a comprehensive RAG system with user-centric monitoring."
+      - speaker: candidate
+        text: "Thank you! I believe the continuous improvement flywheel -- queries to feedback to training data to better models -- is what separates good RAG systems from great ones."
+      - speaker: interviewer
+        text: "Well said. Your A/B testing framework and failure mode clustering show a mature approach to production ML. Great job!"

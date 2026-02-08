@@ -1,0 +1,933 @@
+id: podcast-search
+title: "Podcast Search Engine"
+description: "Design a podcast search engine that indexes audio content."
+companies: ["Spotify", "Apple", "Google"]
+domains: ["NLP", "Audio/Speech", "Ranking/Search"]
+root: pd_start
+
+nodes:
+  # ============ PROBLEM DEFINITION ============
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design a **podcast search engine** that indexes and retrieves podcast content based on what is actually spoken in episodes.
+
+      **Business context:**
+      - There are ~**4 million active podcasts** with **~70 million episodes** worldwide
+      - Spotify has **~100M+ monthly podcast listeners** and is investing heavily in podcast discovery
+      - Apple Podcasts indexes **~48 million episodes** across 175+ countries
+      - Current podcast search relies on **metadata only** (title, show name, description) -- users cannot search for specific topics, quotes, or discussions within episodes
+      - **Only ~20% of podcast content** is discoverable through traditional text search because most spoken content isn't indexed
+
+      **Core problem:** Build a search system that lets users find relevant podcast episodes (and specific segments within episodes) based on **what is actually said** in the audio content.
+
+      **Example queries:**
+      - "machine learning interview tips" → Find episodes where hosts discuss ML interviews
+      - "inflation impact on housing market" → Find the specific segment (timestamp) where an economist discusses this topic
+      - "Elon Musk on AI safety" → Find episodes featuring Elon Musk discussing AI risks
+
+      **Key challenges:**
+      - **Audio processing at scale**: Transcribing 70M episodes (~35M hours of audio) requires massive ASR infrastructure
+      - **Spoken language understanding**: Spoken text is messy -- filler words, disfluencies, no punctuation, speaker overlap
+      - **Segment-level retrieval**: Users want timestamps, not just "somewhere in this 2-hour episode"
+      - **Speaker identification**: Who is speaking matters -- an expert discussing a topic is more relevant than casual mention
+      - **Freshness**: ~50,000 new episodes published daily
+    dialogue:
+      - speaker: interviewer
+        text: "Let's design a search engine for podcast content. What makes this uniquely challenging?"
+      - speaker: candidate
+        text: "The biggest challenge is that podcasts are primarily audio. Unlike web pages or videos with titles and descriptions, the actual content is locked inside audio files that need to be transcribed and understood."
+      - speaker: interviewer
+        text: "Good. So the ASR pipeline is critical to everything else."
+      - speaker: candidate
+        text: "Exactly. The quality of our transcription directly determines search quality. A 5% word error rate in ASR translates to meaningful relevance degradation."
+      - speaker: interviewer
+        text: "How does this compare to YouTube's search?"
+    next: pd_formulation
+
+  - id: pd_formulation
+    stage: problem_definition
+    type: question
+    label: "Search Granularity"
+    speaker: interviewer
+    content: |
+      A fundamental design decision: at what **granularity** should we index and retrieve podcast content? This determines the user experience and the system architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "Should we search at the episode level or the segment level?"
+      - speaker: candidate
+        text: "This depends on the user experience we want to deliver. Episode-level is simpler but less useful."
+      - speaker: interviewer
+        text: "What are the implications for the system architecture?"
+    choices:
+      - label: "Episode-level retrieval (simpler, metadata + transcript search)"
+        answer: |
+          I'd start with **episode-level retrieval** that combines metadata and full-episode transcripts:
+
+          **Approach:**
+          - Treat each podcast episode as a "document"
+          - Index: title + show name + description + **full transcript**
+          - Search: Standard text retrieval (BM25 or dense retrieval) over these documents
+          - Results: Ranked list of episodes with relevance snippets
+
+          **Why episode-level?**
+          - **Simpler architecture**: Each episode is one document in the index. Standard search infrastructure works
+          - **Lower compute cost**: Don't need segment detection, topic segmentation, or timestamp mapping
+          - **Matches user mental model**: Users think in terms of "which episode should I listen to?"
+          - **Metadata still matters**: Show name, host, episode title are strong relevance signals even with transcripts
+
+          **Enhancement: Passage highlighting**
+          - While returning episode-level results, highlight the **most relevant passage** from the transcript
+          - Use a passage retrieval model to find the best-matching 30-second segment
+          - Show the passage snippet + approximate timestamp in search results
+          - This gives users segment-level value without full segment indexing
+
+          **Trade-off:**
+          - A 2-hour episode discussing machine learning for 5 minutes will rank alongside a 30-minute episode entirely about ML
+          - No true segment-level search -- users can't jump to the exact moment a topic is discussed
+          - Episode-level ranking is coarser, may not differentiate well between episodes that mention a topic briefly vs. in depth
+
+          **But practical:** This approach can be built and shipped in weeks using existing search infrastructure (Elasticsearch). The full transcript is the killer feature -- it makes 100% of content searchable vs. the current 20% from metadata alone.
+        next: met_question
+      - label: "Segment-level retrieval (richer, with timestamps and topic chunking)"
+        answer: |
+          I'd build **segment-level retrieval** that indexes topic-coherent chunks within episodes:
+
+          **Approach:**
+          1. **Transcribe** each episode using ASR
+          2. **Segment** the transcript into topic-coherent chunks (~2-5 minutes each)
+          3. **Index** each segment as an independent "document" with episode metadata
+          4. **Search** at segment level, return specific timestamps
+          5. **Deduplicate** to avoid showing 5 segments from the same episode
+
+          **Topic segmentation methods:**
+
+          | Method | How It Works | Quality |
+          |--------|-------------|---------|
+          | **Fixed-length chunks** | Split every 3 minutes | Simple but breaks mid-topic |
+          | **Silence-based** | Split at natural pauses (>2s) | Better boundaries, variable length |
+          | **Topic modeling** | TextTiling or LDA-based topic shift detection | Good topic coherence |
+          | **Neural segmentation** | Fine-tuned BERT detects topic boundaries | Best quality, most compute |
+
+          I'd use **neural topic segmentation** for quality:
+          - Fine-tune a BERT model on podcast transcripts labeled with topic boundaries
+          - The model scores each sentence as "topic continuation" or "topic shift"
+          - Segments average ~3 minutes (150-300 words) -- good for both indexing and playback
+
+          **Segment metadata per index entry:**
+          ```
+          {
+            episode_id: "ep_123",
+            segment_id: 5,
+            start_time: "00:14:30",
+            end_time: "00:17:45",
+            transcript: "So when we talk about inflation...",
+            speaker: "Dr. Jane Smith",
+            topic: "economic_policy",
+            embedding: [0.12, -0.34, ...],  // 768-dim
+            episode_title: "The Economy in 2026",
+            show_name: "Planet Money",
+          }
+          ```
+
+          **Why segment-level?**
+          - Users can **jump to the exact moment** a topic is discussed
+          - A 5-minute insightful segment in a 2-hour episode can rank independently (not buried)
+          - Enables **"listen from here"** UX -- play from the relevant timestamp
+          - Better relevance: segment-level BM25/embedding matching is more precise than episode-level
+
+          **Trade-off:** ~20x more index entries (70M episodes * ~20 segments each = ~1.4B segments). More compute for segmentation. But the user experience improvement is substantial.
+        next: met_question
+
+  # ============ METRICS ============
+  - id: met_question
+    stage: metrics
+    type: question
+    label: "Success Metrics"
+    speaker: interviewer
+    content: |
+      How would you measure the quality of podcast search? This is challenging because, unlike web search, the "answer" is inside audio content that users must listen to -- they can't scan results as quickly.
+    dialogue:
+      - speaker: interviewer
+        text: "What metrics capture podcast search quality?"
+      - speaker: candidate
+        text: "Podcast search is unique because the user has to commit significant time to evaluate a result. A 30-minute podcast episode is much more expensive to evaluate than a web page."
+      - speaker: interviewer
+        text: "How does that affect your metric design?"
+    choices:
+      - label: "Discovery metrics (play rate, listen-through, subscription conversion)"
+        answer: |
+          I'd optimize for **content discovery** metrics that measure whether search actually leads users to valuable podcast content:
+
+          **Primary online metrics:**
+          - **Play Rate (PR)**: Fraction of search sessions where the user plays an episode from the results. Target: **>25%** (lower than web search CTR because podcast commitment is higher)
+          - **Listen-Through Rate (LTR)**: Fraction of played episodes where the user listens for >50% of the duration (or >10 minutes for long episodes). This is the **primary quality metric** -- it means the content was genuinely relevant and engaging
+          - **Subscription Conversion Rate**: Users who subscribe to a podcast they discovered through search. Strongest satisfaction signal for podcasts
+
+          **Secondary metrics:**
+          - **Time to First Play**: How quickly users find something worth playing from search results. Faster = better ranking
+          - **Search-to-library add rate**: User saves the episode or podcast for later listening
+          - **Return to search rate**: After listening, does the user search again for the same topic? (High = didn't find what they needed)
+          - **Segment engagement** (for segment-level search): Does the user listen from the suggested timestamp? Do they continue listening past the segment?
+
+          **Podcast-specific considerations:**
+          - **Delayed evaluation**: Users often save podcasts for later (commute, exercise). Play rate may lag search by hours/days. Use **7-day play attribution window**
+          - **Partial listen value**: A user who listens to 15 minutes of a relevant segment and then stops may be fully satisfied (got the answer they needed). Don't penalize partial listens for short queries
+
+          **Guardrail metrics:**
+          - Null result rate (should be <5% for queries with length >= 3 words)
+          - ASR quality (WER < 10% on sampled episodes)
+          - Freshness (new episodes searchable within 2 hours of publication)
+          - Content safety (no harmful content in top results)
+
+          **Why discovery-focused?** Podcast search's job is to help users **find new content they'll love**. Play rate and listen-through rate directly measure this. Unlike web search where the user gets the answer on the SERP, podcast users must invest time listening -- LTR measures whether that investment was worthwhile.
+        next: data_pipeline
+      - label: "Relevance metrics (MRR, NDCG, human evaluation)"
+        answer: |
+          I'd focus on **relevance quality** with both automated metrics and human evaluation:
+
+          **Primary offline metrics:**
+          - **MRR (Mean Reciprocal Rank)**: Where does the most relevant result appear? Critical for podcast search where users won't scroll past the first few results. Target: **MRR > 0.40**
+          - **NDCG@10**: Ranked relevance quality. Judged by human raters who listen to relevant portions of the episode and rate (4=Perfect match, 3=Good, 2=Fair, 1=Tangential, 0=Irrelevant)
+          - **Segment precision@5** (for segment-level search): Of the top 5 segments, how many are genuinely relevant and at the right timestamp?
+
+          **Human evaluation protocol (unique to podcast):**
+          - Raters must **listen to the suggested segment** (~3-5 minutes) to judge relevance
+          - This is expensive ($5-10 per judgment vs. $1-2 for web page evaluation)
+          - Evaluation dimensions:
+            - **Topical relevance**: Does the segment discuss the query topic?
+            - **Depth**: Is it a passing mention or substantial discussion?
+            - **Authority**: Is the speaker knowledgeable on this topic?
+            - **Timestamp accuracy**: Does the suggested start time land at the right moment?
+          - Budget: ~2000 evaluated queries per week (limited by listening time)
+
+          **Online proxy metrics:**
+          - **Play-from-timestamp rate**: For segment results, does the user play from the suggested timestamp? (vs. starting from the beginning, which suggests the timestamp was wrong)
+          - **Listen duration after search click**: How long does the user listen? Longer suggests better relevance
+          - **Query reformulation rate**: Users who modify their query likely didn't find relevant results
+
+          **Why relevance-focused?**
+          - Podcast search is **less mature** than web or video search. Getting basic relevance right is the priority before optimizing engagement
+          - User trust is fragile -- a few irrelevant results can convince users that podcast search doesn't work
+          - Human evaluation is the gold standard because automated metrics (click-based) are noisy due to delayed consumption patterns (save for later)
+        next: data_pipeline
+
+  # ============ DATA ============
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline & ASR"
+    speaker: interviewer
+    content: |
+      The data pipeline for podcast search is dominated by the **ASR (Automatic Speech Recognition)** challenge. Let's design the end-to-end processing pipeline.
+
+      **ASR system (the critical foundation):**
+
+      | ASR Model | WER (Word Error Rate) | Speed | Cost |
+      |-----------|----------------------|-------|------|
+      | Whisper-large-v3 | ~5% (clean speech) | 0.5x real-time (GPU) | $$$ |
+      | Whisper-medium | ~8% (clean speech) | 2x real-time (GPU) | $$ |
+      | Whisper-small | ~12% | 5x real-time (GPU) | $ |
+      | Google Speech-to-Text | ~6% | 1x real-time (API) | $$$$ |
+      | Custom fine-tuned | ~4% (domain-specific) | 0.5x real-time | $$$ |
+
+      **Recommended: Whisper-large-v3** (or fine-tuned variant)
+      - WER ~5% on clean speech, ~10-15% on noisy/accented speech
+      - Multilingual support (99 languages)
+      - Runs on A100 GPU at ~0.5x real-time (1 hour of audio = 2 hours of compute)
+
+      **Processing pipeline:**
+      ```
+      New Episode Published
+           │
+           ▼
+      RSS Feed Crawler (polls every 15 min)
+           │
+           ▼
+      Audio Download + Preprocessing
+      [Normalize volume, convert to 16kHz mono WAV, ~30 sec]
+           │
+           ▼
+      ASR Transcription (Whisper)
+      [Parallel across GPU cluster, ~2x episode duration]
+           │
+           ▼
+      Post-processing
+      [Punctuation restoration, speaker diarization, entity linking]
+           │
+           ▼
+      Topic Segmentation
+      [Neural or TextTiling → segment boundaries + topics]
+           │
+           ▼
+      Embedding Computation
+      [BERT/Sentence-BERT → segment embeddings]
+           │
+           ▼
+      Indexing
+      [Write to search index (Elasticsearch + vector DB)]
+      ```
+
+      **Scale calculation:**
+      - 50,000 new episodes/day * average 45 min = ~37,500 hours of new audio/day
+      - At 2x real-time (Whisper-large): 75,000 GPU-hours/day needed
+      - On A100 GPUs at ~$2/hr (cloud): **$150K/day** just for ASR
+      - Optimization: Use Whisper-medium (~$50K/day) for initial indexing, re-transcribe popular episodes with large model
+
+      **Speaker diarization:**
+      - Identify who is speaking when using **pyannote.audio** or custom model
+      - Important for: "Elon Musk on AI safety" -- need to know which speaker is Musk
+      - Speaker identification: Match detected voices to known speaker embeddings (celebrity/expert database)
+      - Typical accuracy: ~90% speaker turn detection, ~85% known-speaker identification
+
+      **Backfill strategy:**
+      - Process the 70M existing episodes over 6-12 months (prioritize popular shows first)
+      - Priority order: Top 1000 shows (cover ~30% of listens), then by popularity tier
+      - Incremental: Index metadata immediately, add transcripts as ASR completes
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle the massive ASR compute requirement?"
+      - speaker: candidate
+        text: "Tiered ASR: use a smaller/faster model for initial indexing of all episodes, then re-transcribe popular episodes with the higher-quality model."
+      - speaker: interviewer
+        text: "Smart. What about speaker identification?"
+      - speaker: candidate
+        text: "Speaker diarization tells us who is speaking when. For known speakers like public figures, we can match voice embeddings to identify them. This enables queries like 'Elon Musk discusses AI'."
+      - speaker: interviewer
+        text: "The cost is substantial. How do you justify it?"
+    next: feat_question
+
+  # ============ FEATURES ============
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Engineering"
+    speaker: interviewer
+    content: |
+      What features would you use to rank podcast search results? Remember that we have unique signals not available in web or video search.
+    dialogue:
+      - speaker: interviewer
+        text: "What features are most important for podcast search ranking?"
+      - speaker: candidate
+        text: "We have a mix of text features from transcripts, audio-derived features, and podcast-specific metadata."
+      - speaker: interviewer
+        text: "Which features differentiate podcast search from regular text search?"
+    choices:
+      - label: "Transcript-focused features with podcast metadata"
+        answer: |
+          I'd build features centered on the **transcript** (our unique asset) combined with **podcast-specific metadata**:
+
+          **Transcript matching features (~12 features):**
+          - **BM25 on transcript**: Standard term matching against the full episode or segment transcript. Single most important feature
+          - **Transcript-query semantic similarity**: Sentence-BERT embedding of the segment vs. query embedding. Cosine similarity captures semantic matches beyond keywords
+          - **Query term density**: How frequently do query terms appear in the transcript? Dense mentions indicate a focused discussion
+          - **Query term coverage**: What fraction of query terms appear in the transcript? A segment with all query terms is more likely relevant
+          - **First mention position**: How early in the episode/segment are query terms mentioned? Earlier = more topically central
+          - **Entity overlap**: Named entities (people, organizations, products) in query vs. transcript
+
+          **Podcast metadata features (~10 features):**
+          - **Title/description BM25**: Traditional metadata matching (still important!)
+          - **Show authority**: Subscriber count, average rating, total downloads -- proxy for content quality
+          - **Episode popularity**: Download count, listen count (log-scaled)
+          - **Show category match**: Does the podcast's category match the query's intent? (e.g., "business strategy" query → business category podcast)
+          - **Episode recency**: Days since publication (log-scaled). Recent episodes preferred for timely topics
+          - **Episode duration**: Users may prefer shorter episodes for quick answers, longer for deep dives
+
+          **Speaker features (~5 features):**
+          - **Speaker authority score**: Is the speaker a known expert? (Based on speaker identification + knowledge base)
+          - **Guest detection**: Is the topic discussed by a guest expert or the regular host?
+          - **Speaker relevance**: Does the identified speaker relate to the query entity? (Query: "Sam Altman on AI" → speaker is Sam Altman = strong boost)
+
+          **Context features (~5 features):**
+          - **User's podcast listening history**: Categories and shows they listen to
+          - **User's language preference**: Match episode language
+          - **Device type**: Mobile users may prefer shorter episodes
+          - **Time of day**: Morning commute → shorter episodes, weekend → longer deep dives
+
+          **Total: ~32 features**, all pre-computable except user context features.
+
+          **Why transcript-focused?** The transcript is what differentiates podcast search from traditional podcast discovery (which uses metadata only). BM25 on transcript alone provides a **3-5x improvement** in recall over metadata-only search.
+        next: mod_question
+      - label: "Audio-native features with spoken language understanding"
+        answer: |
+          I'd go beyond transcripts and leverage **audio-native features** that capture nuances lost in text:
+
+          **Transcript-based features (baseline, ~10 features):**
+          - BM25 on transcript, semantic similarity, entity overlap, term density (same as simpler approach)
+          - These form the foundation but miss important audio context
+
+          **Spoken language understanding features (~10 features):**
+          - **Topic depth score**: NLP model estimates how thoroughly a topic is discussed (passing mention vs. 15-minute deep dive). Trained on (transcript_segment, depth_rating) pairs from human annotations
+          - **Information density**: Ratio of content words to filler words and disfluencies. Higher density = more informative discussion
+          - **Question-answer detection**: Detect Q&A patterns in conversation. If the query matches a question asked in the podcast, the following answer segment is highly relevant
+          - **Key insight extraction**: Extract concise "takeaway" sentences from transcript. Match against query for precision ranking
+          - **Conversation flow**: Is this a structured discussion (interview, lecture) or casual conversation? Structured discussions are typically more relevant for specific queries
+
+          **Audio-derived features (~8 features):**
+          - **Speaker confidence score**: Audio features (pace, hesitation, filler words) indicate how confident/knowledgeable the speaker sounds about the topic
+          - **Emphasis detection**: Prosodic features (pitch, volume changes) indicate when a speaker is emphasizing important points. Segments with emphasis on query-related topics are more relevant
+          - **Audio quality score**: Background noise level, recording quality, audio clarity. Higher quality = better listener experience
+          - **Music/sound effect detection**: Segments with heavy music/effects are less likely to contain searchable speech content
+          - **Speech rate**: Normal speech rate indicates prepared content; very fast/slow may indicate filler or uncertainty
+
+          **Advanced understanding features (~8 features):**
+          - **Argument structure**: Does the segment present evidence, counter-arguments, conclusions? For informational queries, well-structured arguments are more valuable
+          - **Sentiment analysis on topic**: What is the speaker's sentiment about the query topic? Useful for queries like "criticism of remote work"
+          - **Cross-reference validation**: Does the discussed information align with verified knowledge sources? (Fact-checking signal)
+          - **Humor/entertainment detection**: For entertainment-oriented queries, humor signals may be relevant
+
+          **Why audio-native?**
+          - A transcript alone loses **40% of communication** -- tone, emphasis, confidence, and emotion
+          - Speaker confidence about a topic is a powerful relevance signal that transcripts don't capture
+          - Audio quality directly impacts user experience (recommending a poorly recorded episode frustrates users)
+          - These features create **competitive differentiation** -- no existing podcast search uses audio-level understanding
+
+          **Trade-off:** Audio feature extraction requires additional compute (speech analysis models). Adds ~30% to processing pipeline cost. But for a podcast-first platform like Spotify, this investment creates a moat.
+
+          **Total: ~36 features**, mixing transcript text, audio signals, and metadata.
+        next: mod_question
+
+  # ============ MODEL ============
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Ranking Model"
+    speaker: interviewer
+    content: |
+      What model architecture would you use for the podcast search ranker? Consider the scale: ~1.4B segments (or 70M episodes) to search, <300ms latency (users are more patient with podcast search than web search).
+    dialogue:
+      - speaker: interviewer
+        text: "What model would you use for ranking podcast search results?"
+      - speaker: candidate
+        text: "We have more latency budget than web search but the corpus is smaller. This changes the architecture choices."
+      - speaker: interviewer
+        text: "How does the smaller corpus affect your retrieval approach?"
+    choices:
+      - label: "BM25 retrieval + LambdaMART ranker (efficient, interpretable)"
+        answer: |
+          I'd use **BM25 retrieval with Elasticsearch** followed by a **LambdaMART re-ranker**:
+
+          **Retrieval (BM25 on Elasticsearch):**
+          - Index all segments/episodes in **Elasticsearch** with multi-field indexing:
+            - `transcript` (weight 3x): Full segment/episode transcript
+            - `title` (weight 5x): Episode title
+            - `description` (weight 2x): Episode description
+            - `speaker_name` (weight 4x): Identified speakers
+            - `show_name` (weight 3x): Podcast show name
+          - **Query expansion**: Add synonyms and related terms using word2vec/WordNet
+          - Retrieve **top 500 candidates** per query (~20ms with 10 Elasticsearch shards)
+
+          **Re-ranking (LambdaMART):**
+          ```
+          BM25 top 500
+               │
+               ▼
+          Feature enrichment (podcast + user features)
+               │
+               ▼
+          LambdaMART scoring (~32 features)
+               │
+               ▼
+          Top 20 results with snippets + timestamps
+          ```
+
+          **LambdaMART configuration:**
+          - LightGBM with `lambdarank` objective, optimizing NDCG@10
+          - 300 trees, max depth 8, learning rate 0.05
+          - Training data: (query, episode/segment, engagement_label) from search logs
+          - Label: graded by listen-through behavior (0-4 scale)
+
+          **Why BM25 + LambdaMART?**
+          - **Elasticsearch is perfect for podcast scale**: 1.4B segments fits in a modest cluster (~20 machines). No need for custom distributed infrastructure
+          - **BM25 is strong for transcript search**: Podcast transcripts are long, natural-language text -- exactly where BM25 excels
+          - **LambdaMART adds podcast-specific intelligence**: Weighs show authority, speaker expertise, freshness, and engagement signals on top of text relevance
+          - **Interpretable**: Can explain why each result was ranked using SHAP feature importances
+          - **Fast**: End-to-end in <50ms (20ms BM25 + 5ms feature enrichment + 5ms LambdaMART)
+
+          **Feature importance (typical for podcast search):**
+
+          | Feature | Importance |
+          |---------|-----------|
+          | BM25 transcript score | ~30% |
+          | BM25 title score | ~15% |
+          | Episode popularity (listens) | ~12% |
+          | Show authority (subscribers) | ~10% |
+          | Semantic similarity (BERT) | ~8% |
+          | Speaker relevance | ~5% |
+          | Other features | ~20% |
+        next: train_pipeline
+      - label: "Dense retrieval (bi-encoder) + cross-encoder re-ranker"
+        answer: |
+          I'd use **dense retrieval** with bi-encoder embeddings for semantic search, followed by a **cross-encoder re-ranker**:
+
+          **Stage 1 -- Dense Retrieval (top 200, ~15ms):**
+          ```
+          Query: "machine learning interview tips"
+                          │
+                          ▼
+                  Query Encoder (BERT-base)
+                  → 768-dim embedding
+                          │
+                          ▼
+                  ANN Search (FAISS HNSW)
+                  over 1.4B segment embeddings
+                          │
+                          ▼
+                  Top 200 segments by cosine similarity
+          ```
+
+          **Why dense retrieval for podcasts?**
+          - **Vocabulary mismatch**: Spoken language is informal. A user searching "ML interview prep" should match a transcript saying "preparing for machine learning job interviews at tech companies"
+          - BM25 misses this; dense retrieval captures the semantic equivalence
+          - **Podcast transcripts are noisy**: ASR errors mean exact term matching fails more often. Dense embeddings are robust to minor transcription errors
+
+          **Segment encoder:**
+          - Fine-tuned **Sentence-BERT** (SBERT) on podcast transcript-query pairs
+          - Training: Contrastive learning on (query, relevant_segment) positives from click logs
+          - Hard negatives: Segments from the same podcast that don't match the query
+          - Output: 768-dim normalized embedding per segment
+
+          **Stage 2 -- Cross-Encoder Re-ranker (top 200 → top 20, ~40ms):**
+          ```
+          Input: [CLS] query [SEP] segment_transcript (truncated to 512 tokens) [SEP]
+                                    │
+                            BERT-base (12 layers, 110M params)
+                                    │
+                            [CLS] → FC(768 → 1) → Relevance Score
+          ```
+
+          **Why cross-encoder for stage 2?**
+          - Deep query-segment interaction captures nuance that bi-encoder dot product misses
+          - For 200 candidates: batch of 200 in one GPU forward pass → ~40ms on A100
+          - Cross-encoder improves NDCG@10 by **~10-15%** over bi-encoder alone
+
+          **Hybrid retrieval (best of both):**
+          - Run BM25 AND dense retrieval in parallel
+          - Merge with Reciprocal Rank Fusion: `RRF_score = 1/(k + rank_bm25) + 1/(k + rank_dense)`
+          - Hybrid retrieval gives **5-8% higher recall** than either alone
+
+          **Index details:**
+          - 1.4B segments * 768 dims * 4 bytes = ~4.3TB of embeddings
+          - FAISS HNSW with scalar quantization (SQ8): ~1.1TB (4x compression, <2% recall loss)
+          - Distributed across ~20 GPU machines for search
+          - Index update: append-only for new segments (daily full rebuild for deletions/updates)
+
+          **Trade-off:** More expensive than BM25 + LambdaMART (GPU infrastructure needed). But the semantic matching capability is a game-changer for podcast search where spoken language is informal and ASR introduces errors.
+        next: train_pipeline
+
+  # ============ TRAINING ============
+  - id: train_pipeline
+    stage: training
+    type: info
+    label: "Training Pipeline"
+    speaker: interviewer
+    content: |
+      Let's design the training pipeline. Podcast search has unique training data challenges.
+
+      **Training data challenges:**
+      1. **Sparse click data**: Podcast search is a newer feature -- much less click data than web/video search
+      2. **Delayed feedback**: Users save episodes for later. A click today may result in a listen tomorrow during a commute
+      3. **No position bias studies yet**: Unlike web search, we don't have years of position bias research for podcast search
+
+      **Training data construction:**
+
+      **From search logs (when available):**
+      - Positive: (query, played_episode/segment) pairs where user listened >50% or >5 minutes
+      - Weak positive: (query, played_episode) where user played but listened <20% (might be relevant but not engaging)
+      - Negative: (query, shown_but_not_played) episodes in search results
+      - Attribution window: 7 days (user may play podcast days after searching)
+
+      **Synthetic training data (for bootstrapping):**
+      - **Passage generation**: For each segment, use a T5 model to generate likely search queries that this segment would answer. This creates (synthetic_query, real_segment) pairs
+      - **Title-segment pairs**: Use (episode_title, relevant_segment) as a weak training signal
+      - **Cross-podcast linking**: If two segments discuss the same topic, use one as query and the other as relevant result
+      - This synthetic data bootstraps the system before real search logs are available
+
+      **Transfer learning:**
+      - Pre-train on MS MARCO passage ranking dataset (8.8M passages, 500K queries)
+      - Fine-tune on podcast-specific data
+      - MS MARCO provides strong general retrieval knowledge that transfers well to podcast segments
+
+      **Training schedule:**
+      - **Weekly retraining** (daily not needed due to slower data accumulation)
+      - Pipeline: 7-day search log collection → Label creation → Feature extraction → Training → Evaluation → Canary deployment
+      - As search usage grows, transition to **daily retraining**
+
+      **Evaluation:**
+      - Hold-out 1 day of search logs for evaluation
+      - Human evaluation: 500 judged queries per week (raters listen to segments)
+      - Compare against metadata-only baseline: new model should show >20% MRR improvement
+
+      **Cold start mitigation:**
+      - Launch with synthetic training data + MS MARCO transfer learning
+      - Use click data from general podcast browsing (not search) as a proxy
+      - Aggressively log search interactions from day one for future training
+    dialogue:
+      - speaker: interviewer
+        text: "How do you bootstrap training data for a new podcast search feature?"
+      - speaker: candidate
+        text: "Three strategies: synthetic query generation from segment content, transfer learning from MS MARCO, and careful logging of early user interactions."
+      - speaker: interviewer
+        text: "The synthetic data approach is creative. How do you generate realistic queries?"
+      - speaker: candidate
+        text: "Use a T5 model trained on passage-to-query generation. Given a podcast segment about 'inflation's impact on housing', it generates queries like 'how does inflation affect home prices'."
+      - speaker: interviewer
+        text: "Good. And you transition to real click data as usage grows."
+    next: deploy_question
+
+  # ============ DEPLOYMENT ============
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Serving Architecture"
+    speaker: interviewer
+    content: |
+      How would you architect the serving system? We need to handle the full pipeline from query to results, including the unique podcast-specific aspects like timestamp display and audio preview.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you serve podcast search results?"
+      - speaker: candidate
+        text: "The serving path is simpler than web search because the corpus is smaller, but we have unique UX requirements like timestamp navigation."
+      - speaker: interviewer
+        text: "What about the freshness requirement? New episodes published daily."
+    choices:
+      - label: "Elasticsearch cluster with near-real-time indexing"
+        answer: |
+          I'd use an **Elasticsearch cluster** as the primary serving infrastructure:
+
+          **Architecture:**
+          ```
+          Search Query
+               │
+               ▼
+          Query Processing (~10ms)
+          [spell check, entity detection, query expansion]
+               │
+               ▼
+          Elasticsearch Search (~20ms)
+          [BM25 across transcript + metadata fields, top 500]
+               │
+               ▼
+          Feature Enrichment (~10ms)
+          [Fetch podcast metadata, engagement signals from Redis]
+               │
+               ▼
+          Re-ranking Model (~5ms)
+          [LambdaMART or lightweight neural model]
+               │
+               ▼
+          Post-processing (~10ms)
+          [Snippet generation, timestamp extraction, deduplication]
+               │
+               ▼
+          Results Response
+          Total: ~55ms server-side
+          ```
+
+          **Elasticsearch configuration:**
+          - **Cluster**: 20 data nodes, 3 master nodes
+          - **Index size**: ~1.4B segments (~5TB with transcript text + metadata)
+          - **Shards**: 50 primary shards, 1 replica each
+          - **Refresh interval**: 30 seconds (near-real-time indexing)
+          - **Hardware**: 64GB RAM per node, SSD storage
+
+          **Near-real-time indexing:**
+          - RSS crawler detects new episodes every 15 minutes
+          - Metadata indexed immediately (available within 30 seconds)
+          - Transcript indexed as ASR completes (~2 hours after publication)
+          - Elasticsearch's NRT refresh makes new documents searchable within seconds of indexing
+
+          **Snippet generation:**
+          - For each result, extract the most relevant 2-3 sentences from the transcript
+          - Highlight query terms in the snippet
+          - Map transcript position to audio timestamp using ASR word-level timing
+          - Display: "...when we talk about **machine learning interviews**, the key thing is to prepare system design questions..." [14:32]
+
+          **Why Elasticsearch?**
+          - **Battle-tested at scale**: Handles 1.4B documents easily on a modest cluster
+          - **Full-text search native**: BM25, phrase matching, fuzzy matching, query expansion all built-in
+          - **Near-real-time**: New episodes searchable within seconds of indexing
+          - **Rich query DSL**: Supports complex queries (multi-field, boosting, filtering by date/category/language)
+          - **Cost effective**: ~$50K/month for the cluster (vs. custom distributed infrastructure)
+
+          **Scaling path:** If search volume exceeds 10K QPS, add replica shards and data nodes horizontally.
+        next: deploy_ux
+      - label: "Custom search service with vector database"
+        answer: |
+          I'd build a **custom search service** combining a vector database (for semantic search) with a traditional index (for keyword search):
+
+          **Architecture:**
+          ```
+          Search Query
+               │
+               ▼
+          Query Service (K8s)
+               │
+          ┌────┼────────────┐
+          │                  │
+          Milvus/Qdrant      Elasticsearch
+          (Dense retrieval)   (BM25 retrieval)
+          Top 200, ~15ms      Top 300, ~20ms
+          │                  │
+          └────┼────────────┘
+               │
+               ▼
+          RRF Merge → Top 200
+               │
+               ▼
+          Cross-encoder Re-rank (~40ms, GPU)
+               │
+               ▼
+          Post-processing (~10ms)
+          [Snippet, timestamp, dedup, diversity]
+               │
+               ▼
+          Results
+          Total: ~85ms server-side
+          ```
+
+          **Vector database (Milvus or Qdrant):**
+          - Stores 1.4B segment embeddings (768-dim)
+          - HNSW index with scalar quantization
+          - Search time: ~15ms for top-200
+          - Update: Streaming ingestion of new segment embeddings
+          - Hardware: 4 GPU nodes with 80GB VRAM each (entire index fits in GPU memory)
+
+          **Hybrid search fusion:**
+          - BM25 handles **exact keyword matching** (podcast names, specific terms)
+          - Dense retrieval handles **semantic matching** (concept similarity)
+          - RRF fusion combines both: `score = 1/(60+rank_bm25) + 1/(60+rank_dense)`
+          - Hybrid recall is **~15% higher** than either method alone
+
+          **Cross-encoder re-ranking (GPU):**
+          - BERT-base processes (query, segment_text) for top 200 candidates
+          - Batch inference: 200 candidates per GPU forward pass → ~40ms on A100
+          - Re-ranking provides **~10% NDCG improvement** over retrieval scores alone
+
+          **Why custom over pure Elasticsearch?**
+          - **Semantic search**: Elasticsearch's BM25 misses vocabulary mismatch (spoken language is especially informal)
+          - **State-of-the-art quality**: Cross-encoder re-ranking is the best available method for passage ranking
+          - **Future-proof**: Vector database enables multimodal search (query by audio clip, voice search)
+          - **Flexibility**: Can experiment with different embedding models without changing infrastructure
+
+          **Trade-off:** More complex ops. Three systems to manage (Elasticsearch + Milvus + GPU cluster) vs. one Elasticsearch cluster. Higher cost (~$100K/month vs. ~$50K). But the quality improvement is substantial for a product differentiator.
+        next: deploy_ux
+
+  - id: deploy_ux
+    stage: deployment
+    type: info
+    label: "Search UX & Audio Integration"
+    speaker: interviewer
+    content: |
+      A critical differentiator for podcast search: the **user experience** around audio results.
+
+      **Search result presentation:**
+      ```
+      ┌──────────────────────────────────────────────────┐
+      │ 🎙 Planet Money - "The Housing Crisis Explained"  │
+      │ NPR • Episode 1,523 • March 15, 2026 • 32 min   │
+      │                                                    │
+      │ "...when we look at inflation's impact on the      │
+      │ housing market, the key driver is mortgage rates    │
+      │ which have risen from 3% to 7.5% in just..."      │
+      │                                                    │
+      │ ▶ Play from 14:32    📋 Full Episode               │
+      └──────────────────────────────────────────────────┘
+      ```
+
+      **Key UX features:**
+
+      **1. Timestamp-linked playback:**
+      - Each result shows the most relevant timestamp
+      - "Play from here" button starts playback at the matched segment
+      - Audio player shows the transcript with the current position highlighted
+      - Users can read along while listening (accessibility + comprehension)
+
+      **2. Transcript snippets:**
+      - Show 2-3 most relevant sentences from the transcript
+      - Highlight query terms in bold
+      - Give users enough context to evaluate relevance without listening
+
+      **3. Related segments:**
+      - "Also discussed at 42:15, 58:30" -- show multiple relevant timestamps if the topic is discussed in multiple parts
+      - Enables non-linear navigation within a long episode
+
+      **4. Episode context:**
+      - Show name, host, episode title, date, duration
+      - Star rating / popularity indicator
+      - Number of listeners ("Listened by 50K people")
+
+      **5. Audio preview:**
+      - 15-second auto-playing snippet starting at the relevant timestamp (opt-in)
+      - Lets users quickly evaluate if the discussion is what they're looking for
+      - Similar to Google's "preview" in book search
+
+      **Technical requirements for UX:**
+      - ASR must provide **word-level timestamps** (not just sentence-level) for precise playback positioning
+      - Need mapping: `transcript_position → audio_timestamp` with +-2 second accuracy
+      - Streaming audio with seek capability (HLS/DASH) for instant timestamp playback
+      - Snippet rendering: Real-time highlight of query terms in transcript text
+    dialogue:
+      - speaker: interviewer
+        text: "How does the search UX differ from traditional web search?"
+      - speaker: candidate
+        text: "The key innovation is timestamp-linked playback. Users don't just find an episode -- they jump to the exact moment a topic is discussed."
+      - speaker: interviewer
+        text: "That's a much better user experience than scrolling through episode descriptions."
+      - speaker: candidate
+        text: "Exactly. It transforms podcast discovery from 'find a relevant episode' to 'find the answer to your question' -- much more like web search."
+    next: mon_question
+
+  # ============ MONITORING ============
+  - id: mon_question
+    stage: monitoring
+    type: question
+    label: "Monitoring Strategy"
+    speaker: interviewer
+    content: |
+      What monitoring would you set up for the podcast search engine?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you monitor podcast search quality?"
+      - speaker: candidate
+        text: "We need to monitor both the search quality and the underlying ASR pipeline quality, since search depends on transcript accuracy."
+      - speaker: interviewer
+        text: "Good point -- ASR quality directly impacts search quality."
+    choices:
+      - label: "Full-stack monitoring (ASR + search + engagement)"
+        answer: |
+          I'd monitor the **full stack** from ASR to search to user engagement:
+
+          **Layer 1 -- ASR Pipeline Health:**
+
+          | Metric | Alert Threshold | Action |
+          |--------|----------------|--------|
+          | ASR processing backlog | >10,000 episodes | Scale GPU cluster |
+          | ASR WER (sampled) | >12% | Investigate model/audio quality |
+          | Time from publish to searchable | >4 hours | Pipeline bottleneck |
+          | Speaker diarization accuracy | <80% | Retrain diarization model |
+          | Transcript completeness | <95% of episodes processed | Check pipeline errors |
+
+          **Layer 2 -- Search Quality:**
+
+          | Metric | Alert Threshold | Action |
+          |--------|----------------|--------|
+          | Play rate from search | Drop >5% vs 7d avg | Investigate ranking model |
+          | Listen-through rate | Drop >3% | Check relevance quality |
+          | Null result rate | >5% | Check index coverage |
+          | Search latency P95 | >300ms | Scale infrastructure |
+          | Timestamp accuracy | >5s offset from expected | Fix ASR timing pipeline |
+
+          **Layer 3 -- Business Metrics:**
+
+          | Metric | Alert Threshold | Action |
+          |--------|----------------|--------|
+          | Search feature DAU | Drop >10% | UX or quality issue |
+          | Subscription from search | Drop >5% | Investigate discovery quality |
+          | Repeat search rate | Increase >10% | Users not finding what they need |
+
+          **ASR quality sampling:**
+          - Randomly sample 100 transcribed episodes per week
+          - Human transcribers create ground truth transcripts
+          - Compute WER and track over time
+          - Segment by: language, audio quality, accent, number of speakers
+
+          **Index coverage monitoring:**
+          - Track: What fraction of recent episodes have full transcripts? Target: >95% within 4 hours
+          - Track: What fraction of search queries match at least one transcript? (vs. metadata-only matches)
+          - Monitor new podcast onboarding time: How quickly do new shows become searchable?
+        next: mon_terminal
+      - label: "User-centric monitoring with quality feedback loops"
+        answer: |
+          I'd build **user-centric monitoring** with feedback mechanisms that continuously improve the system:
+
+          **User satisfaction tracking:**
+          - **Post-search survey** (shown to 1% of search sessions): "Did you find what you were looking for?" Three options: Yes / Partially / No
+          - Track survey results by: query type, content category, new vs. returning user, device
+          - Target: >70% "Yes" satisfaction rate
+
+          **Behavioral quality signals (daily):**
+          - **Play-from-timestamp rate**: Do users use the "play from here" feature? High usage validates timestamp accuracy
+          - **Listen continuation rate**: After starting from a timestamp, do users keep listening? Measures both timestamp accuracy AND content relevance
+          - **Discovery rate**: Users who find a new podcast through search and become regular listeners (measured over 30 days)
+          - **Feature engagement trend**: Is search usage growing week-over-week? Declining usage may indicate quality issues
+
+          **Quality feedback loops:**
+          ```
+          User searches → Results displayed → User behavior collected
+                                                       │
+                                                       ▼
+                                              Quality signals analyzed
+                                                       │
+                                              ┌────────┼────────┐
+                                              │                 │
+                                         Good signals       Bad signals
+                                    (boost similar results)  (investigate)
+                                              │                 │
+                                              ▼                 ▼
+                                         Retrain model    Manual review
+                                                       │
+                                                       ▼
+                                              Deploy improved model
+          ```
+
+          **Segment-level quality analysis:**
+          - Weekly review: Sample 200 search sessions with low engagement
+          - Analyze failure modes: Was the transcript inaccurate? Was the segment boundary wrong? Was the ranking bad?
+          - Category-specific quality: Some categories (comedy, fiction) are harder to search than others (news, education)
+
+          **Creator feedback channel:**
+          - Podcast creators can report when their episodes aren't appearing in relevant searches
+          - Creator dashboard showing search impressions and clicks for their episodes
+          - This feedback helps identify indexing gaps and ranking biases
+
+          **Competitive benchmarking:**
+          - Monthly comparison: Same queries on Apple Podcasts, Spotify, Google Podcasts
+          - Evaluate: Which platform surfaces the most relevant results?
+          - Focus improvement efforts on categories where competitors have better coverage
+        next: mon_terminal
+
+  # ============ TERMINAL ============
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Design Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive **Podcast Search Engine**.
+
+      **Your design covers:**
+      - **Search granularity**: Episode-level retrieval (simpler) or segment-level with timestamp-linked playback
+      - **Metrics**: Discovery metrics (play rate, listen-through) or relevance metrics (MRR, NDCG with human evaluation)
+      - **Data pipeline**: ASR transcription (Whisper), speaker diarization, topic segmentation at 70M+ episode scale
+      - **Features**: Transcript-focused features with podcast metadata or audio-native features with spoken language understanding
+      - **Model**: BM25 + LambdaMART (efficient, interpretable) or dense retrieval + cross-encoder (semantic understanding)
+      - **Training**: Synthetic data bootstrapping, MS MARCO transfer learning, gradual transition to real click data
+      - **Deployment**: Elasticsearch cluster or custom vector database hybrid, near-real-time indexing
+      - **UX**: Timestamp-linked playback, transcript snippets, audio preview
+      - **Monitoring**: Full-stack (ASR + search + engagement) or user-centric with feedback loops
+
+      **Key design strengths:**
+      - Treating ASR as the critical foundation -- transcript quality determines everything
+      - Segment-level retrieval with timestamps transforms the user experience
+      - Bootstrapping strategy addresses the cold start challenge for a new search feature
+      - Speaker identification enables person-specific queries
+
+      **Areas for further exploration:**
+      - Voice-based search ("find podcasts where someone talks about X" via voice input)
+      - Cross-episode summarization (aggregate insights from multiple podcast discussions)
+      - Real-time podcast search (indexing live/streaming podcasts)
+      - Multilingual podcast search (transcribe and search across languages)
+      - Podcast clip generation (auto-create shareable clips from relevant segments)
+
+      This demonstrates deep understanding of speech processing, information retrieval, and the unique challenges of building search for audio content. Outstanding design!
+    dialogue:
+      - speaker: interviewer
+        text: "Great design. The ASR pipeline and segment-level retrieval with timestamps are particularly strong. Any final thoughts?"
+      - speaker: candidate
+        text: "The key insight is that podcast search is a speech-first problem masquerading as a text search problem. Investing in ASR quality and spoken language understanding pays dividends across the entire system."
+      - speaker: interviewer
+        text: "Well said. That's an important framing. Well done!"

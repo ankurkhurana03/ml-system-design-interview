@@ -1,0 +1,561 @@
+id: feature-store
+title: "Centralized Feature Store"
+description: "Design a centralized Feature Store for a large-scale ML organization."
+companies: ["Uber", "Airbnb", "Spotify"]
+domains: ["MLOps/Infrastructure"]
+root: pd_start
+
+nodes:
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design a **centralized Feature Store** for a large-scale ML organization, similar to Uber's Michelangelo, Airbnb's Zipline, or Spotify's feature platform.
+
+      **Context**: The organization has **200+ ML models** in production across 15 teams (fraud detection, recommendations, pricing, search, ETA prediction, etc.). These models share many common features (user profile features, transaction history, device information), but each team computes them independently, leading to:
+
+      - **Feature duplication**: The same "user_30day_transaction_count" feature is computed by 8 different teams with slightly different definitions, causing inconsistent model behavior
+      - **Training-serving skew**: Features computed differently in offline training (batch SQL) vs. online serving (real-time API), causing 2-5% accuracy drops in production
+      - **Slow iteration**: New features take 2-4 weeks to go from prototype to production because each team must build their own serving infrastructure
+      - **No feature discovery**: Teams don't know what features already exist, so they keep reinventing the wheel
+
+      **Scale requirements:**
+      - **Online serving**: 10M+ feature lookups per second at p99 latency <10ms
+      - **Offline training**: Serve 100TB+ of historical feature data for batch model training
+      - **Feature catalog**: 50,000+ registered features across all teams
+      - **Users**: 200 data scientists and ML engineers
+    dialogue:
+      - speaker: interviewer
+        text: "We're designing a feature store for an organization with 200+ ML models. The core problems are feature duplication, training-serving skew, and slow feature iteration."
+      - speaker: candidate
+        text: "What's the scale we're dealing with?"
+      - speaker: interviewer
+        text: "10 million feature lookups per second for online serving, 100TB of historical data for training, and 50,000 registered features across 15 teams."
+      - speaker: candidate
+        text: "That's significant. Is the main goal consistency, performance, or developer productivity?"
+      - speaker: interviewer
+        text: "All three, but consistency is the top priority. Training-serving skew is causing real accuracy drops in production."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: question
+    label: "Architecture Scope"
+    speaker: interviewer
+    content: |
+      What's the fundamental architectural approach for this feature store? The key decision is how features flow through the system.
+    dialogue:
+      - speaker: interviewer
+        text: "How should features flow from definition to training and serving? What's the core architecture?"
+      - speaker: candidate
+        text: "The main question is whether we centralize computation or just centralize storage and serving."
+    choices:
+      - label: "Compute-centric (centralized feature pipelines)"
+        answer: |
+          I'd build a **compute-centric feature store** where feature computation is centralized and managed by the platform, not individual teams.
+
+          **Core idea**: Feature authors define features as **declarative transformations** (SQL/Python), and the feature store handles materializing them for both training and serving. This is the **Uber Michelangelo** and **Tecton** approach.
+
+          **Architecture**:
+          1. **Feature definitions** (code): Authors write feature logic once in a supported DSL (SQL for batch, Python/Flink for streaming). Example: `user_30day_txn_count = count(transactions WHERE user_id = entity AND timestamp > now() - 30d)`
+          2. **Compute engine**: The feature store runs these definitions on schedule (batch) or in real-time (streaming). It guarantees the SAME code runs for training AND serving
+          3. **Offline store**: Materialized historical feature values stored in a data warehouse (BigQuery, Snowflake, Hive) partitioned by time. Used for training data generation
+          4. **Online store**: Latest feature values stored in low-latency key-value store (Redis, DynamoDB). Updated by batch or streaming pipelines
+
+          **Why compute-centric?**
+          - **Eliminates training-serving skew by design**: Same feature definition, same computation code, run by the same platform. The #1 cause of skew (different code paths) is structurally impossible
+          - **Feature quality enforcement**: Platform validates feature definitions, runs data quality checks, tracks schema changes
+          - **Compute optimization**: Platform can deduplicate computation (if 8 teams use the same feature, compute once, share everywhere)
+
+          **Trade-off**: Higher platform complexity. The feature store must manage compute infrastructure (Spark, Flink, Kubernetes jobs), not just storage. More opinionated - teams must adopt the platform's DSL/SDK. Higher upfront investment but better long-term consistency.
+        next: met_system
+      - label: "Storage-centric (centralized registry + serving)"
+        answer: |
+          I'd build a **storage-centric feature store** that provides centralized storage, serving, and discovery, but lets teams compute features in their preferred tools.
+
+          **Core idea**: Teams compute features however they want (Spark, dbt, custom Python), then **register and push** feature values into the feature store. The store handles storage, versioning, serving, and discovery. This is closer to the **Feast** and **Hopsworks** approach.
+
+          **Architecture**:
+          1. **Feature registry**: Metadata catalog where features are registered with schemas, descriptions, owners, and data contracts
+          2. **Ingestion API**: Teams push feature values (batch or streaming) into the feature store via SDK. Store validates schema, handles deduplication
+          3. **Offline store**: Historical feature values in columnar format (Parquet on S3/GCS, or Delta Lake). Teams use this for training with point-in-time correctness
+          4. **Online store**: Latest values in Redis/DynamoDB for low-latency serving
+          5. **Serving API**: Unified API for fetching features by entity key. Both training and serving use the same API (different backends)
+
+          **Why storage-centric?**
+          - **Lower adoption barrier**: Teams keep their existing compute tools (Spark, Airflow, dbt). They just need to push results to the feature store. Easier organizational buy-in
+          - **Flexibility**: Supports diverse feature computation patterns - batch SQL, streaming Kafka consumers, real-time Python transforms. No need to standardize on one compute framework
+          - **Incremental adoption**: Teams can migrate features one at a time. No big-bang migration required
+          - **Simpler platform**: Feature store doesn't manage compute, reducing operational complexity
+
+          **Training-serving skew mitigation**: The store doesn't compute features, so it can't guarantee identical computation. Mitigate with:
+          - **Feature contracts**: Schema validation on ingestion ensures correct types and ranges
+          - **Monitoring**: Detect statistical drift between batch (training) and streaming (serving) feature values
+          - **Shared feature libraries**: Publish Python packages with feature computation logic that both batch and streaming pipelines import
+
+          **Trade-off**: Skew prevention is organizational (best practices) not structural (platform-enforced). Requires discipline from teams.
+        next: met_system
+
+  - id: met_system
+    stage: metrics
+    type: info
+    label: "System Metrics"
+    speaker: interviewer
+    content: |
+      Let's define the metrics for evaluating our feature store.
+
+      **Performance metrics:**
+      - **Online serving latency**: p50 <5ms, p99 <10ms, p99.9 <50ms for single-entity feature vector retrieval. Uber's Michelangelo achieves p50 ~2ms
+      - **Online throughput**: 10M+ lookups/sec sustained. Peak: 15M/sec during traffic spikes
+      - **Offline read throughput**: Generate 100M+ training examples per hour. Point-in-time-correct joins must not be the bottleneck
+      - **Feature freshness**: Time from source data change to updated feature value. Batch: <1 hour. Streaming: <1 minute. Real-time: <100ms
+
+      **Reliability metrics:**
+      - **Online availability**: 99.99% uptime (52 minutes/year downtime max). Feature store outage = all ML models degraded
+      - **Data quality SLA**: <0.1% of served features are stale (beyond freshness guarantee)
+      - **Consistency**: Training and serving feature values match within 0.01% for batch features
+
+      **Adoption metrics:**
+      - **Feature reuse ratio**: Average number of models using each feature. Target: >3x (features shared across teams)
+      - **Time to production**: Days from feature code to production serving. Target: <3 days (current: 2-4 weeks)
+      - **Feature catalog utilization**: Percentage of features in catalog that are actually used by models. Target: >60%
+      - **Developer satisfaction**: NPS from ML engineers using the platform. Target: >50
+
+      **Cost metrics:**
+      - **Cost per feature lookup**: Online serving cost. Target: <$0.0001 per lookup
+      - **Storage cost per feature**: Monthly cost to store one feature's historical data. Target: <$1/month
+      - **Compute cost per feature**: Monthly cost to materialize one feature. Varies widely by complexity
+    dialogue:
+      - speaker: interviewer
+        text: "How do we measure success for the feature store?"
+      - speaker: candidate
+        text: "Performance metrics like latency and throughput, reliability metrics like availability and consistency, and adoption metrics that show the feature store is actually being used."
+      - speaker: interviewer
+        text: "What about the training-serving skew problem specifically?"
+      - speaker: candidate
+        text: "Consistency metric: training and serving feature values should match within 0.01% for batch features. We should actively measure this for every registered feature."
+      - speaker: interviewer
+        text: "Good. Developer experience metrics matter too."
+      - speaker: candidate
+        text: "Time to production is key. If it takes 3 weeks to ship a feature, engineers will bypass the system. Target under 3 days."
+    next: data_architecture
+
+  - id: data_architecture
+    stage: data
+    type: info
+    label: "Data Architecture"
+    speaker: interviewer
+    content: |
+      Let's discuss the data architecture - how features are stored, versioned, and served.
+
+      **Entity model**: Features are organized by **entities** (user, merchant, transaction, device). Each feature value is keyed by entity ID + timestamp. Example: `feature_store.get("user_123", ["txn_count_30d", "avg_order_value"], timestamp="2024-06-01T12:00:00")`
+
+      **Offline store design:**
+      - **Storage**: Apache Iceberg or Delta Lake on object storage (S3/GCS). Columnar format (Parquet) for efficient analytical queries
+      - **Partitioning**: By entity type + feature group + date. Enables efficient time-range scans
+      - **Point-in-time correctness**: For training, we need feature values AS OF a specific timestamp (the label timestamp). This prevents data leakage. Implemented via temporal joins with event-time semantics
+      - **Schema**: Each feature has a versioned schema (name, type, description, owner, SLA). Schema changes are handled via schema evolution (add columns, widen types)
+
+      **Online store design:**
+      - **Storage**: Redis Cluster (for <10ms latency) or DynamoDB (for managed scalability)
+      - **Key design**: `{entity_type}:{entity_id}` -> serialized feature vector (Protobuf or MessagePack)
+      - **Capacity**: 500M entity keys * 1KB average feature vector = 500GB. Redis Cluster with 10 nodes, 64GB each
+      - **TTL**: Features expire based on freshness requirements. User features: 24h TTL. Real-time features: 5min TTL
+
+      **Dual-write pattern**: Features are written to BOTH offline (for training) and online (for serving) stores. Batch features: offline first, then materialized to online. Streaming features: online first, then persisted to offline.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you store and serve features for both training and production?"
+      - speaker: candidate
+        text: "Dual stores: an offline store in columnar format for batch training, and an online store in Redis for low-latency serving."
+      - speaker: interviewer
+        text: "How do you ensure point-in-time correctness for training?"
+      - speaker: candidate
+        text: "Temporal joins with event-time semantics. When generating training data, each example gets feature values AS OF the label timestamp, preventing leakage."
+      - speaker: interviewer
+        text: "And for the online store, what's the capacity?"
+      - speaker: candidate
+        text: "500 million entity keys at about 1KB each is 500GB. Redis Cluster with 10 nodes handles this with sub-5ms p50 latency."
+    next: data_question
+
+  - id: data_question
+    stage: data
+    type: question
+    label: "Feature Freshness"
+    speaker: interviewer
+    content: |
+      How would you handle features with different freshness requirements? Some features change slowly (user demographics), others change rapidly (user's current session behavior).
+    dialogue:
+      - speaker: interviewer
+        text: "Features have different freshness needs. How do you handle the spectrum from batch (daily) to real-time (sub-second)?"
+      - speaker: candidate
+        text: "We need different compute and serving tiers based on freshness requirements."
+    choices:
+      - label: "Unified streaming architecture (Kafka + Flink)"
+        answer: |
+          I'd build a **unified streaming architecture** where ALL features flow through a streaming pipeline, with batch features treated as infrequent updates.
+
+          **Architecture**:
+          - **Kafka** as the central message bus. All data sources publish events to Kafka topics (transactions, user actions, inventory updates, etc.)
+          - **Apache Flink** as the unified compute engine. Feature transformations are Flink jobs that consume Kafka topics and produce feature values
+          - **Batch features**: Implemented as Flink batch jobs (or Flink SQL on historical data) that run on schedule and publish results to Kafka. Same framework, same code paths
+          - **Streaming features**: Flink streaming jobs with windowed aggregations (e.g., "count of transactions in last 5 minutes"). Results published to Kafka in real-time
+          - **Feature sink**: Kafka consumer writes feature values to both online store (Redis) and offline store (Iceberg/Delta Lake)
+
+          **Why unified streaming?**
+          - **Single compute framework**: All features are Flink jobs, regardless of freshness tier. Developers learn one tool
+          - **Consistent semantics**: Flink's event-time processing guarantees correct windowed aggregations for both batch and streaming
+          - **Continuous**: Even "batch" features can update hourly instead of daily, improving freshness
+          - **Backfill**: Replay historical Kafka topics (or read from offline storage) to backfill features for training. Same Flink code, different input source
+
+          **Real-time features** (sub-second):
+          - User's current session count, cart total, time since last action
+          - Flink streaming with 1-second tumbling windows
+          - Online store update latency: <500ms from event to updated feature
+
+          **Trade-off**: Flink expertise is required across all teams. Streaming infrastructure is more complex to operate than batch. Higher operational cost but superior consistency and freshness.
+        next: feat_computation
+      - label: "Tiered architecture (batch + streaming + real-time)"
+        answer: |
+          I'd build a **tiered architecture** with separate infrastructure for each freshness tier, optimized for each use case.
+
+          **Tier 1 - Batch features** (hourly/daily freshness):
+          - **Compute**: Apache Spark or dbt on scheduled Airflow DAGs
+          - **Examples**: User lifetime value, 30-day purchase count, merchant category averages
+          - **Pipeline**: Source tables -> Spark transformation -> Write to Iceberg (offline) + materialize to Redis (online)
+          - **Latency**: 1-24 hours from source data to updated feature
+
+          **Tier 2 - Near-real-time features** (minute freshness):
+          - **Compute**: Apache Flink or Kafka Streams consuming change data capture (CDC) events
+          - **Examples**: User's last 5 transactions, real-time inventory count, trending items
+          - **Pipeline**: Kafka CDC topic -> Flink aggregation -> Write to Redis + append to offline store
+          - **Latency**: 30 seconds - 5 minutes from source event to updated feature
+
+          **Tier 3 - Real-time features** (sub-second freshness):
+          - **Compute**: In the serving request path. Feature store computes on-the-fly from cached raw data
+          - **Examples**: Time since last login, current cart total, request-specific context features
+          - **Pipeline**: Feature store API receives request -> looks up cached raw data -> computes feature -> returns
+          - **Latency**: <10ms additional latency per real-time feature
+
+          **Advantages**: Each tier uses the best tool for its requirements. Batch is simple and cheap (Spark). Streaming handles moderate freshness (Flink). Real-time uses lightweight in-request computation. Teams choose the tier that matches their feature's needs.
+
+          **Trade-off**: Three separate systems to maintain. Features that need to change tiers (e.g., batch to streaming) require migration. Some code duplication between tiers.
+        next: feat_computation
+
+  - id: feat_computation
+    stage: features
+    type: info
+    label: "Feature Computation & SDK"
+    speaker: interviewer
+    content: |
+      Let's discuss the developer experience and how features are actually defined and computed.
+
+      **Feature definition SDK** (Python):
+      ```python
+      @feature(entity="user", freshness="1h")
+      def user_30d_txn_count(user_id: str, timestamp: datetime) -> int:
+          return db.query("SELECT COUNT(*) FROM transactions
+                          WHERE user_id = %s AND ts > %s - INTERVAL 30 DAY",
+                          user_id, timestamp)
+      ```
+
+      **Feature groups**: Related features are bundled into groups (e.g., `user_transaction_features`, `merchant_profile_features`). Groups share entity keys and computation schedules, reducing redundant data reads.
+
+      **Feature registry** (metadata catalog):
+      - **Discovery**: Search features by name, entity, team, description. "Show me all user features related to fraud"
+      - **Lineage**: Track which data sources feed each feature, which models consume it
+      - **Quality metrics**: Freshness, null rate, distribution statistics, schema versions
+      - **Documentation**: Auto-generated docs from feature definitions + manual descriptions
+      - **Access control**: RBAC per feature group. PII features require additional approval
+
+      **Point-in-time join service**: For training data generation, the feature store provides a join API:
+      ```python
+      training_data = feature_store.get_historical_features(
+          entity_df=labels_df,  # DataFrame with entity_id + timestamp + label
+          feature_refs=["user:txn_count_30d", "user:avg_order_value", "merchant:fraud_rate"]
+      )
+      ```
+      This performs efficient temporal joins, returning feature values AS OF each label's timestamp.
+
+      **Feature validation**: On registration, features are validated for:
+      - Schema correctness (types, nullability)
+      - No data leakage (feature timestamp must precede label timestamp)
+      - Statistical properties (range, distribution, null rate within expected bounds)
+    dialogue:
+      - speaker: interviewer
+        text: "What does the developer experience look like? How do ML engineers interact with the feature store?"
+      - speaker: candidate
+        text: "A Python SDK for defining features declaratively, a feature registry for discovery and documentation, and a point-in-time join API for training data generation."
+      - speaker: interviewer
+        text: "The point-in-time join is critical. How do you prevent data leakage?"
+      - speaker: candidate
+        text: "The join API enforces temporal correctness. Feature values are retrieved AS OF the label timestamp. If a label is from June 1st, you get features as they existed on June 1st, not future values."
+      - speaker: interviewer
+        text: "Good. What about feature discovery?"
+      - speaker: candidate
+        text: "Searchable catalog with name, description, owner, lineage, and quality metrics. Engineers can find existing features before building new ones, reducing duplication."
+    next: mod_serving
+
+  - id: mod_serving
+    stage: model
+    type: question
+    label: "Online Serving Architecture"
+    speaker: interviewer
+    content: |
+      How would you design the online serving layer to achieve <10ms p99 latency at 10M+ lookups per second?
+    dialogue:
+      - speaker: interviewer
+        text: "10 million lookups per second at under 10ms p99. That's a demanding requirement. How do you architect this?"
+      - speaker: candidate
+        text: "The serving layer is the most performance-critical component. The choice of data store and caching strategy is fundamental."
+    choices:
+      - label: "Redis Cluster with application-level caching"
+        answer: |
+          I'd use **Redis Cluster** as the primary online store, with application-level caching for the most frequently accessed features.
+
+          **Redis Cluster deployment:**
+          - **Cluster size**: 20 nodes, each 64GB memory, 8 cores. Total: 1.28TB memory
+          - **Sharding**: Hash-based sharding by entity_id. Each node owns a range of hash slots
+          - **Replication**: 1 replica per primary (20 replicas). Reads served from replicas, writes to primaries
+          - **Performance**: Redis achieves ~500K ops/sec per node. 20 nodes * 500K = 10M ops/sec sustained throughput
+          - **Latency**: p50 ~1ms, p99 ~5ms for single-key lookups. p99 <10ms even under heavy load
+
+          **Data model:**
+          - Key: `{entity_type}:{entity_id}` (e.g., `user:abc123`)
+          - Value: Serialized feature vector (Protobuf). All features for an entity in one key
+          - Advantage: Single round-trip retrieves ALL features for an entity
+
+          **Application-level caching** (L1 cache):
+          - **In-process cache** (Caffeine/Guava) in each serving pod: Cache the top 1M most frequently accessed entities
+          - **Hit rate**: ~40-60% for user features (power-law access distribution)
+          - **TTL**: 60 seconds (features don't change faster than this for most entities)
+          - Cache hit = 0.01ms vs Redis lookup = 1-5ms
+
+          **Multi-entity batch API**: For models that need features for multiple entities (e.g., ranking model scoring 100 candidates), provide a batch API that fetches features in parallel using Redis MGET. Reduces round trips from 100 to 1.
+
+          **Failover**: Redis Sentinel for automatic failover. If a primary fails, replica promotes in <30 seconds. During failover, serve from remaining replicas (slightly stale data, acceptable).
+        next: train_management
+      - label: "DynamoDB with DAX caching"
+        answer: |
+          I'd use **Amazon DynamoDB** with **DAX (DynamoDB Accelerator)** for a fully managed, auto-scaling online store.
+
+          **DynamoDB design:**
+          - **Table**: `feature_store_online`
+          - **Partition key**: `{entity_type}#{entity_id}` (e.g., `user#abc123`)
+          - **Attributes**: Each feature is a top-level attribute for efficient partial reads
+          - **Capacity**: On-demand mode (auto-scales to any throughput). No capacity planning needed
+          - **Consistency**: Eventually consistent reads (default) are fine for features - 0.5 second staleness is acceptable
+
+          **DAX (DynamoDB Accelerator):**
+          - In-memory cache cluster in front of DynamoDB
+          - **3-node DAX cluster**: Each node 8 vCPU, 32GB RAM
+          - **Cache hit latency**: <1ms (vs. DynamoDB's ~5ms for single-digit ms reads)
+          - **Hit rate**: ~70-80% for frequently accessed features
+          - **Item cache TTL**: 5 minutes. Query cache TTL: 1 minute
+
+          **Why managed service?**
+          - **Zero operational overhead**: No Redis cluster management, no failover configuration, no memory tuning
+          - **Auto-scaling**: DynamoDB scales to any throughput level automatically. Handles traffic spikes without pre-provisioning
+          - **Durability**: DynamoDB provides 99.999% durability. No data loss even during hardware failures
+          - **Global tables**: Multi-region replication for <10ms reads globally. Feature store serves models in any region
+
+          **Cost model**: DynamoDB on-demand pricing: $1.25 per million read units. At 10M lookups/sec = 864B reads/day. With DAX 75% hit rate, only 216B DynamoDB reads/day = ~$270K/year. Add DAX cluster: ~$30K/year. **Total: ~$300K/year**.
+
+          **Trade-off**: Higher per-query cost than self-managed Redis. But eliminates 2-3 engineering headcount for Redis operations ($400-600K/year). Net savings for most organizations.
+        next: train_management
+
+  - id: train_management
+    stage: training
+    type: info
+    label: "Feature Lifecycle Management"
+    speaker: interviewer
+    content: |
+      Let's discuss how features are managed through their lifecycle - from creation to retirement.
+
+      **Feature lifecycle stages:**
+      1. **Development**: Engineer writes feature definition locally, tests against sample data
+      2. **Registration**: Feature is registered in the catalog with schema, description, owner, SLA
+      3. **Validation**: Automated checks - schema correctness, no data leakage, reasonable value distributions
+      4. **Materialization**: Feature store schedules computation and begins populating offline + online stores
+      5. **Monitoring**: Continuous tracking of freshness, null rates, distribution drift, and quality
+      6. **Deprecation**: When no models reference a feature, it's marked deprecated. Removed after grace period
+
+      **Version management:**
+      - Features have semantic versions (v1.0, v1.1, v2.0). Minor versions are backward-compatible (additive changes). Major versions may break consumers
+      - Both old and new versions can run simultaneously during migration
+      - Training data generation can request specific feature versions for reproducibility
+
+      **Backfill pipeline:**
+      - When a new feature is registered, historical values must be computed for training
+      - Backfill runs the feature definition against historical data (typically 1-2 years)
+      - Large backfills (100B+ rows) are chunked and parallelized across Spark/Flink workers
+      - Backfill progress is tracked in the UI with estimated completion time
+
+      **Feature quality gates:**
+      - **Pre-deployment checks**: Schema validation, value range checks, null rate <5%
+      - **Post-deployment monitoring**: Statistical distribution compared to expected baseline. Alert on drift >2 standard deviations
+      - **Cross-environment validation**: Compare feature values between training and serving for the same entities. Flag if divergence >0.1%
+
+      **Governance:**
+      - PII features require data protection officer approval
+      - Feature access logs are maintained for audit trails
+      - Data retention policies enforced automatically (e.g., delete feature values >2 years old)
+    dialogue:
+      - speaker: interviewer
+        text: "How do features move from development to production? What's the lifecycle?"
+      - speaker: candidate
+        text: "Development, registration with schema and metadata, validation checks, materialization to stores, continuous monitoring, and eventually deprecation."
+      - speaker: interviewer
+        text: "What about versioning? Features evolve over time."
+      - speaker: candidate
+        text: "Semantic versioning with backward compatibility guarantees. Old and new versions run simultaneously during migration. Training can pin to specific versions for reproducibility."
+      - speaker: interviewer
+        text: "And backfilling historical data for new features?"
+      - speaker: candidate
+        text: "Parallelized backfill pipelines that compute historical values from source data. Critical for making new features available for training immediately."
+    next: deploy_operations
+
+  - id: deploy_operations
+    stage: deployment
+    type: question
+    label: "Deployment & Operations"
+    speaker: interviewer
+    content: |
+      How would you deploy and operate the feature store at scale?
+    dialogue:
+      - speaker: interviewer
+        text: "This is an organization-critical platform. How do you deploy and operate it reliably?"
+      - speaker: candidate
+        text: "The deployment strategy depends on whether we self-host or use managed services."
+    choices:
+      - label: "Self-hosted on Kubernetes"
+        answer: |
+          I'd deploy on a **self-hosted Kubernetes platform** for maximum control and customization.
+
+          **Architecture components on K8s:**
+          - **Feature serving pods**: Stateless gRPC servers that handle feature lookups. Auto-scale based on QPS (target: 70% CPU utilization). 50-100 pods during peak
+          - **Redis Cluster**: StatefulSet with persistent volumes. 20 pods with anti-affinity rules (spread across availability zones)
+          - **Flink/Spark compute**: Flink on Kubernetes for streaming, Spark on Kubernetes for batch. Managed via Flink Kubernetes Operator
+          - **Feature registry**: PostgreSQL for metadata, served via REST API pods
+          - **Monitoring stack**: Prometheus + Grafana for metrics, ELK for logs, PagerDuty for alerts
+
+          **Multi-region deployment:**
+          - Primary region: Full read-write capability. Feature materialization runs here
+          - Secondary region(s): Read replicas of online store. Cross-region Redis replication with ~50ms lag
+          - Feature serving pods in each region route reads to local Redis, reducing latency
+
+          **CI/CD for features:**
+          - Feature definitions stored in Git (infrastructure-as-code)
+          - PRs trigger validation checks, schema compatibility tests, and dry-run materialization
+          - Merge to main triggers automatic deployment: register feature, schedule backfill, begin materialization
+          - Canary deployment: New feature pipeline runs in shadow mode for 24h before going live
+
+          **Advantages**: Full control over infrastructure, no vendor lock-in, optimized for specific workload patterns. Can tune Redis, Flink, and Kubernetes for exact requirements.
+
+          **Cost**: ~$500K/year in infrastructure + 3-4 platform engineers for operations ($600K-800K). Total: ~$1.1-1.3M/year. Justified when serving 200+ models generating $100M+ in business value.
+        next: mon_platform
+      - label: "Managed service (Tecton / Databricks Feature Store)"
+        answer: |
+          I'd use a **managed feature store service** like Tecton, Databricks Feature Store, or SageMaker Feature Store to minimize operational burden.
+
+          **Tecton as the reference platform:**
+          - **Feature definitions**: Write feature pipelines in Tecton SDK (Python). Tecton handles scheduling, materialization, and serving
+          - **Online serving**: Tecton manages a high-performance serving layer (sub-5ms p99). No Redis to manage
+          - **Offline store**: Integrated with your data warehouse (Snowflake, Databricks, BigQuery). Point-in-time joins handled natively
+          - **Streaming**: Built-in Spark Structured Streaming for real-time features. No separate Flink cluster needed
+          - **Monitoring**: Built-in feature quality monitoring, freshness alerts, and serving metrics
+
+          **Why managed?**
+          - **Speed to value**: Deploy in weeks, not months. No infrastructure to build
+          - **Operational excellence**: The vendor operates at larger scale than most individual organizations. Their SLAs (99.99% uptime) are backed by dedicated infrastructure teams
+          - **Feature engineering focus**: Engineers spend time on features, not on managing Redis clusters and Flink deployments
+          - **Best practices built-in**: Point-in-time correctness, training-serving consistency, and feature monitoring are native capabilities, not custom implementations
+
+          **Integration pattern:**
+          - Feature definitions in Git, deployed via Tecton CLI
+          - Online serving: gRPC API called from model serving infrastructure
+          - Offline training: Tecton SDK generates training datasets with correct temporal semantics
+          - Monitoring: Tecton dashboard + export metrics to internal Grafana
+
+          **Cost**: Tecton pricing is usage-based. At our scale (~10M lookups/sec, 100TB offline): estimate **$500K-800K/year**. Comparable to self-hosted infrastructure cost, but with zero platform engineering headcount needed. Net savings: 3-4 engineers ($600-800K/year).
+
+          **Trade-off**: Vendor dependency. If Tecton's roadmap diverges from our needs, migration is expensive. Mitigate by keeping feature definitions portable (standard Python/SQL) and abstracting the SDK behind an internal interface.
+        next: mon_platform
+
+  - id: mon_platform
+    stage: monitoring
+    type: info
+    label: "Platform Monitoring"
+    speaker: interviewer
+    content: |
+      Let's discuss monitoring for the feature store platform.
+
+      **Feature health monitoring:**
+      - **Freshness tracking**: For each feature, monitor time since last update. Alert if freshness exceeds SLA (e.g., batch feature not updated in 2 hours when SLA is 1 hour)
+      - **Null rate monitoring**: Track percentage of null/missing values per feature. Sudden increase indicates data pipeline issues
+      - **Distribution drift**: Compare feature value distributions over rolling windows (today vs. last 7 days). Use KL-divergence or PSI. Alert on significant drift
+      - **Schema violations**: Monitor for unexpected types, out-of-range values, or format changes
+
+      **Serving layer monitoring:**
+      - **Latency**: p50, p95, p99, p99.9 per feature group and per entity type. Dashboard and alerting
+      - **Throughput**: Current QPS vs. capacity. Auto-scale triggers at 70% capacity
+      - **Error rates**: Failed lookups, timeout rates, cache miss rates
+      - **Hot keys**: Detect entities that are queried disproportionately (celebrity users, viral products). These can cause load imbalance
+
+      **Training-serving consistency monitoring:**
+      - **Automated comparison**: For a random sample of production serving requests, record the served feature values. Compare against what the offline store would have served for the same entity at the same timestamp
+      - **Skew score**: Aggregate divergence metric across all features. Alert if any feature diverges >1%
+      - **Root cause dashboard**: When skew is detected, show which specific features diverge and in which direction
+
+      **Business impact monitoring:**
+      - Track model accuracy metrics (from model monitoring systems) alongside feature freshness. Correlate: does feature staleness predict model accuracy drops?
+      - Feature utilization: Which features are actually used by production models? Unused features waste compute and storage
+
+      **Incident response**: Feature store degradation directly impacts all ML models. P1 playbook: failover to read replicas, degrade gracefully (serve slightly stale features rather than no features), notify all model teams.
+    dialogue:
+      - speaker: interviewer
+        text: "A feature store outage affects all 200+ models. How do you monitor and ensure reliability?"
+      - speaker: candidate
+        text: "Multi-layered monitoring: feature health (freshness, nulls, drift), serving performance (latency, throughput), and training-serving consistency."
+      - speaker: interviewer
+        text: "What's the most important thing to catch early?"
+      - speaker: candidate
+        text: "Training-serving skew. It silently degrades model accuracy without any obvious error. We need automated comparison between online-served and offline-computed feature values."
+      - speaker: interviewer
+        text: "And when things go wrong?"
+      - speaker: candidate
+        text: "Graceful degradation. Serve slightly stale features rather than failing completely. A model with 1-hour-old features is better than a model with no features."
+    next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Design Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive centralized feature store.
+
+      **Your design summary:**
+      - Chose compute-centric or storage-centric architecture with clear trade-offs
+      - Defined performance, reliability, adoption, and cost metrics
+      - Designed dual-store data architecture (offline + online) with point-in-time correctness
+      - Addressed feature freshness tiers (batch, streaming, real-time)
+      - Built developer experience with SDK, registry, and discovery
+      - Selected online serving approach (Redis Cluster or DynamoDB) for <10ms p99 latency
+      - Designed feature lifecycle management with versioning and backfill
+      - Deployed on self-hosted Kubernetes or managed service
+      - Implemented comprehensive monitoring including training-serving consistency checks
+
+      **Key strengths:**
+      - Training-serving skew is addressed structurally, not just through best practices
+      - Developer experience is prioritized alongside performance requirements
+      - Feature reuse and discovery reduce organizational duplication
+      - Graceful degradation ensures models remain operational during platform issues
+
+      **Areas for further exploration:**
+      - Feature embedding store: Serving vector embeddings alongside scalar features
+      - Feature marketplace: Cross-organization feature sharing
+      - AutoML integration: Automated feature selection from the catalog
+      - Cost attribution: Chargebacks to teams based on feature compute and storage usage

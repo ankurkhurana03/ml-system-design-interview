@@ -1,0 +1,1561 @@
+id: duplicate-listing-detection
+title: "Duplicate Listing Detection"
+description: "Design a system to identify and remove duplicate listings in an e-commerce marketplace."
+companies: ["Amazon", "eBay", "Etsy"]
+domains: ["NLP", "Computer Vision", "Tabular/Structured"]
+category: "Security, Safety & Fraud"
+root: pd_start
+
+nodes:
+  # ============ PROBLEM DEFINITION ============
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design a **duplicate listing detection system** for an e-commerce marketplace.
+
+      **Business context:**
+      - Amazon has **~350 million products** listed, with an estimated **10-15% duplicate rate**
+      - eBay processes **~1.7 billion live listings** with significant duplication from multiple sellers listing identical products
+      - Etsy has **~100 million active listings** where handmade items may have subtle variations that make deduplication harder
+      - Duplicates degrade **search quality**, confuse buyers, split reviews, and enable **price manipulation**
+
+      **Types of duplicates:**
+      - **Exact duplicates**: Same product listed multiple times by the same or different sellers
+      - **Near-duplicates**: Same product with minor title/description variations (different wording, extra keywords)
+      - **Cross-category duplicates**: Same product listed in different categories
+      - **Variant confusion**: Different variants (size, color) of the same product listed as separate products
+      - **Counterfeit/knockoff listings**: Fake products mimicking legitimate listings
+
+      **Goal:** Design an ML system that identifies duplicate listings at scale, enabling product catalog deduplication, search quality improvement, and review consolidation.
+
+      **Key challenge:** "Same product" is not always clear-cut. Is a 128GB iPhone and a 256GB iPhone the same product? Is a third-party case "compatible with iPhone 15" a duplicate of Apple's official case? The system needs nuanced similarity assessment.
+    dialogue:
+      - speaker: interviewer
+        text: "Let's design a duplicate listing detection system for a major e-commerce platform. What makes this problem interesting from an ML perspective?"
+      - speaker: candidate
+        text: "It's fundamentally an entity resolution problem at massive scale. The challenge is defining 'same product' -- it requires understanding semantic similarity across text, images, and structured attributes simultaneously."
+      - speaker: interviewer
+        text: "Good framing. What are the stakes?"
+      - speaker: candidate
+        text: "Duplicates hurt three things: search quality because results are cluttered, buyer trust because reviews are fragmented, and seller fairness because some sellers exploit duplicates to dominate search results."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: info
+    label: "Problem Scoping"
+    speaker: interviewer
+    content: |
+      Let's scope the system.
+
+      **What we're building:**
+      - A **pairwise similarity scoring service** that determines if two listings refer to the same product
+      - A **candidate retrieval system** that efficiently finds potential duplicate pairs from hundreds of millions of listings
+      - A **clustering engine** that groups duplicate listings into product clusters (canonical products)
+
+      **What we're NOT building:**
+      - Product catalog management (downstream consumer of our dedup results)
+      - Price comparison across sellers (separate service that uses our clusters)
+      - Counterfeit detection (related but different model and data requirements)
+
+      **ML formulation:**
+      - **Candidate retrieval**: Approximate nearest neighbor search to find potentially similar listings (recall-optimized)
+      - **Pairwise classification**: Binary classification -- are these two listings the same product? (precision-optimized)
+      - **Transitive clustering**: If A=B and B=C, then A=C (merge into one product cluster)
+
+      **Scale considerations:**
+      - 350 million active listings
+      - ~2 million new listings per day
+      - Each new listing must be compared against the existing catalog
+      - Naive pairwise comparison: 350M x 350M = impossible. Need efficient candidate retrieval.
+
+      Let's discuss metrics.
+    dialogue:
+      - speaker: interviewer
+        text: "How would you handle the scale challenge? 350 million listings means trillions of possible pairs."
+      - speaker: candidate
+        text: "Two-stage approach: first, candidate retrieval using approximate nearest neighbor search to reduce the candidate set to maybe 100 potential matches per listing. Then, a precise pairwise classifier on just those 100 pairs."
+      - speaker: interviewer
+        text: "That's the standard blocking + matching approach in entity resolution. What's the key risk?"
+      - speaker: candidate
+        text: "Missing true duplicates in the retrieval stage. If the retrieval system doesn't surface a pair, the classifier never sees it. So retrieval recall must be very high, even at the cost of precision."
+    next: met_question
+
+  # ============ METRICS ============
+  - id: met_question
+    stage: metrics
+    type: question
+    label: "Optimization Strategy"
+    speaker: interviewer
+    content: |
+      Duplicate detection has asymmetric costs:
+
+      - **False positives** (merging non-duplicates): Two different products are incorrectly merged. This confuses buyers, shows wrong images/reviews, and angers sellers whose listings get removed.
+      - **False negatives** (missing duplicates): Duplicate listings remain in the catalog. This degrades search quality and fragments reviews but causes no immediate visible harm.
+
+      How would you optimize the system?
+    choices:
+      - label: "Precision-focused: Only merge with high confidence"
+        answer: |
+          I'd optimize for **high precision** -- only merge listings when we're very confident they're the same product:
+
+          **Why precision matters more:**
+          - **Seller trust**: Incorrectly merging a seller's unique product with a competitor's listing destroys trust and causes seller complaints
+          - **Buyer experience**: Showing the wrong product image or description because of a bad merge is worse than showing duplicates
+          - **Legal risk**: Merging a genuine product with a counterfeit (or vice versa) has legal implications
+          - **Hard to reverse**: Once listings are merged, undoing the merge and restoring reviews is complex
+
+          **Target metrics:**
+
+          | Metric | Target | Rationale |
+          |--------|--------|-----------|
+          | Pairwise precision | >99% | Only 1 in 100 merges should be incorrect |
+          | Pairwise recall | >85% | Catch most duplicates over time |
+          | Cluster purity | >98% | <2% of product clusters contain non-duplicates |
+          | Retrieval recall | >95% | Candidate retrieval must be very inclusive |
+          | New listing dedup latency | <5 minutes | Score new listings quickly |
+
+          **Confidence-based actions:**
+          - Score >0.95: Auto-merge (high confidence duplicate)
+          - Score 0.80-0.95: Flag for human review
+          - Score 0.50-0.80: Suggest as potential duplicate to seller
+          - Score <0.50: Different products
+
+          **Business metric:** Track **incorrect merge complaints** per 10,000 merges. Target: <5 complaints per 10K.
+        next: met_precision
+      - label: "Recall-focused: Maximize catalog cleanliness"
+        answer: |
+          I'd optimize for **high recall** -- aggressively finding and merging duplicates to create a clean product catalog:
+
+          **Why recall matters more:**
+          - **Search quality**: Duplicates clutter search results, pushing relevant results lower
+          - **Review consolidation**: Fragmented reviews across duplicate listings give incomplete information
+          - **Seller gaming**: Some sellers create hundreds of duplicate listings to dominate search results
+          - **Catalog integrity**: A clean catalog is a competitive advantage (Amazon's ASIN system is a moat)
+
+          **Target metrics:**
+
+          | Metric | Target | Rationale |
+          |--------|--------|-----------|
+          | Pairwise recall | >95% | Find nearly all duplicates |
+          | Pairwise precision | >90% | Accept up to 10% false merges |
+          | Catalog duplicate rate | <2% | Down from estimated 10-15% |
+          | Retrieval recall | >99% | Must not miss any potential pair |
+          | New listing dedup latency | <1 minute | Fast to prevent duplicates from appearing |
+
+          **Handling false merges:**
+          - **Easy seller dispute process**: Sellers can contest merges via one-click dashboard
+          - **Automatic undo**: If dispute is filed, immediately separate listings pending review
+          - **Human review queue**: Disputed merges reviewed within 24 hours by catalog specialists
+          - **Seller notifications**: Always notify sellers before merging their listings
+
+          **Business metric:** Track **search result diversity** -- are users seeing unique products or duplicates? Target: <2% of top-20 search results should be duplicates.
+        next: met_recall
+
+  - id: met_precision
+    stage: metrics
+    type: info
+    label: "Precision-Focused Metrics"
+    speaker: interviewer
+    content: |
+      Good choice. Precision-first is safer for seller trust.
+
+      **Complete metrics framework:**
+
+      | Category | Metric | Target | Measurement |
+      |----------|--------|--------|-------------|
+      | **Pairwise Quality** | Precision | >99% | Human-labeled evaluation set |
+      | **Pairwise Quality** | Recall | >85% | Known duplicate test set |
+      | **Cluster Quality** | Purity (no incorrect merges) | >98% | Sampled cluster audit |
+      | **Cluster Quality** | Completeness (all dupes found) | >80% | Known duplicate groups |
+      | **Business** | Incorrect merge complaints | <5 per 10K merges | Seller complaint tracking |
+      | **Business** | Search result diversity | >90% unique products in top-20 | Automated monitoring |
+      | **Operational** | New listing dedup latency | <5 min | Pipeline monitoring |
+      | **Retrieval** | Candidate recall | >95% | Sampled evaluation |
+
+      **Evaluation methodology:**
+      - **Human-labeled evaluation set**: 50K listing pairs labeled by catalog specialists (refreshed quarterly)
+      - **Known duplicate clusters**: 10K product clusters verified by manual review
+      - **Category-specific evaluation**: Electronics, clothing, books each have different duplicate characteristics
+      - **Cross-seller evaluation**: Ensure the system works equally well for duplicates from same seller vs different sellers
+
+      Let's design the data pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you create the ground truth evaluation set?"
+      - speaker: candidate
+        text: "Multiple approaches: use UPC/EAN barcodes that definitively identify products, leverage known product catalog databases like GS1, and hire catalog specialists to label ambiguous pairs. The UPC-matched pairs give us a reliable base."
+      - speaker: interviewer
+        text: "Not all listings have UPCs though."
+      - speaker: candidate
+        text: "Correct, especially handmade and unbranded items. For those, we rely on human labelers with clear guidelines: same brand, same model, same specifications = same product. Color/size variants may or may not be 'same' depending on the catalog's variant handling."
+    next: data_collection
+
+  - id: met_recall
+    stage: metrics
+    type: info
+    label: "Recall-Focused Metrics"
+    speaker: interviewer
+    content: |
+      Good approach. Aggressive deduplication creates a better shopping experience.
+
+      **Complete metrics framework:**
+
+      | Category | Metric | Target | Measurement |
+      |----------|--------|--------|-------------|
+      | **Pairwise Quality** | Recall | >95% | Known duplicate test set |
+      | **Pairwise Quality** | Precision | >90% | Human evaluation |
+      | **Catalog Quality** | Estimated duplicate rate | <2% | Sampled audit |
+      | **Catalog Quality** | Review consolidation rate | >90% | Reviews per product cluster |
+      | **Business** | Search result diversity | >95% unique in top-20 | Automated monitoring |
+      | **Business** | Seller dispute rate | <2% of merges | Dispute tracking |
+      | **Operational** | New listing dedup latency | <1 min | Pipeline monitoring |
+      | **Retrieval** | Candidate recall | >99% | Sampled evaluation |
+
+      **Evaluation methodology:**
+      - **Catalog snapshot analysis**: Monthly random sample of 100K listings, estimate remaining duplicate rate
+      - **Search quality audit**: Sample 1,000 search queries, count duplicate products in top-20 results
+      - **Seller satisfaction survey**: Quarterly survey of top sellers on catalog quality and merge accuracy
+      - **UPC/EAN validation**: For listings with barcodes, verify cluster assignments match barcode identity
+
+      Let's design the data pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you prevent aggressive deduplication from harming long-tail sellers?"
+      - speaker: candidate
+        text: "The system identifies duplicate products, but doesn't remove seller listings. Instead, it creates a canonical product page where all sellers' offers are consolidated. Each seller keeps their listing but it's linked to the shared product page, similar to Amazon's approach."
+      - speaker: interviewer
+        text: "That's an important distinction -- deduplication at the product level, not the listing level."
+    next: data_collection
+
+  # ============ DATA ============
+  - id: data_collection
+    stage: data
+    type: info
+    label: "Data Sources & Collection"
+    speaker: interviewer
+    content: |
+      Before designing the pipeline, let's understand the data landscape for duplicate listing detection.
+
+      **Primary data sources per listing:**
+
+      | Source | Description | Coverage | Quality |
+      |--------|-------------|----------|---------|
+      | **Product identifiers** | UPC, EAN, ISBN, ASIN, MPN | ~60% of listings | Highest quality when available |
+      | **Listing text** | Title, description, bullet points, brand name | 100% | Noisy, variable quality |
+      | **Product images** | Primary and secondary product photos | ~95% | Variable quality, angles, backgrounds |
+      | **Structured attributes** | Category, size, color, weight, material, specs | ~70% (varies by category) | Semi-structured, inconsistent naming |
+      | **Seller metadata** | Seller name, store ID, location, rating | 100% | Useful for cross-seller matching |
+      | **Price data** | Current price, price history, shipping cost | 100% | Strong signal (same product, similar price) |
+
+      **Label sources for training:**
+      - **UPC/EAN matching**: Products sharing the same barcode are definitive duplicates (~60% of product pairs can be validated this way)
+      - **ASIN linkage**: Amazon's canonical product IDs link multiple listings to the same product
+      - **Human annotation**: Expert labelers review listing pairs and judge same/different product (expensive but needed for unbranded items)
+      - **Seller self-reporting**: Sellers sometimes report competitors listing the same product
+      - **Purchase + return signals**: If a buyer purchases from listing A and returns it referencing listing B, they may be the same product
+
+      **Data quality challenges:**
+      - **Title pollution**: Sellers stuff keywords into titles for SEO: "iPhone 15 Pro Max Case Cover Shockproof Clear Slim Fit Military Grade"
+      - **Image inconsistency**: Same product photographed from different angles, backgrounds, lighting conditions
+      - **Attribute sparsity**: Many listings omit structured attributes, relying on free-text descriptions
+      - **Cross-category listings**: Same product listed in different categories with different attribute schemas
+      - **Variant ambiguity**: When is a size/color variant the "same product" vs a different product?
+
+      Let's now design how this data flows through the pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "What's the most reliable data source for determining if two listings are duplicates?"
+      - speaker: candidate
+        text: "Product identifiers like UPC and EAN are definitive when available. Two listings with the same barcode are guaranteed to be the same product. The problem is that about 40% of listings, especially handmade and unbranded items, lack standard identifiers."
+      - speaker: interviewer
+        text: "How do you handle the title pollution problem?"
+      - speaker: candidate
+        text: "Title normalization: strip SEO keywords, extract the core product name using NER, and standardize brand names against a known brand dictionary. For matching purposes, we'd also use semantic similarity rather than exact string matching."
+      - speaker: interviewer
+        text: "Good approach. What about image-based matching?"
+      - speaker: candidate
+        text: "Image embeddings from a pre-trained vision model like ResNet or CLIP, with fine-tuning on product image pairs. The challenge is that the same product can look very different across seller photos -- so we need augmentation with different backgrounds, angles, and lighting."
+    next: data_pipeline
+
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      Let's design the data pipeline for duplicate detection.
+
+      **Data sources per listing:**
+
+      | Source | Data | Coverage | Signal Strength |
+      |--------|------|----------|----------------|
+      | Title | Product name, brand, model number | 100% | High |
+      | Description | Detailed product description | ~80% | Medium |
+      | Images | Product photos (1-10 per listing) | ~95% | Very High |
+      | Attributes | Brand, category, UPC, size, color, material | Varies (30-90%) | Very High |
+      | Price | Listed price | ~100% | Low (many products at same price) |
+      | Seller info | Seller ID, location, history | 100% | Low |
+
+      **Structured identifiers (when available):**
+      - **UPC/EAN barcodes**: Unique product identifier -- if two listings share a UPC, they're the same product. Available for ~60% of listings.
+      - **Brand + MPN (Model Part Number)**: Strong signal when available (~40% of listings)
+      - **ISBN (books)**: Definitive match for books
+      - **ASIN (Amazon)**: Amazon's internal product ID, but not available on other platforms
+
+      **Training data construction:**
+      - **Positive pairs (duplicates)**: Listings sharing UPC/EAN/ISBN (~5M pairs)
+      - **Hard negative pairs**: Listings in same category with similar titles but different UPCs (~2M pairs)
+      - **Easy negative pairs**: Random pairs from different categories (~1M pairs)
+      - **Augmented pairs**: Synthetically modified titles (add/remove keywords, rephrase) from known duplicates
+
+      **Data processing pipeline:**
+      ```
+      New Listing Published
+           │
+           ├──► Text Processing
+           │    - Title normalization (lowercase, remove special chars)
+           │    - Brand/model extraction (NER)
+           │    - Key attribute extraction
+           │
+           ├──► Image Processing
+           │    - Resize to 224x224
+           │    - Background removal (for product photos)
+           │    - Feature extraction (CNN embedding)
+           │
+           └──► Structured Attribute Normalization
+                - Unit conversion (oz → ml, inches → cm)
+                - Brand name normalization ("Apple Inc." → "Apple")
+                - Category mapping to canonical taxonomy
+      ```
+
+      Let's choose the feature engineering approach.
+    dialogue:
+      - speaker: interviewer
+        text: "What's the most reliable signal for duplicate detection?"
+      - speaker: candidate
+        text: "Structured identifiers like UPC codes are definitive when available. But for the 40% of listings without UPCs -- handmade items, unbranded products, new brands -- we need to rely on title, description, images, and attributes."
+      - speaker: interviewer
+        text: "How do you handle the data quality issues?"
+      - speaker: candidate
+        text: "Normalization is crucial. Brand names have dozens of spellings, titles contain SEO spam, and descriptions vary wildly. I'd invest heavily in text normalization, brand name canonicalization, and attribute extraction before any similarity computation."
+    next: feat_overview
+
+  # ============ FEATURES ============
+  - id: feat_overview
+    stage: features
+    type: info
+    label: "Feature Engineering Overview"
+    speaker: interviewer
+    content: |
+      Duplicate listing detection is fundamentally a **pairwise similarity problem** at two stages: candidate retrieval and precise matching. Feature engineering differs at each stage.
+
+      **Stage 1: Candidate Retrieval Features (optimized for recall)**
+      - Goal: Given a listing, find the top-100 most similar listings from 350M candidates
+      - Features must be **embeddable** -- each listing gets a fixed-dimension vector for ANN search
+      - Speed requirement: <50ms per query including ANN search
+
+      **Stage 2: Pairwise Classification Features (optimized for precision)**
+      - Goal: Given two listings, determine if they are the same product
+      - Features capture **pairwise similarity signals** -- not just individual listing attributes
+      - Can use more expensive computation since we only compare ~100 pairs per listing
+
+      **Feature categories for duplicate detection:**
+
+      1. **Text similarity features**: Title similarity (cosine, Jaccard, edit distance), description overlap, brand match
+      2. **Image similarity features**: Visual embedding distance, perceptual hash similarity, color histogram distance
+      3. **Structured attribute features**: Category match, price ratio, dimension compatibility, weight similarity
+      4. **Identifier features**: UPC/EAN match, brand + MPN match, ASIN linkage
+      5. **Cross-modal features**: Does the image match the title? Does the description match the attributes?
+
+      **The blocking/candidate retrieval problem:**
+      - Naive pairwise comparison: 350M x 350M = 1.2 x 10^17 pairs -- impossible
+      - **Blocking strategies** reduce candidate pairs:
+        - Same-category blocking: Only compare within category
+        - Brand blocking: Only compare within brand (after brand normalization)
+        - Embedding-based ANN: Use FAISS/ScaNN for approximate nearest neighbor search
+
+      **Key insight:** The retrieval stage determines the ceiling for the entire system. If a true duplicate pair is not surfaced during retrieval, the classifier never sees it. **Retrieval recall > 95%** is critical.
+
+      Let's choose the primary feature engineering strategy.
+    dialogue:
+      - speaker: interviewer
+        text: "Why the two-stage architecture?"
+      - speaker: candidate
+        text: "Scale. With 350 million listings, comparing every pair is computationally impossible. The two-stage approach uses a fast, recall-optimized retrieval step to narrow down to ~100 candidates per listing, then a precise classifier on those manageable pairs."
+      - speaker: interviewer
+        text: "What's the biggest risk in this architecture?"
+      - speaker: candidate
+        text: "Missing true duplicates in the retrieval stage. If the candidate set doesn't contain the true duplicate, no amount of classifier accuracy will find it. That's why retrieval recall must be very high, even at the cost of precision."
+      - speaker: interviewer
+        text: "Let's dive into the feature engineering approach."
+    next: feat_question
+
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Engineering Approach"
+    speaker: interviewer
+    content: |
+      Feature engineering for duplicate detection spans text, images, and structured data. The key challenge is creating representations where "same product" listings end up close together in feature space. What approach would you prioritize?
+    choices:
+      - label: "Text embeddings + attribute matching"
+        answer: |
+          I'd focus on **text embeddings combined with structured attribute matching** as the primary approach:
+
+          **Title embedding (primary signal):**
+          - Use **Sentence-BERT (all-MiniLM-L6-v2)** to embed product titles into 384-dim vectors
+          - Fine-tune on product title pairs using contrastive learning (same-product titles should be close)
+          - Training: Use UPC-matched pairs as positive examples
+          - Result: `cosine_similarity(embed(title_A), embed(title_B))` captures semantic similarity
+
+          **Brand + model extraction:**
+          - **NER model** trained to extract brand and model from titles
+          - "Apple iPhone 15 Pro 256GB Space Black" → brand: "Apple", model: "iPhone 15 Pro", storage: "256GB", color: "Space Black"
+          - Brand match is a very strong signal: same brand + similar model = likely duplicate
+          - Brand normalization dictionary: "Apple Inc." = "Apple" = "AAPL" = "apple"
+
+          **Attribute matching features:**
+          - **Exact attribute match count**: How many structured attributes match exactly?
+          - **Compatible attribute ratio**: How many attributes are compatible (not contradictory)?
+          - **Missing attribute penalty**: If one listing has "256GB" and other has no storage listed, lower confidence
+          - **Price ratio**: `|price_A - price_B| / max(price_A, price_B)` -- duplicates should have similar prices
+
+          **Combined feature vector per pair:**
+          - Title cosine similarity: 1 feature
+          - Brand match: 1 feature (binary)
+          - Model similarity: 1 feature (fuzzy string match)
+          - Attribute match count: 1 feature
+          - Category match: 1 feature (binary + hierarchy distance)
+          - Price ratio: 1 feature
+          - Description similarity: 1 feature (embedding cosine)
+          - Total: ~15 features per listing pair
+
+          **Why text + attributes:**
+          - **Fast**: Embedding computation is one-time per listing; pair scoring is a dot product + a few comparisons
+          - **Interpretable**: "These listings matched because same brand, same model, and 95% title similarity"
+          - **Robust**: Structured attributes catch exact matches; embeddings catch semantic matches
+        next: feat_text
+      - label: "Multi-modal: Text + image embeddings"
+        answer: |
+          I'd use a **multi-modal approach** combining text and image representations:
+
+          **Why images are critical for product deduplication:**
+          - Sellers can use completely different titles for the same product
+          - Images are harder to manipulate and more consistent across duplicate listings
+          - Some products are visually identical but have different textual descriptions
+          - Cross-language duplicates: Same product listed in English and Chinese -- images match even when text doesn't
+
+          **Image embedding pipeline:**
+          - **Base model**: EfficientNet-B3 or CLIP ViT-B/32
+          - Pre-trained on ImageNet, fine-tuned on product image pairs
+          - Extract 512-dim embedding from the penultimate layer
+          - **CLIP advantage**: Jointly trained on text-image pairs, captures semantic product similarity
+
+          **Text embedding pipeline:**
+          - **Model**: Fine-tuned Sentence-BERT on product titles
+          - 384-dim embedding per title
+          - Contrastive learning with product pairs
+
+          **Multi-modal fusion:**
+          ```
+          Image A ──► CNN ──► img_embed_A (512-dim)    Similarity Features:
+          Image B ──► CNN ──► img_embed_B (512-dim)    - Image cosine sim
+                                                        - Text cosine sim
+          Title A ──► SBERT ──► text_embed_A (384-dim)  - Brand match
+          Title B ──► SBERT ──► text_embed_B (384-dim)  - Attribute match
+                                                        - Price ratio
+                         │                               │
+                         └──────────┬────────────────────┘
+                                    ▼
+                              LightGBM Classifier
+                                    │
+                                    ▼
+                              Duplicate? (0-1)
+          ```
+
+          **Image-specific techniques:**
+          - **Background removal**: Remove listing background noise (focus on the product)
+          - **Multi-image comparison**: Compare best-matching pair across all images (not just first image)
+          - **Near-duplicate image detection**: Perceptual hashing (pHash) for detecting images that are crops/resizes of each other
+
+          **Why multi-modal:**
+          - Text catches 70% of duplicates; images add 15% more (especially for listings with poor text)
+          - Cross-language deduplication becomes possible through images
+          - Counterfeit detection benefits enormously from image comparison
+        next: feat_multimodal
+
+  - id: feat_text
+    stage: features
+    type: info
+    label: "Text Feature Details"
+    speaker: interviewer
+    content: |
+      Let's detail the text-based feature pipeline.
+
+      **Embedding model fine-tuning:**
+
+      ```
+      Training Data (UPC-matched pairs):
+      - Positive: (title_A, title_B) where UPC_A == UPC_B
+      - Hard negative: (title_A, title_C) where UPC_A != UPC_C
+                        but same category and similar brand
+
+      Contrastive Learning (MultipleNegativesRankingLoss):
+      - Push positive pairs close in embedding space
+      - Push negative pairs apart
+      - Fine-tune Sentence-BERT for ~5 epochs
+      - Result: Title embeddings optimized for product similarity
+      ```
+
+      **Candidate retrieval pipeline:**
+      ```
+      New Listing
+           │
+           ▼
+      Compute Title Embedding (384-dim)
+           │
+           ▼
+      ┌─────────────────────────────┐
+      │ FAISS Index (350M listings)  │
+      │ IVF-PQ index                 │
+      │ - 10,000 Voronoi cells      │
+      │ - PQ quantization (48 bytes) │
+      │ - Probe 100 cells per query  │
+      │ - Retrieve top-100 candidates│
+      │ - <50ms per query            │
+      └──────────┬──────────────────┘
+                 │
+                 ▼
+      100 candidate pairs → Pairwise classifier
+      ```
+
+      **FAISS index sizing:**
+      - 350M listings x 384-dim x 4 bytes = ~500GB (full precision)
+      - With PQ quantization (48 bytes per vector): ~17GB -- fits in memory on a single machine
+      - IVF index adds another ~2GB for cell centroids
+      - **Retrieval quality**: PQ quantization loses ~5% recall vs exact search
+
+      **Feature computation per candidate pair:**
+
+      | Feature | Type | Computation |
+      |---------|------|------------|
+      | Title cosine similarity | Float | Dot product of normalized embeddings |
+      | Brand match | Binary | Exact match after normalization |
+      | Model number match | Float | Fuzzy string similarity (Levenshtein) |
+      | Category distance | Int | Levels of disagreement in category tree |
+      | Price ratio | Float | abs(p1-p2)/max(p1,p2) |
+      | Attribute overlap | Float | Jaccard similarity of attribute sets |
+      | Description cosine | Float | Embedding similarity of descriptions |
+      | UPC match | Binary | Exact match (if both have UPC) |
+
+      Now let's choose the model architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle the cold-start problem for new listings with no UPC?"
+      - speaker: candidate
+        text: "The title embedding is the primary retrieval signal and doesn't require UPC. For scoring, the model handles missing features natively -- LightGBM treats missing UPC as a feature value. The model learns that when UPC is missing, it should rely more heavily on title similarity and brand match."
+      - speaker: interviewer
+        text: "What about SEO-stuffed titles that add irrelevant keywords?"
+      - speaker: candidate
+        text: "The Sentence-BERT embedding is surprisingly robust to keyword stuffing because it captures semantic meaning, not just keyword overlap. 'iPhone 15 Pro FAST SHIPPING BEST DEAL' and 'Apple iPhone 15 Pro' will still have high cosine similarity because the core product semantics dominate."
+    next: mod_question
+
+  - id: feat_multimodal
+    stage: features
+    type: info
+    label: "Multi-modal Feature Details"
+    speaker: interviewer
+    content: |
+      Let's detail the multi-modal feature pipeline.
+
+      **Image processing pipeline:**
+
+      ```
+      Listing Images (1-10 per listing)
+           │
+           ├──► Background Removal (U2Net)
+           │    - Isolate product from background
+           │    - Improves similarity for studio vs lifestyle photos
+           │
+           ├──► Feature Extraction (EfficientNet-B3 or CLIP)
+           │    - Per-image embedding (512-dim)
+           │    - Store embeddings for all images
+           │
+           └──► Perceptual Hash (pHash)
+                - 64-bit hash per image
+                - Fast near-duplicate detection
+                - Hamming distance < 10 = near-identical image
+      ```
+
+      **Multi-image comparison strategy:**
+      - Each listing has 1-10 images
+      - Compare all image pairs between two listings
+      - Use the **maximum similarity** across all pairs (most similar matching pair)
+      - Why max?: The primary product image is most diagnostic, but different sellers may use it in different positions
+
+      **CLIP for cross-modal matching:**
+      - CLIP embeds images and text into the same 512-dim space
+      - Can match a product image from listing A with the product title from listing B
+      - Especially useful when one listing has good images but poor text, and vice versa
+      - Cross-modal similarity: `cosine(CLIP_image(A), CLIP_text(B))`
+
+      **Candidate retrieval with image hashing:**
+      ```
+      New Listing Images
+           │
+           ├──► pHash Lookup (Hamming distance index)
+           │    - Finds near-identical images in <10ms
+           │    - High precision, low recall
+           │    - Catches exact image copies immediately
+           │
+           └──► Embedding-based Retrieval (FAISS)
+                - Finds visually similar products
+                - Higher recall, lower precision
+                - Catches products with different photos
+      ```
+
+      **Combined retrieval:**
+      - Union of text-based candidates (FAISS on title embeddings) + image-based candidates (FAISS on image embeddings) + pHash matches
+      - This maximizes retrieval recall -- if either text or image is similar, the pair is considered
+
+      Now let's choose the model architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle listings where images are of completely different angles or styles?"
+      - speaker: candidate
+        text: "The CNN embedding is trained to be invariant to viewing angle and photographic style. Fine-tuning on product image pairs teaches the model that a product shot from the front and the side are the same product. The max-similarity-across-all-pairs approach also helps."
+      - speaker: interviewer
+        text: "What about the computational cost of image processing?"
+      - speaker: candidate
+        text: "Image embeddings are computed once per listing and stored. The incremental cost is only for new listings (~2M/day). At ~10ms per image on GPU, processing 2M listings x 5 images = ~28 GPU-hours per day, which is manageable."
+    next: mod_question
+
+  # ============ MODEL ============
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Model Architecture"
+    speaker: interviewer
+    content: |
+      Now let's design the pairwise classifier that determines if two listings are duplicates. Remember, this model scores the candidate pairs produced by the retrieval stage. What architecture would you choose?
+    choices:
+      - label: "Gradient boosting on similarity features"
+        answer: |
+          I'd use **LightGBM on pairwise similarity features** -- the standard approach for entity resolution at scale:
+
+          **Feature vector per listing pair (~20 features):**
+
+          | Feature | Type | Description |
+          |---------|------|-------------|
+          | title_cosine_sim | Float | Sentence-BERT cosine similarity |
+          | brand_exact_match | Binary | Same brand after normalization |
+          | model_fuzzy_sim | Float | Levenshtein ratio of model numbers |
+          | category_match | Binary | Same leaf category |
+          | category_distance | Int | Levels apart in category tree |
+          | price_ratio | Float | Price difference ratio |
+          | attribute_jaccard | Float | Jaccard similarity of attributes |
+          | upc_match | Binary | Same UPC (if both available) |
+          | desc_cosine_sim | Float | Description embedding similarity |
+          | image_max_sim | Float | Max image cosine similarity |
+          | image_phash_dist | Int | Min pHash Hamming distance |
+          | seller_same | Binary | Same seller |
+          | title_token_overlap | Float | Jaccard of title tokens |
+          | brand_in_title | Binary | Brand appears in both titles |
+          | numeric_attr_match | Float | Similarity of numeric attributes |
+
+          **LightGBM configuration:**
+          - Objective: Binary (duplicate vs not)
+          - Trees: 300, max depth 6, learning rate 0.1
+          - Feature fraction: 0.8 per tree
+          - Min child samples: 50
+          - Training: ~5M labeled pairs, 5 minutes
+
+          **Why gradient boosting:**
+          - **Best for mixed feature types**: Binary, float, integer features handled natively
+          - **Handles missing values**: Many features are missing (no UPC, no images, no brand)
+          - **Blazing fast inference**: <0.1ms per pair, critical when scoring 100 candidates per listing
+          - **Interpretable**: SHAP explains each decision -- "These matched because same brand, 97% title similarity, and identical UPC"
+          - **Amazon's approach**: Their product matching system uses gradient boosting with similar features
+
+          **Threshold tuning:**
+          - Different thresholds per category (electronics need stricter matching than generic items)
+          - Books: Strict (ISBN must match or very high title+author similarity)
+          - Electronics: Medium (brand + model number + key specs)
+          - Clothing: Relaxed (same brand + similar name may be variants, not duplicates)
+        next: mod_gbm
+      - label: "Siamese neural network (learned similarity)"
+        answer: |
+          I'd use a **Siamese neural network** that learns product similarity end-to-end:
+
+          **Architecture:**
+          ```
+          Listing A                         Listing B
+            │                                  │
+          ┌─┴─────────────┐              ┌────┴──────────┐
+          │ Title → SBERT  │              │ Title → SBERT  │
+          │ Image → CNN    │              │ Image → CNN    │
+          │ Attrs → MLP    │              │ Attrs → MLP    │
+          └─┬──────────────┘              └─┬──────────────┘
+            │                                │
+            ▼                                ▼
+          ┌────────┐                    ┌────────┐
+          │ Product │ (shared weights)  │ Product │
+          │ Embed   │                   │ Embed   │
+          │ (256-d) │                   │ (256-d) │
+          └───┬────┘                    └───┬────┘
+              │                              │
+              └──────────┬───────────────────┘
+                         │
+                    ┌────┴────┐
+                    │ Similarity│
+                    │ Score     │ → P(duplicate)
+                    └──────────┘
+          ```
+
+          **Shared encoder architecture:**
+          - Text branch: Fine-tuned Sentence-BERT → 384-dim → FC(256) → ReLU
+          - Image branch: EfficientNet-B3 → 512-dim → FC(256) → ReLU
+          - Attribute branch: Embedding lookup + MLP → 64-dim → FC(256) → ReLU
+          - Fusion: Concatenate → FC(512) → FC(256) → Product embedding
+
+          **Training with contrastive loss:**
+          ```
+          L = (1-y) * D(A,B)^2 + y * max(0, margin - D(A,B))^2
+          ```
+          - y=0 for duplicates (push together), y=1 for non-duplicates (push apart)
+          - Margin = 1.0 (minimum distance for non-duplicates)
+          - Hard negative mining: Sample non-duplicate pairs that are close in embedding space
+
+          **Why Siamese network:**
+          - **Learns interactions**: Discovers non-obvious similarity patterns between text and images
+          - **End-to-end**: Jointly optimizes text, image, and attribute representations for the duplicate task
+          - **Embedding reuse**: The product embedding is useful for retrieval too (replace FAISS index)
+          - **Handles new features easily**: Adding a new modality (e.g., product specifications PDF) just adds another branch
+
+          **Inference strategy:**
+          - Product embeddings pre-computed and stored (one-time per listing)
+          - Pairwise scoring = cosine similarity of embeddings (~0.1ms)
+          - Periodic re-computation for listings that update their content
+        next: mod_siamese
+
+  - id: mod_gbm
+    stage: model
+    type: info
+    label: "Gradient Boosting Details"
+    speaker: interviewer
+    content: |
+      Let's detail the gradient boosting approach.
+
+      **Training data construction:**
+
+      ```
+      Positive Pairs (duplicates):
+      ├── UPC-matched pairs: 3M pairs (highest quality)
+      ├── ISBN-matched (books): 500K pairs
+      ├── Brand+MPN matched: 1M pairs
+      └── Human-labeled: 500K pairs (including edge cases)
+
+      Hard Negative Pairs (non-duplicates):
+      ├── Same category, similar title: 2M pairs
+      ├── Same brand, different model: 1M pairs
+      └── Similar images, different products: 500K pairs
+
+      Easy Negative Pairs:
+      └── Random cross-category: 1M pairs
+      ```
+
+      **SHAP-based explanation examples:**
+
+      ```
+      Pair: "Apple iPhone 15 Pro 256GB" vs "iPhone 15 Pro Max 256GB Space Black"
+      Score: 0.72 (borderline)
+      SHAP:
+        + title_cosine_sim (0.89): +0.25
+        + brand_match (Apple=Apple): +0.15
+        - model_fuzzy_sim (Pro vs Pro Max): -0.10
+        + attribute_match (256GB=256GB): +0.08
+        = Borderline → Flag for human review
+        Reason: "Pro" vs "Pro Max" is a different model (correct non-merge)
+      ```
+
+      **Transitive closure for clustering:**
+      ```
+      After pairwise scoring:
+      A-B: 0.98 (merge)
+      B-C: 0.96 (merge)
+      A-C: 0.82 (borderline)
+
+      Transitive closure: A=B=C (all same product)
+      But check: Does A-C pair truly match? Validate with strict threshold (0.75)
+      If A-C < 0.75: Split cluster → A=B, C separate
+      ```
+
+      **Handling variants vs duplicates:**
+      - iPhone 15 Pro 128GB and iPhone 15 Pro 256GB: Same product or different?
+      - Depends on catalog design: some platforms want variant grouping, others want separate products
+      - Solution: Separate model for variant detection that groups variants under a parent product
+
+      Now let's discuss training.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle the transitive closure problem?"
+      - speaker: candidate
+        text: "Transitive closure can create incorrect mega-clusters. If A=B and B=C, but A and C are actually different products, the transitive merge is wrong. I'd validate all pairs in a proposed cluster against a stricter threshold and split clusters where any pair falls below it."
+      - speaker: interviewer
+        text: "What about connected components that grow too large?"
+      - speaker: candidate
+        text: "Set a maximum cluster size (e.g., 100 listings). If a cluster exceeds this, it's likely a false merge chain. Trigger manual review and split using stricter thresholds. In practice, most product clusters have <20 listings."
+    next: train_strategy
+
+  - id: mod_siamese
+    stage: model
+    type: info
+    label: "Siamese Network Details"
+    speaker: interviewer
+    content: |
+      Let's detail the Siamese network approach.
+
+      **Training pipeline:**
+
+      ```
+      Product Pair Dataset
+           │
+           ▼
+      ┌──────────────────────┐
+      │ Data Loader           │
+      │ - Hard negative mining│
+      │ - Batch: 256 pairs    │
+      │ - Online triplet loss │
+      └──────────┬───────────┘
+                 ▼
+      ┌──────────────────────┐
+      │ Siamese Network       │
+      │ - 4x A100 GPUs       │
+      │ - Mixed precision     │
+      │ - ~12 hours training  │
+      │ - AdamW, LR=3e-5     │
+      └──────────┬───────────┘
+                 ▼
+      ┌──────────────────────┐
+      │ ONNX Export           │
+      │ - Product embedding   │
+      │   computation: ~20ms  │
+      │ - Pairwise scoring:   │
+      │   ~0.1ms (dot product)│
+      └──────────────────────┘
+      ```
+
+      **Hard negative mining strategy:**
+      - After each epoch, compute embeddings for all training items
+      - Find the hardest negatives: Non-duplicate pairs with highest cosine similarity
+      - Next epoch, include these hard negatives in training batches
+      - This forces the model to learn fine-grained distinctions
+
+      **Dual-purpose embeddings:**
+      - The same product embeddings used for classification also serve as the FAISS retrieval index
+      - **Unified pipeline**: One embedding computation → both retrieval and scoring
+      - Eliminates the need for separate retrieval and scoring embeddings
+      - When the model is retrained, the FAISS index is automatically updated
+
+      **Multi-modal attention:**
+      - Learn attention weights over modalities: For electronics, image similarity matters more; for books, title+author matters more
+      - Attention is conditioned on the product category
+      - This allows a single model to handle diverse product types
+
+      Now let's discuss training.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle the computational cost of embedding all 350M listings?"
+      - speaker: candidate
+        text: "Batch processing with GPU parallelism. At 20ms per listing on a single GPU, 350M listings take about 2,000 GPU-hours. On a 100-GPU cluster, that's 20 hours -- run weekly as a batch job. Incremental updates for new listings run continuously."
+      - speaker: interviewer
+        text: "What about the FAISS index rebuild?"
+      - speaker: candidate
+        text: "Incremental FAISS updates are possible with IVF indices -- new embeddings are added to existing Voronoi cells without full rebuild. A full index rebuild runs weekly alongside the batch embedding computation."
+    next: train_strategy
+
+  # ============ TRAINING ============
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: interviewer
+    content: |
+      Let's design the training pipeline.
+
+      **Training data quality is paramount:**
+      - UPC/EAN matched pairs are the gold standard but only cover ~60% of products
+      - Human-labeled pairs for the remaining 40% (handmade, unbranded, private label)
+      - **Label quality control**: Inter-annotator agreement >90% required; disagreements go to expert review
+
+      **Training schedule:**
+      - **Full retrain**: Monthly on expanding training set
+      - **Embedding update**: Weekly re-computation for all listings (capture new products)
+      - **Threshold recalibration**: Weekly per-category threshold tuning based on recent performance
+      - **Emergency update**: When a new product category is added or catalog structure changes
+
+      **Handling category-specific challenges:**
+
+      | Category | Challenge | Approach |
+      |----------|----------|---------|
+      | Electronics | Model numbers are critical | Heavy weight on structured attribute matching |
+      | Books | ISBN is definitive | Fast-track UPC/ISBN match before ML |
+      | Clothing | Size/color variants confuse similarity | Separate variant model |
+      | Handmade (Etsy) | Every item is slightly unique | Stricter similarity threshold, image-heavy |
+      | Generic/Unbranded | No brand signal available | Rely on image + description similarity |
+
+      **Validation strategy:**
+      - **Stratified test set**: Equal representation from each major category
+      - **By difficulty**: Easy pairs (same UPC), medium (same brand different model), hard (no structured identifiers)
+      - **Fresh evaluation**: Monthly evaluation on new listings not in training data
+      - **Error analysis**: Categorize false positives and false negatives by root cause
+
+      **Active learning for hard cases:**
+      - Pairs where the model is uncertain (score 0.40-0.60) are sent to human labelers
+      - These uncertain pairs are the most valuable training data
+      - Typically 10K-20K new labeled pairs per month from active learning
+
+      Let's move to deployment.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle the variant vs duplicate distinction?"
+      - speaker: candidate
+        text: "Two-stage approach. First, the duplicate model determines if two listings are the 'same product family.' Then, a variant model classifies the relationship: exact duplicate, size variant, color variant, or different model. This separation makes both problems easier to solve."
+      - speaker: interviewer
+        text: "What about products that are genuinely the same but in different condition (new vs refurbished)?"
+      - speaker: candidate
+        text: "Condition is a structured attribute. The duplicate model identifies them as the same product, and the variant model classifies them as condition variants. The catalog decision about whether to show them together or separately is a business rule, not an ML decision."
+    next: train_evaluation
+
+  - id: train_evaluation
+    stage: training
+    type: info
+    label: "Offline Evaluation & Validation"
+    speaker: interviewer
+    content: |
+      Before deploying a duplicate detection model, we need evaluation methods that account for the unique challenges of entity resolution.
+
+      **Evaluation methodology:**
+
+      | Aspect | Approach | Rationale |
+      |--------|----------|-----------|
+      | **Data split** | Category-stratified temporal split | Ensures representation across product categories |
+      | **Train window** | Last 12 months of labeled pairs | Sufficient volume across categories |
+      | **Validation** | Category-balanced sample | Tune thresholds per category |
+      | **Test** | Held-out 30 days of new listings | Tests on genuinely unseen products |
+      | **Cross-category test** | Leave-one-category-out | Tests generalization to new product types |
+
+      **Evaluation metrics (both stages):**
+
+      **Retrieval stage:**
+      1. **Recall@100** -- what fraction of true duplicates are in the top-100 retrieved candidates? Target: >95%
+      2. **Mean Reciprocal Rank (MRR)** -- how high does the true duplicate rank in the retrieved list?
+      3. **Query latency** -- P99 < 50ms for ANN search
+
+      **Classification stage:**
+      1. **Precision at 95% recall** -- primary threshold-setting metric
+      2. **Pairwise F1** -- overall classification accuracy on candidate pairs
+      3. **Cluster-level metrics** -- are the transitive clusters correct? (If A=B and B=C, is A=C correct?)
+
+      **Common evaluation pitfalls:**
+      - **Transitivity violations**: The model says A=B and B=C but A!=C, creating inconsistent clusters
+      - **Category-specific performance**: Electronics dedup is very different from clothing dedup
+      - **Near-miss evaluation**: Closely related but different products (iPhone 15 vs iPhone 15 Pro) must not be merged
+      - **Annotation disagreement**: Labelers may disagree on edge cases, requiring clear guidelines
+
+      **End-to-end evaluation:**
+      Run the full pipeline (retrieval + classification + clustering) on a held-out catalog snapshot and compare against human-curated product clusters. Measure cluster purity, cluster completeness, and adjusted Rand index.
+
+      Let's now discuss deployment architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "What's the most important evaluation metric for duplicate detection?"
+      - speaker: candidate
+        text: "Retrieval recall at 100 candidates. It's the ceiling for the entire system. If a true duplicate isn't in the candidate set, the classifier can never find it. We need this above 95% before worrying about classifier precision."
+      - speaker: interviewer
+        text: "How do you evaluate the clustering quality?"
+      - speaker: candidate
+        text: "End-to-end cluster evaluation on a human-curated gold standard. We measure cluster purity (each cluster contains only one product), completeness (all instances of a product are in the same cluster), and transitivity consistency (no A=B, B=C but A!=C violations)."
+      - speaker: interviewer
+        text: "What about products the system has never seen?"
+      - speaker: candidate
+        text: "Leave-one-category-out evaluation tells us how well the model generalizes. We also test on newly listed products from the last 30 days -- these are the hardest because they have no purchase history or engagement data yet."
+    next: deploy_question
+
+  # ============ DEPLOYMENT ============
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Deployment Architecture"
+    speaker: interviewer
+    content: |
+      How would you deploy the duplicate detection system? Consider:
+      - 350 million existing listings to deduplicate
+      - ~2 million new listings per day
+      - Each new listing needs quick comparison against the catalog
+      - Bulk deduplication of existing catalog is also needed
+    choices:
+      - label: "Online dedup for new listings + batch for catalog"
+        answer: |
+          I'd deploy a **dual-mode architecture**: online scoring for new listings and batch processing for catalog-wide dedup.
+
+          **Online pipeline (new listings):**
+          ```
+          New Listing Published
+               │
+               ▼
+          ┌──────────────────┐
+          │ Feature Extraction │  Compute embeddings, extract attributes
+          │ (~100ms)           │
+          └────────┬─────────┘
+                   │
+                   ▼
+          ┌──────────────────┐
+          │ Candidate Retrieval│  FAISS top-100 similar listings
+          │ (~50ms)            │
+          └────────┬─────────┘
+                   │
+                   ▼
+          ┌──────────────────┐
+          │ Pairwise Scoring  │  LightGBM/Siamese on 100 pairs
+          │ (~10ms)           │
+          └────────┬─────────┘
+                   │
+                   ▼
+          ┌──────────────────┐
+          │ Decision Engine   │
+          │ Score > 0.95 ──► Auto-merge with existing product
+          │ Score 0.80-0.95 ► Flag for review
+          │ Score < 0.80 ──► Create new product entry
+          └──────────────────┘
+          ```
+
+          **Batch pipeline (existing catalog, weekly):**
+          - Run all-pairs comparison within each category
+          - Use FAISS to find top-100 candidates per listing
+          - Score all candidate pairs
+          - Apply transitive clustering to identify product groups
+          - Output: Proposed merges for human review or auto-execution
+
+          **Why dual-mode:**
+          - **Online**: New listings matched in <500ms, preventing duplicates from ever appearing
+          - **Batch**: Comprehensive catalog cleanup catches duplicates that slipped through or existed before the system
+          - **Cost efficient**: Online handles 2M listings/day with modest infrastructure; batch runs weekly during low-traffic periods
+
+          **Infrastructure:**
+          - FAISS index: Single machine with 256GB RAM (PQ-quantized 350M vectors = ~17GB)
+          - Online scoring: K8s pods, 20 instances, auto-scaling
+          - Batch pipeline: Spark cluster, 100 nodes, weekly run (~4 hours)
+        next: deploy_online
+      - label: "Streaming pipeline with continuous dedup"
+        answer: |
+          I'd deploy a **continuous streaming architecture** that deduplicates the catalog in real-time:
+
+          **Architecture:**
+          ```
+          Listing Events (Kafka)
+          - New listings
+          - Updated listings
+          - Price changes
+               │
+               ▼
+          ┌──────────────────────┐
+          │ Streaming Processor   │  Flink job
+          │ (continuous)          │
+          │                       │
+          │ 1. Extract features   │
+          │ 2. Update embeddings  │
+          │ 3. Query FAISS index  │
+          │ 4. Score candidates   │
+          │ 5. Update clusters    │
+          └────────┬──────────────┘
+                   │
+                   ▼
+          ┌──────────────────────┐
+          │ Product Graph         │
+          │ (Neo4j)               │
+          │ - Product clusters    │
+          │ - Listing → product   │
+          │   mappings            │
+          │ - Merge history       │
+          └──────────────────────┘
+          ```
+
+          **Why streaming:**
+          - **Immediate dedup**: New listings matched within seconds of publication
+          - **Handles updates**: When a listing changes title/images, it's re-evaluated against the catalog
+          - **Continuous improvement**: As new listings arrive, they can trigger re-evaluation of existing uncertain pairs
+          - **Event-driven efficiency**: Only process listings that change, not the entire catalog
+
+          **Product graph (Neo4j):**
+          - Nodes: Listings and canonical products
+          - Edges: "is_duplicate_of" with confidence scores
+          - Enables: Efficient cluster queries, merge history, undo capability
+          - Query: "Find all listings in the same product cluster as listing X" in <5ms
+
+          **Streaming FAISS index updates:**
+          - New listings added to the FAISS index as they're processed
+          - Delete removed listings from the index
+          - Periodic full index rebuild (weekly) to optimize quantization
+          - Index consistency: Use write-ahead log to ensure crash recovery
+
+          **Trade-off:** More complex infrastructure than batch, but provides real-time deduplication that prevents duplicates from ever being visible to buyers.
+        next: deploy_streaming
+
+  - id: deploy_online
+    stage: deployment
+    type: info
+    label: "Online + Batch Deployment Details"
+    speaker: interviewer
+    content: |
+      Let's detail the dual-mode deployment.
+
+      **Online pipeline infrastructure:**
+
+      | Component | Technology | Scale | Latency |
+      |-----------|-----------|-------|---------|
+      | Feature Service | K8s + ONNX Runtime | 20 pods | <100ms |
+      | FAISS Index | Single node, 256GB RAM | 350M vectors | <50ms |
+      | Scoring Service | K8s + LightGBM | 10 pods | <10ms |
+      | Product Catalog | PostgreSQL + Redis cache | 100M products | <5ms |
+      | Review Queue | Internal tool + Kafka | N/A | Human: <24h |
+
+      **Handling FAISS index consistency:**
+      - New listing embeddings added to the FAISS index after online scoring
+      - Index uses IVF-PQ for efficient updates (add to existing cells)
+      - Weekly full index rebuild during low-traffic window
+      - Dual-index strategy: Primary + staging index, swap after rebuild
+
+      **Batch dedup pipeline (weekly):**
+      ```
+      Saturday 02:00 UTC
+           │
+           ▼
+      Feature re-computation (Spark, 2h)
+      - Recompute embeddings for updated listings
+      - Update attribute extractions
+           │
+           ▼
+      All-pairs retrieval (Spark + FAISS, 1h)
+      - Per-category FAISS queries
+      - 100 candidates per listing
+           │
+           ▼
+      Pairwise scoring (Spark, 30min)
+      - Score all candidate pairs
+      - ~35 billion candidate pairs total
+           │
+           ▼
+      Clustering (connected components, 30min)
+      - Build product clusters
+      - Validate transitive merges
+           │
+           ▼
+      Human review queue + auto-merges
+      - Auto-merge: score > 0.95
+      - Review queue: score 0.80-0.95
+      ```
+
+      Now let's discuss monitoring.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle the FAISS index being stale between weekly rebuilds?"
+      - speaker: candidate
+        text: "Incremental updates handle new listings in real-time. The weekly rebuild is for optimization -- rebalancing IVF cells and re-quantizing vectors. Between rebuilds, new listings are added to the index immediately but the cell assignments may be slightly suboptimal."
+      - speaker: interviewer
+        text: "What about the computational cost of the batch pipeline?"
+      - speaker: candidate
+        text: "About $5K per weekly run on cloud compute. The expensive part is the all-pairs FAISS retrieval, but it's embarrassingly parallel by category. Electronics, books, and clothing run on separate Spark partitions simultaneously."
+    next: deploy_infrastructure
+
+  - id: deploy_streaming
+    stage: deployment
+    type: info
+    label: "Streaming Deployment Details"
+    speaker: interviewer
+    content: |
+      Let's detail the streaming architecture.
+
+      **Flink streaming job:**
+      ```
+      Kafka Topic: listing-events
+           │
+           ▼
+      ┌──────────────────────────────┐
+      │ Flink Job: dedup-processor   │
+      │                               │
+      │ Operator 1: Feature Extraction│
+      │ - Compute embeddings (GPU)    │
+      │ - Extract attributes          │
+      │ - Latency: ~200ms            │
+      │                               │
+      │ Operator 2: Candidate Search  │
+      │ - Query FAISS index            │
+      │ - UPC/ISBN exact match        │
+      │ - Latency: ~50ms             │
+      │                               │
+      │ Operator 3: Pairwise Score    │
+      │ - Score top-100 candidates    │
+      │ - Latency: ~10ms             │
+      │                               │
+      │ Operator 4: Cluster Update    │
+      │ - Update product graph        │
+      │ - Emit merge/create events    │
+      │ - Latency: ~20ms             │
+      └──────────────────────────────┘
+      ```
+
+      **Processing throughput:**
+      - 2M new listings/day = ~23 listings/second
+      - With 10 Flink task slots, each processes ~2.3 listings/second
+      - Total processing time per listing: ~300ms end-to-end
+      - Well within capacity with headroom for spikes
+
+      **Product graph operations:**
+      - **Create product**: New listing with no matches
+      - **Add to product**: New listing matched to existing product
+      - **Merge products**: Two products found to be the same (through a bridging listing)
+      - **Split product**: Incorrect merge detected and reversed
+      - All operations logged for auditability and undo capability
+
+      **Exactly-once processing:**
+      - Flink checkpointing ensures no listing is skipped or processed twice
+      - Idempotent writes to Neo4j (same listing ID never creates duplicate entries)
+      - Dead letter queue for processing failures
+
+      Now let's discuss monitoring.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle back-pressure when a seller bulk-uploads thousands of listings?"
+      - speaker: candidate
+        text: "Flink handles back-pressure natively through its credit-based flow control. If the scoring operator is slower than the extraction operator, it signals upstream to slow down. We also have a priority queue: individual seller uploads get lower priority than organic new listings during peak load."
+      - speaker: interviewer
+        text: "What happens when the FAISS index and Neo4j graph get out of sync?"
+      - speaker: candidate
+        text: "Atomic updates: Both index and graph updates happen in the same Flink checkpoint. If the job crashes, both roll back to the last consistent state. We also run a daily reconciliation job that verifies consistency."
+    next: deploy_infrastructure
+
+  - id: deploy_infrastructure
+    stage: deployment
+    type: info
+    label: "CI/CD & Safety Infrastructure"
+    speaker: interviewer
+    content: |
+      Duplicate detection model deployments affect the product catalog -- a bad merge incorrectly combines different products, confusing buyers and angering sellers. Safety infrastructure is critical.
+
+      **CI/CD pipeline for model deployment:**
+
+      ```
+      Model Training Complete
+           │
+           ▼
+      Automated Validation Gates:
+      1. Retrieval Recall@100 > 95%
+      2. Classification precision > 98% at 90% recall
+      3. No regression on any product category
+      4. Cluster transitivity consistency > 99%
+      5. Near-miss test suite passes (similar but different products correctly separated)
+           │
+           ▼
+      Shadow Pipeline (1 week):
+      - Run new model alongside champion on all new listings
+      - Compare merge decisions
+      - Sample 500 disagreements for human review
+           │
+           ▼
+      Gradual Rollout:
+      - 5% of new listings use new model (1 week)
+      - 25% (3 days) → 50% (3 days) → 100%
+      - Automated rollback triggers:
+        * Merge rate changes > 30%
+        * Seller complaints > 2x baseline
+        * Cluster size anomalies (clusters > 100 listings)
+      ```
+
+      **Merge safety mechanisms:**
+      - **Never auto-merge high-value categories**: Electronics, jewelry, and automotive parts require human review for merges
+      - **Seller notification**: Sellers are notified when their listing is merged and can contest within 48 hours
+      - **Confidence thresholds**: Only merge when model confidence > 0.95; send to human review for 0.7-0.95
+      - **Merge undo capability**: Every merge is reversible -- maintain the original listing data for 90 days
+
+      **Catalog integrity monitoring:**
+      - Track **cluster size distribution**: Flag clusters that grow unusually large (may be incorrect transitive merges)
+      - Monitor **review fragmentation**: After merges, verify that review counts and ratings make sense for the combined product
+      - Verify **category consistency**: All listings in a cluster should be in compatible categories
+      - **Price consistency check**: Large price variance within a cluster may indicate incorrect merge
+
+      **Incident response:**
+      - **Incorrect merge detected**: Immediately split the cluster, restore original listings, notify affected sellers
+      - **Model regression detected**: Roll back to previous model, reprocess last 7 days of listings
+      - **FAISS index corruption**: Fall back to exact-match deduplication (UPC/brand+MPN) while rebuilding index
+
+      Let's now design the monitoring system.
+    dialogue:
+      - speaker: interviewer
+        text: "What's the biggest risk in duplicate detection deployment?"
+      - speaker: candidate
+        text: "Incorrect merges. If we merge two different products into one catalog entry, buyers see wrong images, wrong reviews, and may receive the wrong product. That's why we need very high precision and never auto-merge in high-value categories."
+      - speaker: interviewer
+        text: "How quickly can you undo an incorrect merge?"
+      - speaker: candidate
+        text: "Within minutes. We maintain the original listing data for 90 days, so splitting a cluster is just a metadata operation. The reviews, images, and attributes all have their original listing IDs preserved."
+      - speaker: interviewer
+        text: "Smart. Let's discuss ongoing monitoring."
+    next: mon_strategy
+
+  # ============ MONITORING ============
+  - id: mon_strategy
+    stage: monitoring
+    type: question
+    label: "Monitoring Strategy"
+    speaker: interviewer
+    content: |
+      How would you monitor the duplicate detection system to ensure ongoing quality?
+    choices:
+      - label: "Catalog quality auditing + seller feedback"
+        answer: |
+          I'd build a monitoring system centered on **catalog quality metrics and seller feedback**:
+
+          **Catalog quality audit (weekly):**
+          1. Sample 5,000 product clusters
+          2. Human reviewers verify: Are all listings in each cluster truly the same product?
+          3. Compute **cluster purity**: % of clusters where all listings are correctly grouped
+          4. Compute **cluster completeness**: % of known duplicates that are in the same cluster
+          5. Track trends over time
+
+          **Duplicate prevalence estimation (monthly):**
+          - Random sample of 10,000 listing pairs from the same category
+          - Human review to identify duplicate pairs the system missed
+          - Estimate remaining duplicate rate in the catalog
+          - Target: <2% duplicate rate
+
+          **Seller feedback metrics:**
+
+          | Metric | Threshold | Action |
+          |--------|----------|--------|
+          | Merge dispute rate | >2% of merges | Investigate model or threshold |
+          | Dispute overturn rate | >5% | Model precision is too low |
+          | Seller satisfaction (survey) | <80% positive | Review merge communication |
+          | Time to dispute resolution | >48h | Scale review team |
+
+          **Search quality monitoring:**
+          - Sample 1,000 popular search queries daily
+          - Count duplicate products in top-20 results
+          - Target: <2% of top-20 results are duplicates
+          - Alert if search duplicate rate increases >50% from baseline
+
+          **Model performance tracking:**
+          - Precision/recall on fresh evaluation set (monthly)
+          - Per-category performance breakdown
+          - Drift detection on feature distributions
+          - Model comparison: Current vs previous version
+        next: mon_catalog
+      - label: "Automated quality metrics + A/B testing"
+        answer: |
+          I'd build an **automated monitoring system** with continuous A/B testing:
+
+          **Automated quality signals (no human review needed):**
+
+          | Signal | Computation | Threshold |
+          |--------|------------|-----------|
+          | UPC conflict rate | % of clusters with conflicting UPCs | <0.1% |
+          | Score distribution shift | KL-divergence of pair scores vs baseline | <0.05 |
+          | Cluster size anomalies | Clusters exceeding 100 listings | Alert on >10 |
+          | Merge rate change | Daily merges vs 30-day average | <2x |
+          | Category-specific precision proxy | UPC-validated precision by category | >98% |
+
+          **UPC-based automatic validation:**
+          - For listings with UPC codes, verify that cluster assignments match UPC identity
+          - If two listings in different clusters share a UPC → missed duplicate (false negative)
+          - If two listings in the same cluster have different UPCs → incorrect merge (false positive)
+          - This provides continuous, automatic precision/recall estimates for ~60% of the catalog
+
+          **A/B testing framework:**
+          - Test new model versions on 10% of incoming listings
+          - Compare: merge rate, dispute rate, search quality impact
+          - Promote new model only if all metrics improve or hold steady
+
+          **Impact metrics:**
+          - **Search click-through rate**: Does dedup improve search CTR? (More diverse results should get more clicks)
+          - **Review helpfulness**: Are consolidated reviews rated more helpful than fragmented reviews?
+          - **Purchase conversion**: Do product pages with more reviews convert better?
+          - **Seller listings per product**: Average number of seller offers per canonical product
+
+          **Drift detection pipeline:**
+          - Monitor input feature distributions weekly (PSI on each feature)
+          - Alert if any feature's PSI >0.1 (significant drift)
+          - Common causes: New product category, seller behavior change, platform UI change affecting listing quality
+        next: mon_automated
+
+  - id: mon_catalog
+    stage: monitoring
+    type: info
+    label: "Catalog Quality Monitoring"
+    speaker: interviewer
+    content: |
+      Excellent approach. Catalog quality auditing is the most reliable measure.
+
+      **Audit workflow:**
+
+      ```
+      Weekly Sample: 5,000 product clusters
+           │
+           ▼
+      Reviewer Assignment (2 per cluster)
+           │
+           ├── All listings are same product → Correct
+           ├── Some listings don't belong → Incorrect merge (FP)
+           ├── Missing listings from other clusters → Missed duplicate (FN)
+           └── Ambiguous (variant vs duplicate) → Escalate to expert
+           │
+           ▼
+      Metrics Computation:
+      - Cluster purity: Correct / (Correct + FP)
+      - Cluster completeness: Found duplicates / Total duplicates
+      - Error analysis: Categorize FPs and FNs by root cause
+           │
+           ▼
+      Action Items:
+      - Adjust thresholds for categories with high error rates
+      - Add training data for common error types
+      - Update feature engineering for new patterns
+      ```
+
+      **Error root cause taxonomy:**
+      - **FP: Product variants incorrectly merged** (most common -- 128GB vs 256GB treated as same)
+      - **FP: Counterfeit merged with genuine** (different quality, same appearance)
+      - **FN: Different titles for same product** (SEO-stuffed vs clean title)
+      - **FN: Cross-category duplicates missed** (product listed in wrong category)
+      - **FN: No structured identifiers** (handmade/unbranded products)
+
+      **Seller communication:**
+      - Notify sellers 48 hours before executing a merge
+      - Provide clear explanation: "Your listing for X will be merged with Product Y because..."
+      - One-click dispute button that pauses the merge
+      - Track seller satisfaction with merge communications
+
+      You've designed a comprehensive duplicate detection system!
+    dialogue:
+      - speaker: interviewer
+        text: "What's the most common error type in duplicate detection?"
+      - speaker: candidate
+        text: "Product variants incorrectly merged. The line between 'same product, different variant' and 'different product' is fuzzy and category-dependent. The fix is category-specific variant models and thresholds."
+      - speaker: interviewer
+        text: "How do you improve over time?"
+      - speaker: candidate
+        text: "The weekly audit creates a continuous stream of labeled data -- especially for the hard cases where the model is uncertain. Feeding these back into training creates a virtuous cycle where the model gets better at exactly the cases it struggles with."
+    next: mon_terminal_catalog
+
+  - id: mon_automated
+    stage: monitoring
+    type: info
+    label: "Automated Monitoring Details"
+    speaker: interviewer
+    content: |
+      Great automated approach. Let's detail the UPC validation methodology.
+
+      **UPC-based automatic quality measurement:**
+
+      ```
+      Daily Job:
+      1. Fetch all clusters containing listings with UPC codes
+      2. For each cluster:
+         - All UPCs match → Correct (precision point: True Positive)
+         - Mixed UPCs → Incorrect merge (precision point: False Positive)
+      3. Check cross-cluster:
+         - Same UPC in different clusters → Missed duplicate (recall point)
+      4. Compute:
+         - Auto-precision: Correct / (Correct + Incorrect)
+         - Auto-recall: Found / (Found + Missed)
+      ```
+
+      **Limitations of UPC validation:**
+      - Only covers ~60% of catalog (listings with UPC codes)
+      - UPC codes can be incorrect (seller input errors)
+      - Some products legitimately share UPCs (bundle vs individual)
+      - Monthly manual audit still needed for the other 40%
+
+      **A/B test results tracking:**
+
+      | Test | Control | Treatment | Metric | Result |
+      |------|---------|-----------|--------|--------|
+      | New model v2 | Model v1 | Model v2 | Precision | +1.2% |
+      | Lower threshold | t=0.95 | t=0.90 | Recall | +8%, Precision -2% |
+      | Add image features | Text-only | Text+Image | F1 | +3.5% |
+      | Siamese vs GBM | GBM | Siamese | F1 | +1.8% (marginal) |
+
+      **Long-term health dashboard:**
+      - Catalog duplicate rate trend (monthly, target decreasing)
+      - Average product cluster size (target growing as more duplicates found)
+      - Search result diversity index (target increasing)
+      - Seller dispute trend (target stable or decreasing)
+      - Review consolidation progress (% of reviews on canonical product pages)
+
+      You've designed a comprehensive duplicate detection system!
+    dialogue:
+      - speaker: interviewer
+        text: "What's the biggest risk with fully automated monitoring?"
+      - speaker: candidate
+        text: "Missing systematic errors that UPC validation can't catch. For example, if the model consistently merges premium and budget versions of similar products, UPC validation catches this, but for products without UPCs, the error goes undetected. That's why I'd supplement with quarterly manual audits."
+      - speaker: interviewer
+        text: "How do you justify the ROI of this system to leadership?"
+      - speaker: candidate
+        text: "Three metrics: search click-through rate improvement from cleaner results, review quality improvement from consolidation, and reduced seller gaming. Amazon's ASIN system -- their product deduplication backbone -- is widely considered one of their key competitive advantages."
+    next: mon_terminal_automated
+
+  # ============ TERMINALS ============
+  - id: mon_terminal_catalog
+    stage: monitoring
+    type: terminal
+    label: "Catalog Quality Path Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive **duplicate listing detection system** with catalog quality monitoring.
+
+      **Your design summary:**
+      - **Problem**: Entity resolution for product listings at 350M scale
+      - **Metrics**: Precision-focused with cluster purity and completeness metrics
+      - **Data**: Multi-source training data leveraging UPC matches and human labels
+      - **Features**: Text embeddings, structured attribute matching, and optional image analysis
+      - **Model**: Two-stage retrieval + classification for efficient pairwise comparison
+      - **Training**: Category-specific models with active learning on uncertain pairs
+      - **Deployment**: Online dedup for new listings plus batch catalog cleanup
+      - **Monitoring**: Human-reviewed catalog quality audits with seller feedback loops
+
+      **Key strengths:**
+      - Two-stage retrieval + classification handles massive scale efficiently
+      - Category-specific thresholds and models handle diverse product types
+      - Continuous quality auditing drives improvement over time
+      - Seller communication and dispute process maintains trust
+
+      Outstanding system design for a foundational e-commerce capability!
+
+  - id: mon_terminal_automated
+    stage: monitoring
+    type: terminal
+    label: "Automated Monitoring Path Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive **duplicate listing detection system** with automated quality monitoring.
+
+      **Your design summary:**
+      - **Problem**: Product-level entity resolution at massive marketplace scale
+      - **Metrics**: Quality targets with automated and manual evaluation
+      - **Data**: UPC-matched pairs as gold standard with diverse training data
+      - **Features**: Multi-modal representations combining text, images, and attributes
+      - **Model**: Scalable architecture with efficient candidate retrieval
+      - **Training**: Continuous improvement with active learning and A/B testing
+      - **Deployment**: Real-time or streaming dedup preventing duplicate appearance
+      - **Monitoring**: UPC-based automatic validation supplemented with A/B testing
+
+      **Key strengths:**
+      - Automated UPC validation provides continuous quality measurement
+      - A/B testing framework enables data-driven model improvements
+      - Impact metrics tie dedup quality to business outcomes
+      - Scalable monitoring that grows with the catalog
+
+      Outstanding system design connecting deduplication to search quality and business value!

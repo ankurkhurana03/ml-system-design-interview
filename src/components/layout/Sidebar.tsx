@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useRef, useEffect } from 'react';
 import type { ProblemMeta } from '@/types/tree';
 
 interface SidebarProps {
@@ -7,6 +7,8 @@ interface SidebarProps {
   onSelectProblem: (id: string) => void;
   onGenerateNew: () => void;
   onBrowseGallery: () => void;
+  onDeleteProblem: (id: string) => void;
+  onEditDraft: (id: string) => void;
   isCollapsed: boolean;
   onToggleCollapse: () => void;
 }
@@ -66,6 +68,8 @@ export function Sidebar({
   onSelectProblem,
   onGenerateNew,
   onBrowseGallery,
+  onDeleteProblem,
+  onEditDraft,
   isCollapsed,
   onToggleCollapse,
 }: SidebarProps) {
@@ -334,7 +338,7 @@ export function Sidebar({
         {groupedProblems.draft.length > 0 && (
           <div className="p-3">
             <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
-              My Drafts
+              My Drafts ({groupedProblems.draft.length})
             </h2>
             <div className="space-y-1">
               {groupedProblems.draft.map(problem => (
@@ -343,6 +347,9 @@ export function Sidebar({
                   problem={problem}
                   isActive={problem.id === activeProblemId}
                   onClick={() => onSelectProblem(problem.id)}
+                  isDraft
+                  onEdit={() => onEditDraft(problem.id)}
+                  onDelete={() => onDeleteProblem(problem.id)}
                 />
               ))}
             </div>
@@ -389,87 +396,195 @@ interface ProblemItemProps {
   problem: ProblemMeta;
   isActive: boolean;
   onClick: () => void;
+  isDraft?: boolean;
+  onEdit?: () => void;
+  onDelete?: () => void;
 }
 
-function ProblemItem({ problem, isActive, onClick }: ProblemItemProps) {
+function ProblemItem({ problem, isActive, onClick, isDraft, onEdit, onDelete }: ProblemItemProps) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Close menu on click outside
+  useEffect(() => {
+    if (!menuOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+        setConfirmDelete(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [menuOpen]);
+
   const truncateText = (text: string, maxLength: number) => {
     if (text.length <= maxLength) return text;
     return text.slice(0, maxLength) + '...';
   };
 
   return (
-    <button
-      onClick={onClick}
-      className={`w-full text-left p-3 rounded-lg transition-colors ${
-        isActive
-          ? 'bg-blue-600 text-white'
-          : 'bg-slate-800 hover:bg-slate-700 text-slate-200'
-      }`}
-    >
-      <div className="flex items-start justify-between gap-2 mb-1">
-        <h3 className="font-semibold text-sm leading-tight flex-1">
-          {problem.title}
-        </h3>
-        {problem.difficulty && (
-          <span
-            className={`text-xs px-2 py-0.5 rounded font-medium ${
-              difficultyColors[problem.difficulty]
-            } text-white shrink-0`}
-          >
-            {problem.difficulty[0].toUpperCase()}
-          </span>
+    <div className="relative group">
+      <button
+        onClick={onClick}
+        className={`w-full text-left p-3 rounded-lg transition-colors ${
+          isActive
+            ? 'bg-blue-600 text-white'
+            : 'bg-slate-800 hover:bg-slate-700 text-slate-200'
+        }`}
+      >
+        <div className="flex items-start justify-between gap-2 mb-1">
+          <h3 className="font-semibold text-sm leading-tight flex-1">
+            {problem.title}
+          </h3>
+          <div className="flex items-center gap-1 shrink-0">
+            {problem.difficulty && (
+              <span
+                className={`text-xs px-2 py-0.5 rounded font-medium ${
+                  difficultyColors[problem.difficulty]
+                } text-white`}
+              >
+                {problem.difficulty[0].toUpperCase()}
+              </span>
+            )}
+          </div>
+        </div>
+        <p className={`text-xs leading-relaxed ${isActive ? 'text-blue-100' : 'text-slate-400'}`}>
+          {truncateText(problem.description, 80)}
+        </p>
+        {/* General tags */}
+        {problem.tags && problem.tags.length > 0 && (
+          <div className="flex flex-wrap gap-1 mt-2">
+            {problem.tags.slice(0, 3).map((tag, idx) => (
+              <span
+                key={idx}
+                className={`text-xs px-1.5 py-0.5 rounded ${
+                  isActive
+                    ? 'bg-blue-700 text-blue-100'
+                    : 'bg-slate-700 text-slate-300'
+                }`}
+              >
+                {tag}
+              </span>
+            ))}
+          </div>
         )}
-      </div>
-      <p className={`text-xs leading-relaxed ${isActive ? 'text-blue-100' : 'text-slate-400'}`}>
-        {truncateText(problem.description, 80)}
-      </p>
-      {/* General tags */}
-      {problem.tags && problem.tags.length > 0 && (
-        <div className="flex flex-wrap gap-1 mt-2">
-          {problem.tags.slice(0, 3).map((tag, idx) => (
-            <span
-              key={idx}
-              className={`text-xs px-1.5 py-0.5 rounded ${
-                isActive
-                  ? 'bg-blue-700 text-blue-100'
-                  : 'bg-slate-700 text-slate-300'
-              }`}
-            >
-              {tag}
-            </span>
-          ))}
+        {/* Company & domain badges */}
+        {((problem.companies && problem.companies.length > 0) ||
+          (problem.domains && problem.domains.length > 0)) && (
+          <div className="flex flex-wrap gap-1 mt-1.5">
+            {problem.companies?.slice(0, 2).map((company) => (
+              <span
+                key={company}
+                className={`text-xs px-1.5 py-0.5 rounded ${
+                  isActive
+                    ? 'bg-teal-700 text-teal-100'
+                    : 'bg-teal-900/50 text-teal-300'
+                }`}
+              >
+                {company}
+              </span>
+            ))}
+            {problem.domains?.slice(0, 2).map((domain) => (
+              <span
+                key={domain}
+                className={`text-xs px-1.5 py-0.5 rounded ${
+                  isActive
+                    ? 'bg-purple-700 text-purple-100'
+                    : 'bg-purple-900/50 text-purple-300'
+                }`}
+              >
+                {domain}
+              </span>
+            ))}
+          </div>
+        )}
+      </button>
+
+      {/* Draft action menu button */}
+      {isDraft && (
+        <div ref={menuRef}>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setMenuOpen(!menuOpen);
+              setConfirmDelete(false);
+            }}
+            className={`absolute top-2 right-2 p-1 rounded transition-colors ${
+              menuOpen
+                ? 'bg-slate-600 text-white'
+                : 'opacity-0 group-hover:opacity-100 hover:bg-slate-600 text-slate-400 hover:text-white'
+            }`}
+            title="Draft actions"
+          >
+            <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+              <path d="M10 6a2 2 0 110-4 2 2 0 010 4zM10 12a2 2 0 110-4 2 2 0 010 4zM10 18a2 2 0 110-4 2 2 0 010 4z" />
+            </svg>
+          </button>
+
+          {/* Dropdown menu */}
+          {menuOpen && (
+            <div className="absolute top-8 right-2 z-20 w-32 bg-slate-700 border border-slate-600 rounded-lg shadow-xl overflow-hidden">
+              {confirmDelete ? (
+                <div className="p-2">
+                  <p className="text-xs text-slate-300 mb-2">Delete this draft?</p>
+                  <div className="flex gap-1">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setMenuOpen(false);
+                        setConfirmDelete(false);
+                        onDelete?.();
+                      }}
+                      className="flex-1 px-2 py-1 text-xs font-medium text-white bg-red-600 hover:bg-red-700 rounded transition-colors"
+                    >
+                      Delete
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setConfirmDelete(false);
+                      }}
+                      className="flex-1 px-2 py-1 text-xs font-medium text-slate-300 hover:bg-slate-600 rounded transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setMenuOpen(false);
+                      onEdit?.();
+                    }}
+                    className="w-full px-3 py-2 text-left text-sm text-slate-200 hover:bg-slate-600 flex items-center gap-2 transition-colors"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                    </svg>
+                    Edit
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setConfirmDelete(true);
+                    }}
+                    className="w-full px-3 py-2 text-left text-sm text-red-400 hover:bg-slate-600 flex items-center gap-2 transition-colors"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                    </svg>
+                    Delete
+                  </button>
+                </>
+              )}
+            </div>
+          )}
         </div>
       )}
-      {/* Company & domain badges */}
-      {((problem.companies && problem.companies.length > 0) ||
-        (problem.domains && problem.domains.length > 0)) && (
-        <div className="flex flex-wrap gap-1 mt-1.5">
-          {problem.companies?.slice(0, 2).map((company) => (
-            <span
-              key={company}
-              className={`text-xs px-1.5 py-0.5 rounded ${
-                isActive
-                  ? 'bg-teal-700 text-teal-100'
-                  : 'bg-teal-900/50 text-teal-300'
-              }`}
-            >
-              {company}
-            </span>
-          ))}
-          {problem.domains?.slice(0, 2).map((domain) => (
-            <span
-              key={domain}
-              className={`text-xs px-1.5 py-0.5 rounded ${
-                isActive
-                  ? 'bg-purple-700 text-purple-100'
-                  : 'bg-purple-900/50 text-purple-300'
-              }`}
-            >
-              {domain}
-            </span>
-          ))}
-        </div>
-      )}
-    </button>
+    </div>
   );
 }

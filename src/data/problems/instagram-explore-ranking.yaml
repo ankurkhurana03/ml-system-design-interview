@@ -1,0 +1,539 @@
+id: instagram-explore-ranking
+title: "Instagram Explore Ranking"
+description: "Design the ranking model for the Instagram Explore page."
+companies: ["Meta", "TikTok", "Pinterest"]
+domains: ["Ranking/Search", "Recommendation"]
+root: pd_start
+
+nodes:
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we are going to design the ranking model for the **Instagram Explore page**.
+
+      Instagram Explore serves over **500 million monthly active users**, surfacing content from accounts they do not follow. The page is a grid of photos, videos, Reels, and Stories, personalized in real time. Explore accounts for roughly **50% of the content consumption from non-followed accounts** on Instagram.
+
+      The core challenge: with **over 100 million new posts daily**, how do we select and rank the few dozen items each user sees when they open Explore? We need a system that balances **relevance, freshness, diversity, and safety** while meeting strict latency requirements (the grid must load in under **200ms**).
+
+      Current state: users sometimes see repetitive content (too many cat videos if they liked one), occasional policy-violating content slips through, and engagement is unevenly distributed across creators.
+
+      Let's start by scoping the problem.
+    dialogue:
+      - speaker: interviewer
+        text: "Welcome! Today we'll design the ranking model for Instagram Explore. It serves over 500 million MAUs with personalized content from accounts they don't follow."
+      - speaker: candidate
+        text: "That's a massive scale problem. What are the key pain points with the current system?"
+      - speaker: interviewer
+        text: "Users sometimes see repetitive content, policy-violating material occasionally gets through, and engagement is unevenly distributed across creators. The grid must load in under 200ms."
+      - speaker: candidate
+        text: "Got it. So we need to balance relevance, diversity, freshness, and safety at scale. Let me start by clarifying the problem scope."
+      - speaker: interviewer
+        text: "Perfect. Let's define what we're optimizing for."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: info
+    label: "Problem Scope"
+    speaker: interviewer
+    content: |
+      Let's scope the system. The Explore ranking pipeline typically follows a **funnel architecture**:
+
+      1. **Candidate generation** (~1,000 candidates from ~100M eligible posts) - uses lightweight retrieval models
+      2. **First-pass ranking** (~1,000 to ~150) - a fast but moderately accurate model
+      3. **Final ranking** (~150 to ~25 shown) - a heavy, high-accuracy model
+      4. **Re-ranking / blending** - applies business rules, diversity, and safety filters
+
+      Today we will focus primarily on the **final ranking model** (step 3), which has the most impact on user experience. However, we should keep the full funnel in mind.
+
+      **Key constraints:**
+      - Latency budget for final ranker: **~50ms** (the full pipeline gets 200ms)
+      - Must handle **200K+ QPS** at peak (think global user base, evenings in multiple time zones)
+      - Content types: photos, videos, Reels, carousels, Stories
+      - Must be personalized per user but also handle **cold-start users** (~10% of traffic)
+
+      Now, the first big design decision: what should we optimize the ranker for?
+    dialogue:
+      - speaker: interviewer
+        text: "The Explore pipeline uses a funnel: candidate generation narrows 100M posts to 1,000, first-pass to 150, final ranking picks the top 25."
+      - speaker: candidate
+        text: "So we're focusing on the final ranking model. What's the latency budget?"
+      - speaker: interviewer
+        text: "About 50ms for the final ranker. The full pipeline gets 200ms. We handle 200K+ QPS at peak."
+      - speaker: candidate
+        text: "And we need to handle multiple content types and cold-start users. What fraction of users are cold-start?"
+      - speaker: interviewer
+        text: "About 10% of traffic. Now, the first big decision: what should we optimize the ranker for?"
+    next: met_question
+
+  - id: met_question
+    stage: metrics
+    type: question
+    label: "Optimization Objective"
+    speaker: interviewer
+    content: |
+      What should the Explore ranking model optimize for? This is the most consequential design decision, as it determines what the model learns and, ultimately, what users see.
+    dialogue:
+      - speaker: interviewer
+        text: "What should the Explore ranking model optimize for? This determines everything downstream."
+      - speaker: candidate
+        text: "There are a few approaches here. We could optimize purely for engagement, or we could take a more holistic view that includes user satisfaction and content quality."
+      - speaker: interviewer
+        text: "Walk me through the trade-offs of each approach."
+    choices:
+      - label: "Multi-objective engagement (likes, saves, shares, dwell time)"
+        answer: |
+          I would optimize for a **weighted combination of engagement signals**: P(like), P(save), P(share), P(comment), and expected dwell time.
+
+          **Why multi-objective?** A single signal like P(like) is too narrow. Likes are cheap (one tap), so optimizing for likes alone surfaces clickbaity, low-quality content. Saves and shares are **higher-intent signals** indicating genuine value. Dwell time captures passive engagement, especially for video.
+
+          **Proposed value model:**
+          ```
+          Score = w1*P(like) + w2*P(save) + w3*P(share) + w4*P(comment) + w5*E[dwell_time]
+          ```
+          Typical weights (from Meta's published research): saves and shares weighted **3-5x higher** than likes. Comments weighted ~2x likes. Dwell time normalized to 0-1 scale.
+
+          **Key benefit:** This is directly measurable and trainable. Every action has a clear label. We can run A/B tests and see engagement metrics move within days.
+
+          **Key risk:** Pure engagement optimization can create **filter bubbles** and promote sensational content. Users may engage with rage-bait or misleading content. Instagram's own research showed Explore could amplify body-image issues when optimizing purely for engagement. We will need guardrails.
+
+          **Mitigation:** Add diversity constraints and content-quality scores as post-ranking re-ranking signals, but the core model optimizes engagement.
+        next: met_engagement
+      - label: "User satisfaction (session-level, long-term retention)"
+        answer: |
+          I would optimize for **user satisfaction** rather than per-item engagement, using session-level and long-term signals.
+
+          **Why satisfaction over engagement?** Engagement metrics are **proxy metrics** for what we actually care about: do users find Explore valuable enough to come back? Instagram's own research (published at KDD 2020) showed that optimizing per-item engagement can **decrease** long-term retention because users burn out on sensational content.
+
+          **Satisfaction signals I would use:**
+          - **Session satisfaction**: Did the user have a long, diverse session? Did they end naturally (switching apps) or in frustration (rage-quitting)?
+          - **Return rate**: Does the user come back to Explore within 24 hours? Within a week?
+          - **Negative signals**: Did the user hit "Not Interested"? Did they report content? Did they unfollow after visiting a profile from Explore?
+          - **Survey data**: Instagram periodically surveys users ("Was this content worth your time?"). These labels, though sparse, directly measure satisfaction.
+
+          **Value model:**
+          ```
+          Score = P(positive_session_outcome) + w1*P(return_within_24h) - w2*P(negative_feedback)
+          ```
+
+          **Key benefit:** This aligns with Instagram's real business goal (DAU/MAU growth), not vanity engagement numbers.
+
+          **Key risk:** Satisfaction labels are **noisier and sparser** than engagement labels. Session outcomes are delayed (hours or days), making training harder. We need careful counterfactual reasoning to attribute session outcomes to individual ranking decisions.
+        next: met_satisfaction
+
+  - id: met_engagement
+    stage: metrics
+    type: info
+    label: "Engagement Metrics Deep Dive"
+    speaker: interviewer
+    content: |
+      Good choice. Let's define the engagement metrics precisely.
+
+      **Online metrics (A/B test guardrails):**
+      - **Primary**: Weighted engagement score (the value model above)
+      - **Topline**: Total Explore sessions per DAU, time spent in Explore per session
+      - **Guardrails**: "Not Interested" rate (must not increase), report rate, 7-day retention (must not decrease)
+
+      **Offline metrics (model evaluation):**
+      - **Per-action AUC**: AUC-ROC for each engagement prediction (like, save, share, comment). Target AUC > 0.80 for likes, > 0.75 for saves (harder to predict).
+      - **Calibration**: Are predicted probabilities accurate? If P(like)=0.3, do ~30% of shown items get liked? Use Expected Calibration Error (ECE) < 0.02.
+      - **NDCG@25**: Normalized Discounted Cumulative Gain for the top-25 ranked items. Measures ranking quality.
+
+      **Why both?** Offline metrics validate model quality before deployment. Online metrics validate real-world impact. A model can win on offline AUC but lose on online engagement if, for example, it overfits to easy-to-predict signals.
+
+      One important subtlety: **position bias**. Users engage more with items at the top of the grid regardless of quality. We need to correct for this in training data. Meta uses inverse propensity weighting (IPW) or position-debiased labels.
+
+      Now let's discuss data.
+    dialogue:
+      - speaker: interviewer
+        text: "Let's define metrics precisely. We need online A/B test metrics and offline model evaluation metrics."
+      - speaker: candidate
+        text: "For offline, I'd track per-action AUC for each engagement type. What AUC targets are typical?"
+      - speaker: interviewer
+        text: "Target AUC above 0.80 for likes, above 0.75 for saves. Calibration matters too - use Expected Calibration Error below 0.02. For online, track weighted engagement with guardrails on 'Not Interested' rate and retention."
+      - speaker: candidate
+        text: "We also need to handle position bias in training data."
+      - speaker: interviewer
+        text: "Exactly. Meta uses inverse propensity weighting. Now let's discuss data."
+    next: data_pipeline
+
+  - id: met_satisfaction
+    stage: metrics
+    type: info
+    label: "Satisfaction Metrics Deep Dive"
+    speaker: interviewer
+    content: |
+      Good thinking. Let's formalize the satisfaction metrics.
+
+      **Online metrics (A/B test):**
+      - **Primary**: Explore 7-day retention (% of users who return to Explore within 7 days)
+      - **Secondary**: Average session duration, sessions per user per week
+      - **Guardrails**: "Not Interested" rate (must decrease or hold), report rate, total engagement (must not drop more than 2%)
+      - **North star**: Overall app DAU/MAU ratio (Explore should contribute to app stickiness)
+
+      **Offline metrics (model evaluation):**
+      - **Session prediction AUC**: How well does the model predict whether a session will be "satisfying" (long, diverse, no negative feedback)?
+      - **Counterfactual evaluation**: Using inverse propensity scoring (IPS) or doubly robust estimators to evaluate what retention would have been under a different ranking policy.
+      - **Survey correlation**: Rank correlation between model scores and user survey responses ("Was this content valuable?").
+
+      **The labeling challenge**: Satisfaction labels require **delayed feedback** (24-48 hours for return rate). This means we cannot train on today's data immediately. Common approach: use engagement signals as **real-time proxies** during serving, but optimize the overall system for satisfaction via periodic retraining with delayed labels.
+
+      **Practical compromise at Meta**: The ranking model often predicts engagement (real-time labels), but the **value model weights** are tuned to maximize satisfaction metrics measured in A/B tests. This gets the best of both worlds.
+
+      Let's move to data.
+    dialogue:
+      - speaker: interviewer
+        text: "Satisfaction metrics are trickier. The primary online metric would be Explore 7-day retention."
+      - speaker: candidate
+        text: "The labeling challenge is real - we can't get satisfaction labels in real time. How do teams handle this?"
+      - speaker: interviewer
+        text: "Common approach: the model predicts engagement in real time, but the value model weights are tuned offline to maximize satisfaction in A/B tests. Best of both worlds."
+      - speaker: candidate
+        text: "That's a pragmatic compromise. For offline evaluation, we'd use counterfactual estimators like IPS or doubly robust methods."
+      - speaker: interviewer
+        text: "Exactly. Now let's talk about data."
+    next: data_pipeline
+
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      The data pipeline for Explore ranking is massive. Let's break it down.
+
+      **Training data volume**: Instagram logs roughly **100 billion impressions per day** across all surfaces. Explore contributes ~10 billion. Each impression includes the user, the item shown, the position, and all engagement outcomes (like, save, share, dwell time, "Not Interested").
+
+      **Key data sources:**
+      - **User engagement logs**: Every action on every post - likes, saves, shares, comments, dwell time, scroll-past, "Not Interested," reports
+      - **User profiles**: Demographics (age bucket, country), account age, follower/following counts, interest graph (topics they engage with)
+      - **Content features**: Post type (photo/video/Reel/carousel), visual embeddings (from a pre-trained vision model), caption text, hashtags, posting time, creator info
+      - **Social graph**: Who follows whom, interaction history between users
+      - **Content quality signals**: Integrity scores (policy compliance), content understanding labels (topics, entities), aesthetic quality scores
+
+      **Data freshness matters**: Explore content is time-sensitive. A trending meme from 6 hours ago is great; the same meme 3 days later is stale. Training data should be refreshed daily, and the model should see examples from the last 1-3 days.
+
+      **Label construction**: For multi-task engagement prediction, each impression becomes multiple training examples (one per engagement type). Positive label = action occurred; negative label = no action within the session. **Important**: we must handle **selection bias** - we only see labels for items we chose to show, not for items we didn't show.
+
+      Now let's decide on the feature engineering approach.
+    dialogue:
+      - speaker: interviewer
+        text: "The data pipeline is massive - about 10 billion Explore impressions per day. Each logs the user, item, position, and all engagement outcomes."
+      - speaker: candidate
+        text: "What are the main data sources we'd pull features from?"
+      - speaker: interviewer
+        text: "User engagement logs, user profiles, content features including visual embeddings, social graph, and content quality signals. Data freshness matters a lot - Explore content is time-sensitive."
+      - speaker: candidate
+        text: "We also need to handle selection bias since we only see labels for items we showed."
+      - speaker: interviewer
+        text: "Right, that's a critical point. Let's decide on the feature engineering approach."
+    next: feat_question
+
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Engineering Strategy"
+    speaker: interviewer
+    content: |
+      How would you approach feature engineering for the Explore ranker? There are two broad philosophies.
+    dialogue:
+      - speaker: interviewer
+        text: "How would you approach feature engineering for the ranking model? There are two broad philosophies."
+      - speaker: candidate
+        text: "We could go with hand-crafted features based on domain expertise, or lean heavily into learned embeddings. Let me walk through the trade-offs."
+      - speaker: interviewer
+        text: "Go ahead. Think about what's practical at Instagram's scale."
+    choices:
+      - label: "Dense embeddings + minimal hand-crafted features"
+        answer: |
+          I would rely primarily on **dense learned embeddings** with a minimal set of hand-crafted features for known-important signals.
+
+          **Embedding approach:**
+          - **User embedding** (128-256 dims): Learned from the user's engagement history via a two-tower model. Captures latent interests that manual features miss. Updated daily via batch jobs, with real-time updates for new engagement signals.
+          - **Item embedding** (128-256 dims): Multimodal embedding combining visual features (from a pre-trained ViT or CLIP model), text features (caption/hashtag via a sentence transformer), and engagement statistics. Pre-computed at post creation time.
+          - **Creator embedding** (64-128 dims): Captures creator style, posting patterns, and audience characteristics. Learned from the creator's historical post performance.
+
+          **Minimal hand-crafted features** (things embeddings struggle with):
+          - **Freshness**: Hours since posting (embeddings don't capture time well)
+          - **Content type**: One-hot for photo/video/Reel/carousel
+          - **User-item interaction history**: Has the user seen this creator before? How many times?
+          - **Position features**: For position bias correction
+
+          **Why this approach?** At Meta's scale, hand-crafted features hit diminishing returns quickly. Embeddings automatically discover patterns across millions of feature interactions. Meta's own research shows that **embedding-based features contribute 60-70% of model lift** compared to hand-crafted features alone.
+
+          **Trade-off**: Embeddings are less interpretable. When something goes wrong, it's harder to diagnose. Mitigation: keep a small set of interpretable hand-crafted features for debugging.
+        next: mod_question
+      - label: "Rich hand-crafted features + interaction features"
+        answer: |
+          I would invest heavily in **hand-crafted, domain-specific features** with explicit interaction features, supplemented by embeddings for content understanding.
+
+          **User features (~50 features):**
+          - Engagement rates by content type (photo/video/Reel): P(like|photo), P(save|video), etc.
+          - Topic affinity scores: User's engagement rate with each of ~100 interest topics (fashion, food, travel, sports, etc.)
+          - Recency-weighted engagement: Recent likes weighted more than older ones (exponential decay, half-life ~7 days)
+          - Session context: How many items viewed so far this session, time since session start, last 5 content types viewed
+
+          **Item features (~40 features):**
+          - Engagement rates: Overall like rate, save rate, share rate (smoothed with Bayesian priors for new posts)
+          - Content quality: Aesthetic score (from a pre-trained model), text quality score, resolution, has-audio flag
+          - Freshness: Hours since posting, log-transformed
+          - Virality signals: Engagement velocity (likes per hour in first 4 hours), share-to-like ratio
+
+          **Cross features (~30 features):**
+          - **User-topic x Item-topic**: Does the user's top interest match the item's topic?
+          - **User-creator affinity**: Has the user engaged with this creator before? How recently?
+          - **User-content-type affinity x Item-content-type**: If user loves Reels, is this a Reel?
+
+          **Why this approach?** Hand-crafted features are **interpretable, debuggable, and stable**. When engagement drops, we can inspect feature importances and diagnose issues quickly. At Instagram's scale, even a 0.1% improvement from a well-crafted feature translates to millions of additional engagements.
+
+          **Supplementary embeddings**: I would still use pre-trained visual embeddings (CLIP) and text embeddings (sentence transformers) for content understanding, but as **additional input features**, not the primary signal.
+        next: mod_question
+
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Model Architecture"
+    speaker: interviewer
+    content: |
+      Now the core modeling question: what architecture would you use for the final ranking model?
+    dialogue:
+      - speaker: interviewer
+        text: "What model architecture would you use for the final ranking model? Remember, it needs to score ~150 candidates within 50ms."
+      - speaker: candidate
+        text: "The two main paradigms are multi-task learning with a shared backbone, or a multi-tower architecture where each engagement type gets its own tower."
+      - speaker: interviewer
+        text: "Walk me through your recommendation and why."
+    choices:
+      - label: "Multi-task DCN-v2 (Deep & Cross Network)"
+        answer: |
+          I would use **DCN-v2 (Deep & Cross Network v2)** with multi-task heads for each engagement type.
+
+          **Architecture:**
+          - **Input layer**: Concatenation of all features (embeddings + hand-crafted). Categorical features go through embedding lookup tables.
+          - **Cross network** (2-3 cross layers): Efficiently models explicit feature interactions up to degree 3-4. This is critical for capturing interactions like "user who likes cooking videos" x "food content" x "evening time" without manual feature engineering.
+          - **Deep network** (3-4 FC layers, 512-256-128 units): Captures implicit, higher-order patterns via non-linear transformations.
+          - **Multi-task heads**: Separate prediction heads for P(like), P(save), P(share), P(comment), E[dwell_time]. Each head is a 2-layer MLP (128-64-1).
+          - **Shared backbone**: The cross + deep layers are shared across tasks, with task-specific heads on top.
+
+          **Why DCN-v2?** Published by Google (Wang et al., 2021), DCN-v2 is the successor to DCN and specifically designed for ranking at scale. The cross network is **parameter-efficient** (linear in input dimension) while modeling feature crosses that would require exponentially many hand-crafted features. Meta's own Explore ranking uses a similar architecture.
+
+          **Multi-task benefits**: Shared representations across tasks provide regularization. Saves and shares are sparse signals (~1-2% rate); by sharing with the denser like signal (~10% rate), the save/share heads get implicit supervision. The shared backbone also reduces serving cost - one forward pass produces all predictions.
+
+          **Latency**: With ~5M parameters and ONNX optimization, inference takes ~5ms per candidate. Scoring 150 candidates can be batched and parallelized to fit in 50ms.
+        next: train_strategy
+      - label: "Two-tower retrieval + lightweight re-ranker"
+        answer: |
+          I would use a **two-tower architecture** for the heavy lifting, with a lightweight cross-attention re-ranker on top.
+
+          **Two-tower model:**
+          - **User tower**: Takes user features (profile, engagement history, session context) and produces a 256-dim user embedding. Architecture: 3-layer MLP with batch normalization.
+          - **Item tower**: Takes item features (content embeddings, engagement stats, freshness) and produces a 256-dim item embedding. Architecture: 3-layer MLP with batch normalization.
+          - **Scoring**: Inner product of user and item embeddings produces a relevance score. This is extremely fast at serving time.
+
+          **Why two-tower?** The key advantage is **decoupled computation**. Item embeddings can be pre-computed and cached. At serving time, we only compute the user tower once per request, then score all 150 candidates via fast matrix multiplication. This brings inference to **<10ms for all 150 candidates** - well within the 50ms budget.
+
+          **Lightweight re-ranker on top:**
+          After the two-tower produces an initial ranking, apply a small cross-attention network (2 layers, 4 heads) that models **interactions between user and item features** that inner product alone cannot capture. This re-ranker processes the top 50 items from the two-tower.
+
+          **Multi-task setup**: The two-tower is trained with a multi-task loss: primary task is a composite engagement label, secondary tasks are individual engagement predictions. The re-ranker predicts the final per-action probabilities.
+
+          **Trade-off**: Two-tower with inner product scoring is an **approximation** - it cannot model arbitrary user-item interactions. The re-ranker partially addresses this but adds complexity. Empirically, two-tower + re-ranker matches DCN-v2 quality within ~1-2% while being 3-5x faster at inference.
+        next: train_strategy
+      - label: "Transformer-based sequential ranker"
+        answer: |
+          I would use a **transformer-based sequential ranking model** that processes the user's recent engagement history as a sequence.
+
+          **Architecture:**
+          - **Input**: The user's last 100 engaged-with items, each represented as a multimodal embedding (visual + text + engagement features). Plus the 150 candidate items.
+          - **Sequence encoder** (4-layer Transformer, 8 heads, 256 dims): Processes the user's engagement history to build a rich user representation that captures **temporal patterns and evolving interests**. Self-attention allows the model to weigh recent vs older interactions dynamically.
+          - **Cross-attention scoring** (2-layer Transformer): Each candidate item attends to the user's encoded history. This produces a relevance score that captures fine-grained interactions between the candidate and specific items the user previously engaged with.
+          - **Multi-task heads**: Final MLP heads predict P(like), P(save), P(share), E[dwell_time].
+
+          **Why Transformer-based?** User interests are **sequential and evolving**. A user who just binged travel content for 30 minutes has different intent than the same user on a normal day. Standard MLPs treat features as a flat bag; Transformers model the **temporal dynamics** of interest evolution.
+
+          **Real-world precedent**: Alibaba's SIM (Search-based Interest Model) and Meta's own HSTU (Hierarchical Sequential Transduction Unit) use similar architectures for ranking. Meta reported **+1.5% engagement** by modeling sequential user behavior in their 2023 ranking systems.
+
+          **Latency concern**: Transformers are heavier than MLPs. Mitigation: pre-compute user history encoding periodically (every 5 minutes) and cache it. At serving time, only run the cross-attention scoring layer, which processes 150 candidates in ~20ms with optimized attention (FlashAttention).
+
+          **Trade-off**: More complex to train and serve. Requires maintaining a real-time history buffer per user. But the quality gains from sequential modeling are substantial for Explore, where user intent shifts rapidly within sessions.
+        next: train_strategy
+
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: interviewer
+    content: |
+      Excellent model choice. Let's discuss training strategy for the Explore ranker.
+
+      **Training data construction:**
+      - Sample from last **3 days** of Explore impressions (balance freshness vs volume)
+      - Each training example: (user features, item features, position, engagement labels)
+      - **Negative sampling**: Include both shown-but-not-engaged items (hard negatives) and random items from the corpus (easy negatives). Ratio: 1 positive : 5 hard negatives : 5 easy negatives
+      - **Position bias correction**: Use **position features during training** and set them to a neutral value during inference. Alternatively, use inverse propensity weighting where weight = 1/P(position).
+
+      **Multi-task training:**
+      - Joint loss: `L = L_like + 0.5*L_save + 0.5*L_share + 0.3*L_comment + 0.2*L_dwell`
+      - Each L is binary cross-entropy (for action predictions) or MSE (for dwell time)
+      - **Task weighting matters**: Save/share labels are 5-10x sparser than like labels. Without upweighting, the model ignores them. Use **uncertainty-weighted loss** (Kendall et al., 2018) to automatically balance task gradients.
+
+      **Training infrastructure:**
+      - Dataset size: ~10 billion examples per day, typically train on 1-3 days of data
+      - Hardware: Train on **GPU clusters** (8-16 A100s) with data parallelism
+      - Training time: ~6-12 hours for a full retrain, ~2-3 hours for warm-start fine-tuning
+      - **Retraining cadence**: Daily retraining with warm-start from previous checkpoint. Fresh model deployed every morning.
+
+      **Key gotchas:**
+      - **Feedback loops**: The model's previous rankings influence what data it sees next. Over time, this creates a self-reinforcing loop. Break it with exploration (show some random items, ~5% of slots).
+      - **Label delay**: Dwell time and save signals may arrive seconds to minutes after impression. Use a **1-hour join window** for label aggregation.
+      - **Feature/label leakage**: Never include the item's engagement stats computed from the same time period as the labels. Use stats from before the training window.
+
+      Let's move to deployment.
+    dialogue:
+      - speaker: interviewer
+        text: "For training, we'd use the last 3 days of impressions with careful negative sampling and position bias correction."
+      - speaker: candidate
+        text: "How do we handle the multi-task loss balancing? Save and share labels are much sparser than likes."
+      - speaker: interviewer
+        text: "Good catch. Use uncertainty-weighted loss to automatically balance task gradients. Saves and shares are 5-10x sparser, so without upweighting the model would ignore them."
+      - speaker: candidate
+        text: "What about feedback loops? The model's rankings influence future training data."
+      - speaker: interviewer
+        text: "Reserve about 5% of slots for exploration - showing random items. Also retrain daily with warm-start. Now let's discuss deployment."
+    next: deploy_question
+
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Deployment Architecture"
+    speaker: interviewer
+    content: |
+      How would you deploy and serve the Explore ranking model in production?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you architect the serving infrastructure for the Explore ranker? Remember: 200K+ QPS, 50ms latency budget for the ranker."
+      - speaker: candidate
+        text: "The key challenge is balancing model complexity with latency requirements. Let me walk through two approaches."
+      - speaker: interviewer
+        text: "Go ahead."
+    choices:
+      - label: "GPU-based real-time serving with batching"
+        answer: |
+          I would serve the model on **GPU instances** with dynamic batching to maximize throughput within the 50ms latency budget.
+
+          **Serving infrastructure:**
+          - **Model format**: Export to TensorRT (NVIDIA) or ONNX Runtime with GPU execution provider. TensorRT can provide **3-5x speedup** over vanilla PyTorch inference through kernel fusion and FP16 quantization.
+          - **Dynamic batching**: Use Triton Inference Server, which collects incoming requests and batches them for efficient GPU utilization. Batch sizes of 32-128 candidates give optimal GPU throughput.
+          - **Fleet**: ~500-1,000 GPU instances (T4 or A10G) behind a load balancer, with auto-scaling based on QPS. At 200K QPS with ~5ms per batch, each GPU handles ~200 QPS, so we need ~1,000 GPUs at peak.
+
+          **Feature serving:**
+          - **User features**: Served from a real-time feature store (Redis/Memcached). User embeddings updated every 15 minutes.
+          - **Item features**: Pre-computed at ingestion time and stored in a key-value store. Candidate items are looked up in bulk.
+          - **Feature assembly**: A feature service combines user + item features and formats them for model input. Target: <10ms for feature assembly.
+
+          **Latency breakdown**: Feature assembly (10ms) + model inference (15ms) + value model scoring (5ms) + re-ranking/diversity (10ms) = ~40ms total, within the 50ms budget.
+
+          **Cost consideration**: GPU serving is expensive (~$2-3 per GPU-hour for T4). At 1,000 GPUs, that is ~$2-3M/month. Justified by Explore's ad revenue (Explore carries ads, estimated at **$5-10B annually** for Instagram).
+        next: mon_setup
+      - label: "CPU-based serving with model distillation"
+        answer: |
+          I would use **CPU-based serving** with a distilled, optimized model to keep infrastructure costs manageable while meeting latency requirements.
+
+          **Model distillation:**
+          - Train a full-sized "teacher" model (DCN-v2, ~5M params) offline
+          - Distill into a "student" model (~500K params) that mimics teacher predictions. Use **knowledge distillation** with soft labels from the teacher. Student is a compact MLP with 3 layers (256-128-64).
+          - Distilled model retains **95-98% of teacher quality** (measured by AUC) at 10x fewer parameters.
+
+          **Serving infrastructure:**
+          - **Model format**: ONNX Runtime with CPU execution provider, quantized to INT8. INT8 quantization provides **2-3x speedup** with <1% quality loss.
+          - **Serving framework**: Deploy on CPU instances (c6i.4xlarge or similar) using a custom C++ inference server for minimal overhead. Each instance handles ~500-1,000 QPS.
+          - **Fleet**: ~400-800 CPU instances with auto-scaling. CPU instances cost **~$0.50/hour** vs $2-3/hour for GPUs, so total cost is ~$200-400K/month.
+
+          **Feature serving**: Same real-time feature store approach as GPU serving.
+
+          **Latency breakdown**: Feature assembly (10ms) + model inference (5ms on CPU with INT8 quantization) + value model scoring (3ms) + re-ranking (10ms) = ~28ms total. Comfortably within the 50ms budget.
+
+          **Trade-off**: ~2-5% quality loss from distillation, but **5-10x cost savings** on serving infrastructure. For most teams, this is the right trade-off. At Instagram's scale, even a 1% quality loss may translate to measurable engagement impact, so it depends on how much Explore revenue justifies GPU costs.
+
+          **Hybrid approach**: Use the teacher model for the top 50 candidates (high impact) and the student model for positions 50-150 (lower impact). This balances quality and cost.
+        next: mon_setup
+
+  - id: mon_setup
+    stage: monitoring
+    type: info
+    label: "Monitoring & Iteration"
+    speaker: interviewer
+    content: |
+      Let's discuss how we would monitor and continuously improve the Explore ranking system.
+
+      **Real-time monitoring dashboard:**
+      - **Model health**: Prediction distribution (P(like) histogram), feature coverage (% of features present), inference latency p50/p95/p99, error rates
+      - **Engagement metrics**: Like rate, save rate, share rate, dwell time - all tracked **hourly** with 7-day trailing comparisons
+      - **Content mix**: Distribution of content types (photo/video/Reel), topic distribution, creator diversity (Gini coefficient of impression share across creators)
+      - **User health**: "Not Interested" rate, report rate, session abandonment rate
+
+      **Automated alerts:**
+      - Engagement drop > 2% vs trailing 7-day average -> page on-call
+      - "Not Interested" rate increase > 10% -> page on-call
+      - Inference latency p99 > 100ms -> page on-call
+      - Feature store staleness > 1 hour -> page on-call
+
+      **A/B testing framework:**
+      - Every model change is A/B tested for **1-2 weeks** minimum before full deployment
+      - Sample size: Typically 1-5% of users per experiment, with millions of users per group
+      - **Multi-metric analysis**: Primary metric must improve. All guardrail metrics must not regress. Use Bonferroni correction for multiple comparisons.
+      - **Long-term holdouts**: Keep 1% of users on the old model for 3-6 months to detect slow-burn effects on retention
+
+      **Continuous improvement cycle:**
+      1. **Analyze failure cases**: Weekly review of "worst ranked" items (high engagement but ranked low, or low engagement but ranked high)
+      2. **Feature iteration**: Identify missing signals from failure analysis, engineer new features, A/B test
+      3. **Model iteration**: Try new architectures (e.g., add sequence modeling), A/B test against current production model
+      4. **Value model tuning**: Quarterly review of engagement weights. Adjust to balance engagement vs satisfaction vs diversity.
+
+      Let's wrap up with some final considerations.
+    dialogue:
+      - speaker: interviewer
+        text: "Monitoring for a ranking system at this scale requires real-time dashboards, automated alerts, and a rigorous A/B testing framework."
+      - speaker: candidate
+        text: "What alert thresholds would you set?"
+      - speaker: interviewer
+        text: "Engagement drop over 2% vs trailing 7-day average, 'Not Interested' rate increase over 10%, and inference latency p99 above 100ms all trigger pages to on-call."
+      - speaker: candidate
+        text: "And we'd want long-term holdouts to detect slow-burn effects on retention."
+      - speaker: interviewer
+        text: "Exactly. Keep 1% of users on the old model for 3-6 months. Let's wrap up."
+    next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Design Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You have designed a comprehensive ranking system for Instagram Explore. Let's summarize your design.
+
+      **Architecture summary:**
+      - **Funnel**: Candidate generation (100M to 1K) -> first-pass ranking (1K to 150) -> final ranking (150 to 25) -> re-ranking/blending
+      - **Optimization objective**: Multi-objective engagement or user satisfaction
+      - **Features**: Dense embeddings or rich hand-crafted features with interaction terms
+      - **Model**: DCN-v2, two-tower + re-ranker, or transformer-based sequential ranker
+      - **Serving**: GPU-based with dynamic batching or CPU-based with model distillation
+      - **Monitoring**: Real-time dashboards, automated alerts, rigorous A/B testing
+
+      **Strengths of your design:**
+      - Handles the massive scale (500M users, 100M daily posts) with a well-designed funnel
+      - Balances quality and latency through architecture choices
+      - Addresses real-world concerns: position bias, feedback loops, cold start, content safety
+      - Clear metrics framework with both online and offline evaluation
+
+      **Areas to explore further:**
+      - **Diversity**: How to ensure users see diverse content, not just more of what they already like
+      - **Creator fairness**: How to distribute impressions fairly across creators of similar quality
+      - **Cold-start**: Specific strategies for new users (popularity-based fallback) and new content (explore-exploit)
+      - **Safety integration**: How content integrity scores interact with ranking (hard filters vs soft demotion)
+      - **Multi-modal understanding**: Using CLIP or similar models to understand content across text, image, and video
+
+      This design demonstrates strong systems thinking, practical trade-off analysis, and awareness of real production challenges at Meta-scale. Well done!

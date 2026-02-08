@@ -1,0 +1,799 @@
+id: support-chatbot
+title: "Customer Support Chatbot"
+description: "Design a customer support chatbot that uses a large language model (LLM)."
+companies: ["Intercom", "Zendesk", "Salesforce"]
+domains: ["NLP", "GenAI"]
+root: pd_start
+
+nodes:
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design a **customer support chatbot** powered by a large language model for a SaaS company. The company sells project management software (similar to Asana or Monday.com) to ~50,000 business customers.
+
+      **Current situation:**
+      - The support team handles **15,000 tickets/day** across chat, email, and phone
+      - Average first response time: **4.2 hours** (industry benchmark is <1 hour)
+      - **65% of tickets** are repetitive questions answered in the help center (password resets, billing, feature how-tos)
+      - Support costs: **$12M/year** for a 200-person team
+      - CSAT (Customer Satisfaction Score): 72% (target: 85%)
+
+      **Goals:**
+      - Automatically resolve 40-50% of incoming tickets without human intervention
+      - Reduce first response time to **<30 seconds** for chatbot-handled queries
+      - Maintain or improve CSAT (no quality degradation)
+      - Reduce support costs by 25% ($3M annual savings)
+
+      **Constraints:**
+      - Must integrate with existing help center (500+ articles), Zendesk ticketing system, and customer database
+      - Must handle sensitive data (billing, account info) with proper authorization
+      - Smooth handoff to human agents when the bot can't resolve
+    dialogue:
+      - speaker: interviewer
+        text: "Today we'll design a customer support chatbot for a SaaS company with 50,000 customers and 15,000 tickets per day."
+      - speaker: candidate
+        text: "What's the primary motivation? Cost reduction or customer experience?"
+      - speaker: interviewer
+        text: "Both. They want to automatically resolve 40-50% of tickets in under 30 seconds while maintaining quality. Currently 65% of tickets are repetitive questions."
+      - speaker: candidate
+        text: "What systems does it need to integrate with?"
+      - speaker: interviewer
+        text: "The help center with 500+ articles, Zendesk, and the customer database. Sensitive data handling is critical. Let's start scoping."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: info
+    label: "Problem Scope"
+    speaker: candidate
+    content: |
+      Let me frame the core system components.
+
+      **The chatbot needs three capabilities:**
+
+      1. **Knowledge-grounded Q&A** (60% of resolvable tickets): Answer questions using the help center articles, product documentation, and FAQ. Example: "How do I add a team member to my project?"
+
+      2. **Account-specific actions** (30% of resolvable tickets): Perform actions on the customer's account. Example: "Reset my password", "Update my billing email", "Cancel my subscription." These require authentication and API calls to the customer database.
+
+      3. **Triage and escalation** (remaining tickets): Classify the issue, gather relevant context, and route to the appropriate human agent with a summary. This makes human agents more efficient even when the bot can't fully resolve.
+
+      **Key design decisions ahead:**
+      - **Architecture**: RAG-based (retrieve docs + generate) vs fine-tuned model vs hybrid
+      - **Action execution**: How does the bot safely perform account actions?
+      - **Escalation**: When and how to hand off to humans?
+      - **Safety**: Preventing hallucination, jailbreaking, and data leakage
+
+      **Conversation characteristics:**
+      - Average conversation: 3-5 turns
+      - 80% in English, 20% other languages (Spanish, Portuguese, French, Japanese)
+      - Users range from tech-savvy to non-technical
+      - Tone: Professional but friendly, matching the brand voice
+    dialogue:
+      - speaker: candidate
+        text: "The chatbot needs three capabilities: knowledge-grounded Q&A for help center questions, account-specific actions like password resets, and triage for complex issues."
+      - speaker: interviewer
+        text: "Good breakdown. What's the split between those?"
+      - speaker: candidate
+        text: "About 60% are knowledge Q&A, 30% account actions, and the rest need human escalation. The key challenge is handling all three in a natural conversation."
+      - speaker: interviewer
+        text: "What about safety? This bot will have access to customer accounts."
+      - speaker: candidate
+        text: "Safety is critical -- we need to prevent hallucination, jailbreaking, and data leakage. The bot should only perform authorized actions on authenticated accounts."
+    next: met_question
+
+  - id: met_question
+    stage: metrics
+    type: question
+    label: "Success Metrics"
+    speaker: interviewer
+    content: |
+      How would you measure the success of this chatbot? What metrics would you prioritize?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you measure whether this chatbot is successful? What metrics matter most?"
+      - speaker: candidate
+        text: "I need to balance automation rate, quality, and customer satisfaction."
+      - speaker: interviewer
+        text: "Walk me through your metric hierarchy."
+    choices:
+      - label: "Resolution rate and CSAT as primary metrics"
+        answer: |
+          I'd prioritize **automated resolution rate** and **CSAT** as the two primary metrics, since they directly map to the business goals.
+
+          **Primary metrics:**
+          - **Automated Resolution Rate (ARR)**: Percentage of conversations fully resolved by the bot without human handoff. Target: 40-50%. Measured by: conversation marked resolved AND customer didn't contact support again about the same issue within 72 hours.
+          - **CSAT (Customer Satisfaction Score)**: Post-conversation survey: "How satisfied were you?" (1-5 scale). Target: 4.0+ (80%). Track separately for bot-resolved vs human-resolved. The bot's CSAT must be within 10% of human agents' CSAT.
+
+          **Secondary metrics:**
+          - **First Response Time (FRT)**: Time from customer's first message to bot's first reply. Target: <5 seconds (currently 4.2 hours). This is the instant-win metric for the chatbot.
+          - **Resolution time**: For bot-resolved conversations, average time from start to resolution. Target: <3 minutes (currently 24+ hours for human agents).
+          - **Escalation quality**: When the bot hands off, does it provide useful context? Rate by human agents: "Was the bot's summary helpful?" Target: >90% yes.
+          - **Containment rate**: Of conversations that start with the bot, what percentage stay with the bot (even if unresolved)? Low containment = users are bypassing the bot.
+
+          **Safety metrics:**
+          - **Hallucination rate**: Percentage of bot answers containing factual errors. Target: <2%. Measured by random sampling + human review.
+          - **Inappropriate action rate**: Did the bot perform unauthorized account actions? Target: 0%. Any non-zero triggers immediate investigation.
+        next: met_detail
+      - label: "Cost per resolution and deflection rate"
+        answer: |
+          I'd focus on **cost per resolution** and **deflection rate** as primary metrics, since the business case is built on cost savings.
+
+          **Primary metrics:**
+          - **Cost per resolution**: Total bot operating cost / number of resolved conversations. Compare to human agent cost per resolution (~$15-25 per ticket). Target: bot cost <$1 per resolution -- a 15-25x improvement. This makes the ROI case crystal clear.
+          - **Deflection rate**: Percentage of incoming tickets that are handled by the bot without ever reaching a human agent. Target: 40-50%. This directly translates to headcount savings: 50% deflection x 15,000 tickets/day = 7,500 fewer human-handled tickets = ~100 fewer agents needed.
+
+          **Secondary metrics:**
+          - **Repeat contact rate**: If a customer contacts support again within 72 hours about the same issue, the bot didn't actually resolve it. Target: <10% repeat rate for bot-resolved tickets.
+          - **Agent handle time reduction**: For escalated tickets, does the bot's context summary reduce the human agent's time to resolve? Target: 20% reduction in average handle time (AHT).
+          - **Revenue impact**: Track if bot interactions lead to subscription cancellations or downgrades vs upgrades. The bot should be revenue-neutral or positive.
+
+          **Unit economics:**
+          - Bot infrastructure: ~$5,000-15,000/month (LLM API + compute)
+          - Bot resolves: 7,500 tickets/day x 30 days = 225,000/month
+          - Cost per resolution: $0.02-0.07
+          - Human cost per resolution: ~$20
+          - Annual savings: ~$3.5M (after bot costs)
+
+          This cost-first framing directly justifies the investment to leadership.
+        next: met_detail
+
+  - id: met_detail
+    stage: metrics
+    type: info
+    label: "Metrics Deep Dive"
+    speaker: interviewer
+    content: |
+      Good metrics framework. Let me add some nuances.
+
+      **The CSAT paradox:**
+      - Customers who get instant bot resolution for simple questions rate satisfaction very high (4.5+). But customers who wanted a human and got a bot rate very low (2.0).
+      - The key is **intent detection**: identify when a customer genuinely needs a human (emotional distress, complex technical issue, billing dispute) and escalate immediately.
+      - Track "bot avoidance rate" -- customers who immediately type "agent" or "talk to human". If this exceeds 20%, the bot is perceived as unhelpful.
+
+      **False resolution problem:**
+      - The bot says "I've answered your question. Is there anything else?" Customer types "no" out of frustration, not satisfaction.
+      - **Better measurement**: Track 72-hour repeat contact rate. If the customer comes back about the same issue, it wasn't truly resolved.
+      - Also track whether the customer subsequently called phone support (the ultimate escalation signal).
+
+      **A/B testing for metrics:**
+      - Run bot vs no-bot experiment on 10% of traffic
+      - Compare: ticket resolution time, CSAT, repeat contact rate, cost per resolution
+      - Control for ticket complexity (route similar tickets to both arms)
+      - Run for 4+ weeks for statistical significance with 15K tickets/day
+
+      Let's discuss the data pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "Be careful with CSAT -- customers who wanted a human but got a bot rate very low. Intent detection is crucial for early escalation."
+      - speaker: candidate
+        text: "I'd track the 72-hour repeat contact rate as the true resolution signal, not just the end-of-conversation survey."
+      - speaker: interviewer
+        text: "Exactly. Also A/B test the bot against no-bot on 10% of traffic to measure true incremental value. Let's discuss data."
+    next: data_pipeline
+
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: candidate
+    content: |
+      The chatbot needs several data sources, each requiring different processing.
+
+      **1. Help center knowledge base (500+ articles):**
+      - Ingest articles from the CMS (Zendesk Help Center, Confluence, or custom)
+      - Chunk articles into 300-500 token passages with overlap
+      - Embed using text-embedding-3-small or BGE-base for retrieval
+      - Metadata: article category, last updated, view count, helpfulness rating
+      - Re-sync every 4 hours (articles are updated frequently)
+
+      **2. Historical support conversations (goldmine for training):**
+      - Export 1M+ resolved Zendesk tickets with full conversation threads
+      - Label conversation outcomes: resolved, escalated, abandoned
+      - Extract (question, answer) pairs from successful resolutions
+      - Filter for quality: CSAT 4+ conversations only
+      - This provides domain-specific training data for fine-tuning
+
+      **3. Customer database (for account actions):**
+      - Customer profile: name, plan, company, account status
+      - Billing: current plan, payment method, invoice history
+      - Usage: active users, features used, recent activity
+      - Access via internal API with OAuth authentication (bot acts on behalf of the customer)
+
+      **4. Product changelog and release notes:**
+      - New features, bug fixes, known issues
+      - Critical for answering "Is X broken right now?" questions
+      - Updated with each product release
+
+      **Data quality considerations:**
+      - Historical conversations may contain outdated information (features changed since)
+      - PII scrubbing: Remove credit card numbers, SSNs from training data
+      - Bias: Historical conversations reflect human agents' knowledge and tone -- may have inconsistencies
+      - Label quality: CSAT is a noisy signal (customers rate the product, not the support interaction)
+    dialogue:
+      - speaker: candidate
+        text: "Four data sources: help center articles for knowledge Q&A, historical conversations for training, customer database for account actions, and product changelog."
+      - speaker: interviewer
+        text: "How do you handle data quality? Historical conversations might be outdated or inconsistent."
+      - speaker: candidate
+        text: "Filter for quality -- CSAT 4+ conversations only. Scrub PII, flag outdated content based on help center article updates, and validate against current product state."
+      - speaker: interviewer
+        text: "Good. Let's discuss features and retrieval."
+    next: feat_question
+
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Context Assembly"
+    speaker: interviewer
+    content: |
+      How would you assemble the context that gets passed to the LLM for each customer message?
+    dialogue:
+      - speaker: interviewer
+        text: "The LLM needs the right context to answer well. How would you assemble that context for each customer message?"
+      - speaker: candidate
+        text: "Context assembly is the key differentiator between a generic chatbot and a helpful support agent."
+      - speaker: interviewer
+        text: "What information would you include and how?"
+    choices:
+      - label: "RAG pipeline with customer context injection"
+        answer: |
+          I'd use a **RAG pipeline** that retrieves relevant help center articles and injects customer-specific context.
+
+          **Context assembly strategy (order matters for the prompt):**
+
+          1. **System prompt** (~200 tokens): Brand voice instructions, safety guardrails, escalation rules
+          2. **Customer context** (~100 tokens): Customer name, plan tier, account age, recent activity, open tickets. Fetched from customer DB via API. Example: "Customer: Jane (Pro plan, 2 years, 15 active users, last login 2 hours ago)"
+          3. **Retrieved articles** (~1500 tokens): Top 3 most relevant help center passages. Retrieved using hybrid search (BM25 + dense embeddings) on the customer's latest message + conversation summary
+          4. **Conversation history** (~500 tokens): Last 5 turns of the current conversation. Summarize older turns to save context window.
+          5. **Customer's message** (~100 tokens): The current query
+
+          **Retrieval strategy:**
+          - Embed the customer's message + last 2 turns using text-embedding-3-small
+          - Hybrid search: BM25 for exact product terms + dense for semantic matches
+          - Rerank top 10 results using a cross-encoder, select top 3
+          - If confidence is low (max similarity <0.5), flag for potential escalation
+
+          **Dynamic context based on intent:**
+          - For billing questions: inject billing summary from customer DB
+          - For technical issues: inject recent error logs or system status
+          - For account actions: inject relevant API capabilities and authorization status
+
+          **Total context**: ~2500 tokens input, well within any modern LLM's context window.
+        next: feat_rag_detail
+      - label: "Agentic tool-use architecture"
+        answer: |
+          I'd use an **agentic architecture** where the LLM acts as a reasoning agent that decides which tools to call for each customer query.
+
+          **Tool registry:**
+          - `search_help_center(query)`: Retrieves relevant articles (RAG)
+          - `get_customer_profile(customer_id)`: Fetches account details
+          - `get_billing_info(customer_id)`: Fetches billing/subscription data
+          - `check_system_status()`: Checks for known outages or issues
+          - `reset_password(customer_id)`: Triggers password reset email
+          - `update_billing_email(customer_id, new_email)`: Updates billing contact
+          - `create_ticket(customer_id, summary, priority)`: Creates escalation ticket
+          - `transfer_to_agent(customer_id, summary, department)`: Live handoff
+
+          **How it works (ReAct pattern):**
+          ```
+          Customer: "I can't log in and I was charged twice this month"
+
+          LLM thinks: Two issues - login problem and double charge.
+            For login, I should check system status and search help center.
+            For billing, I should look at their billing info.
+
+          Action 1: check_system_status()
+          Result: "No known authentication issues"
+
+          Action 2: search_help_center("can't log in")
+          Result: "Article: Troubleshooting Login Issues..."
+
+          Action 3: get_billing_info(customer_id="C-12345")
+          Result: "Two charges on Jan 15: $49 (monthly) and $49 (prorated upgrade)"
+
+          Response: "I see two things here. For your login issue, try clearing
+          your browser cache [link]. Regarding the charges, I can see you were
+          charged $49 for your monthly subscription and $49 for a prorated
+          upgrade to the Pro plan on Jan 15. The second charge is for the
+          upgrade, not a duplicate. Would you like me to explain the upgrade
+          charges in detail?"
+          ```
+
+          **Safety constraints on tools:**
+          - Read-only tools (search, get_profile): No restrictions
+          - Write tools (reset_password, update_billing): Require customer verification (email OTP or security question)
+          - Destructive tools (cancel_subscription): Require double confirmation AND create a review ticket for human approval
+          - All tool calls are logged with full audit trail
+        next: feat_agent_detail
+
+  - id: feat_rag_detail
+    stage: features
+    type: info
+    label: "RAG Pipeline Details"
+    speaker: interviewer
+    content: |
+      Good RAG approach. Let me add some important details.
+
+      **Conversation-aware retrieval:**
+      - Don't just search using the latest message. Consider the full conversation context.
+      - Example: Customer says "How do I do that?" -- This is meaningless without context.
+      - Strategy: Maintain a running query that combines the current message with key entities from prior turns.
+      - Use the LLM to generate a standalone search query: "Given this conversation, generate a search query for the help center."
+
+      **Help center article ranking signals:**
+      - Semantic similarity (from embeddings)
+      - Article view count (popular articles are more likely relevant)
+      - Article freshness (recently updated articles reflect current product state)
+      - Article helpfulness rating (from user feedback on help center)
+      - Customer's plan tier (some features are plan-specific -- don't show Enterprise docs to Free users)
+
+      **Handling multi-turn conversations:**
+      ```
+      Turn 1: "How do I add a team member?"
+      -> Retrieve: "Adding Team Members" article
+      -> Respond with instructions
+
+      Turn 2: "What if they already have an account?"
+      -> Context: conversation is about adding team members
+      -> Retrieve: "Adding Existing Users" article
+      -> Respond with relevant subsection
+      ```
+
+      **Fallback chain:**
+      1. If high-confidence article match (similarity >0.7): Answer from article
+      2. If medium-confidence (0.4-0.7): Answer tentatively + offer to escalate
+      3. If low-confidence (<0.4): "I'm not sure about that. Let me connect you with a specialist."
+
+      Let's discuss the LLM model choice.
+    dialogue:
+      - speaker: interviewer
+        text: "Don't just search with the latest message -- use the LLM to generate a standalone query that captures the full conversation context."
+      - speaker: candidate
+        text: "I'd also factor in article popularity, freshness, and the customer's plan tier when ranking results."
+      - speaker: interviewer
+        text: "Good. The fallback chain is crucial -- high confidence answers directly, medium offers escalation, low escalates immediately."
+    next: mod_question
+
+  - id: feat_agent_detail
+    stage: features
+    type: info
+    label: "Agentic Architecture Details"
+    speaker: interviewer
+    content: |
+      Strong agentic design. Let me add safety and reliability concerns.
+
+      **Tool call validation layer:**
+      - Every tool call goes through a validation layer before execution
+      - **Schema validation**: Are all required parameters present and correctly typed?
+      - **Authorization check**: Is this customer authenticated? Does the tool require additional verification?
+      - **Rate limiting**: Max 5 tool calls per conversation turn (prevent infinite loops)
+      - **Idempotency**: Mark tools as idempotent or non-idempotent. Non-idempotent tools (password reset) can only be called once per conversation.
+
+      **Error handling:**
+      - Tool returns error -> LLM should explain the issue naturally: "I wasn't able to reset your password because your account has two-factor authentication. You'll need to reset it through the mobile app."
+      - Tool timeout (>5s) -> LLM should apologize and offer to try again or escalate
+      - Multiple tool failures -> Auto-escalate to human agent with full context
+
+      **Token budget management:**
+      - Each tool call adds to the context. With 5+ tool calls, context can blow up to 10K+ tokens.
+      - Summarize tool results before injecting: Instead of the full billing history, inject "Customer has been charged $49/month for 12 months, with a $49 prorated charge on Jan 15."
+      - Set a context budget: If accumulated context exceeds 4K tokens, summarize the conversation so far.
+
+      **Framework options:**
+      - **LangChain Agents**: Most popular, good ecosystem, but complex and hard to debug
+      - **OpenAI function calling**: Native, well-supported, simpler than LangChain
+      - **Custom ReAct loop**: Most control, best for production systems. 50-100 lines of code.
+
+      Let's discuss the LLM model choice.
+    dialogue:
+      - speaker: interviewer
+        text: "Every tool call needs a validation layer -- schema validation, authorization check, rate limiting, and idempotency control."
+      - speaker: candidate
+        text: "Error handling is critical too. If a tool fails, the LLM should explain naturally and offer alternatives, not just show an error message."
+      - speaker: interviewer
+        text: "Good. Also manage token budgets carefully -- summarize tool results to prevent context blowup. Let's discuss model selection."
+    next: mod_question
+
+  - id: mod_question
+    stage: model
+    type: question
+    label: "LLM Model Selection"
+    speaker: interviewer
+    content: |
+      Which LLM would you use to power this chatbot, and why?
+    dialogue:
+      - speaker: interviewer
+        text: "Which LLM would you choose for the chatbot? There are significant trade-offs between cost, quality, and control."
+      - speaker: candidate
+        text: "This is one of the most impactful decisions. Let me think through the options."
+      - speaker: interviewer
+        text: "Consider cost at 15,000 tickets per day."
+    choices:
+      - label: "GPT-4o-mini for cost-effective quality"
+        answer: |
+          I'd use **GPT-4o-mini** as the primary model, with GPT-4o as a fallback for complex queries.
+
+          **Why GPT-4o-mini?**
+          - **Quality**: 82% on MMLU, strong instruction-following, good at tool use. For the relatively constrained domain of customer support, it performs nearly as well as GPT-4o.
+          - **Cost**: $0.15/M input tokens, $0.60/M output tokens. At average 2K input + 300 output tokens per turn, 4 turns per conversation: ~$0.002 per conversation. At 15K conversations/day = **$30/day = $900/month**. Extremely cost-effective.
+          - **Latency**: Time-to-first-token ~100ms, 100+ tokens/second. Users get instant responses.
+          - **Structured outputs**: Native JSON mode and function calling. Critical for tool-use and structured responses.
+
+          **Tiered model routing:**
+          - **GPT-4o-mini** (90% of conversations): Standard Q&A, simple account actions, straightforward issues
+          - **GPT-4o** (10% of conversations): Complex multi-step issues, billing disputes, technical debugging. Routed when: conversation exceeds 5 turns, customer expresses frustration, or issue involves multiple tools.
+          - Total cost: $900 + $500 (GPT-4o) = **~$1,400/month**
+
+          **Guardrails:**
+          - System prompt includes: "You are a support agent for [ProductName]. Only answer questions about [ProductName]. If asked about anything else, politely redirect."
+          - Output validation: Check for hallucinated URLs, non-existent features, incorrect pricing
+          - Content filter: Block responses containing PII, profanity, or competitor comparisons
+
+          **Trade-off vs self-hosted**: No GPU infrastructure to manage, always up-to-date models, but you're sending customer data to OpenAI. Mitigate with Azure OpenAI (data stays in your tenant).
+        next: mod_detail
+      - label: "Fine-tuned open-source model (Llama 3.1 8B)"
+        answer: |
+          I'd use a **fine-tuned Llama 3.1 8B** model, deployed on-premises for data privacy and cost control.
+
+          **Why fine-tuned Llama 3.1 8B?**
+          - **Data privacy**: Customer conversations never leave your infrastructure. Critical for enterprise clients with strict data policies.
+          - **Cost**: Fixed infrastructure cost (~$800/month for 1x A10G GPU) regardless of volume. At 15K conversations/day, amortized cost is ~$0.002 per conversation -- same as GPT-4o-mini but with zero per-token cost.
+          - **Customization**: Fine-tuned on your specific product, tone, and resolution patterns. The model learns your brand voice, product terminology, and common issue patterns.
+          - **Latency**: Self-hosted inference with vLLM: ~50ms time-to-first-token, ~80 tokens/second. Faster than cloud API.
+
+          **Fine-tuning approach:**
+          - **Training data**: 50K high-quality (customer_message, agent_response) pairs from historical CSAT 4+ conversations
+          - **Method**: QLoRA (4-bit quantization + LoRA adapters). Trains in ~4 hours on a single A100.
+          - **Focus areas**: Product-specific terminology, escalation decisions, tone consistency, tool-use formatting
+          - **Evaluation**: Compare fine-tuned model against GPT-4o-mini on 500 held-out conversations
+
+          **Why 8B over 70B?**
+          - 8B fits on a single A10G GPU with 4-bit quantization (~6GB model weight)
+          - For the constrained domain of customer support (not open-ended reasoning), 8B is sufficient
+          - 10x lower inference cost than 70B
+          - Fine-tuning on domain data closes most of the quality gap
+
+          **Trade-offs**: Requires ML ops expertise, model updates are manual (no automatic improvements), may struggle with truly novel queries that fine-tuning data didn't cover.
+        next: mod_detail
+
+  - id: mod_detail
+    stage: model
+    type: info
+    label: "Model Architecture Details"
+    speaker: interviewer
+    content: |
+      Good model choice. Let me add critical architectural details.
+
+      **Prompt engineering for support bots:**
+      ```
+      System: You are a friendly, helpful customer support agent for ProjectPro,
+      a project management tool. Follow these rules:
+      1. Only answer questions about ProjectPro. Politely decline other topics.
+      2. Use information ONLY from the provided context and tools. Never guess.
+      3. If unsure, say "I'm not certain about that. Let me connect you with
+         a specialist who can help."
+      4. Never share other customers' information.
+      5. For account changes, always confirm before executing.
+      6. Match the customer's communication style (formal/casual).
+      7. Keep responses concise (2-3 sentences for simple questions).
+      ```
+
+      **Intent classification (before LLM call):**
+      - Use a lightweight classifier (DistilBERT, ~2ms) to classify intent before the LLM call
+      - Intents: faq, billing, technical_issue, account_action, feedback, escalation_request
+      - This enables: routing to the right context, selecting the right tools, and measuring intent-specific accuracy
+      - If intent is "escalation_request" (user asks for human), skip the bot entirely
+
+      **Response quality control:**
+      - **Factual grounding check**: Every claim in the response must be traceable to a retrieved article or tool result
+      - **Tone analysis**: Run a lightweight sentiment model on bot responses to ensure they're positive/neutral
+      - **Length control**: Enforce max response length (150 words for chat, 300 for email)
+      - **PII detection**: Scan responses for accidentally leaked PII before sending
+
+      Let's discuss training and optimization.
+    dialogue:
+      - speaker: interviewer
+        text: "A lightweight intent classifier before the LLM call enables smart routing and early escalation detection. If the user asks for a human, skip the bot."
+      - speaker: candidate
+        text: "Response quality control is essential -- factual grounding checks, tone analysis, and PII scanning before every response is sent."
+      - speaker: interviewer
+        text: "Good. Let's discuss training strategy."
+    next: train_strategy
+
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: candidate
+    content: |
+      Training strategy depends on the model choice, but there are common elements.
+
+      **For fine-tuned models (Llama 3.1 8B):**
+
+      **Data preparation:**
+      - Extract 50K conversations from Zendesk with CSAT >= 4
+      - Format as multi-turn conversations: [{role: customer, content: ...}, {role: agent, content: ...}, ...]
+      - Include tool calls in the training data so the model learns when to use tools
+      - Clean up: remove agent-to-agent internal notes, standardize formatting, anonymize PII
+
+      **Fine-tuning procedure:**
+      - QLoRA: rank=16, alpha=32, on attention layers
+      - Optimizer: AdamW, lr=2e-4, cosine schedule
+      - Batch size: 4 with gradient accumulation to effective batch size 32
+      - Training: 3 epochs, ~4 hours on single A100
+      - Evaluation: Every 500 steps on held-out validation set
+
+      **For prompt-based models (GPT-4o-mini):**
+      - No model training, but invest heavily in **prompt engineering**
+      - A/B test prompt variations systematically
+      - Optimize few-shot examples: select 3-5 diverse examples covering edge cases
+      - Use DSPy or similar framework for automated prompt optimization
+
+      **Continuous improvement (both approaches):**
+      - **Feedback loop**: Agent reviews of bot responses (correct/incorrect/partially correct)
+      - **Weekly retraining**: Incorporate new labeled data from agent reviews
+      - **Conversation replay**: For failed conversations (escalated or low CSAT), analyze what went wrong and add corrective examples to training data
+      - **Knowledge base sync**: When help articles are updated, re-embed and test the bot against article-related queries
+      - **A/B testing**: Test model updates on 10% of traffic for 1 week before full rollout
+
+      **Evaluation benchmarks:**
+      - Maintain a benchmark set of 500 conversations across all intent categories
+      - Run automated evaluation after every model update: resolution rate, response accuracy, tone score
+      - Human evaluation on 50 conversations/week: correctness, helpfulness, naturalness (1-5 scale)
+    dialogue:
+      - speaker: candidate
+        text: "For fine-tuning, I'd use 50K high-quality conversations with QLoRA. For prompt-based models, invest in systematic prompt engineering and A/B testing."
+      - speaker: interviewer
+        text: "How do you handle continuous improvement?"
+      - speaker: candidate
+        text: "Agent reviews of bot responses create a feedback loop. Weekly retraining on new data, conversation replay analysis for failures, and regular benchmark evaluation."
+      - speaker: interviewer
+        text: "Good systematic approach. Let's talk deployment."
+    next: deploy_question
+
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Deployment Architecture"
+    speaker: interviewer
+    content: |
+      How would you deploy this chatbot in production?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you architect the production deployment? Think about the full user experience from widget to resolution."
+      - speaker: candidate
+        text: "The deployment needs to handle real-time chat, integrate with existing systems, and provide graceful escalation."
+      - speaker: interviewer
+        text: "Walk me through the architecture."
+    choices:
+      - label: "Widget-based with WebSocket streaming"
+        answer: |
+          I'd deploy as a **chat widget** integrated into the product and website, using WebSocket for real-time streaming.
+
+          **End-to-end architecture:**
+          ```
+          Chat Widget (React) <-> WebSocket Gateway (nginx)
+            <-> Chat Service (FastAPI)
+              <-> Intent Classifier (DistilBERT, local)
+              <-> RAG Pipeline (Weaviate + Reranker)
+              <-> LLM Service (GPT-4o-mini API or vLLM)
+              <-> Customer API (internal)
+              <-> Zendesk API (ticket creation, agent handoff)
+            <-> Redis (session state, conversation history)
+            <-> PostgreSQL (conversation logs, analytics)
+          ```
+
+          **User experience flow:**
+          1. Customer clicks chat widget -> WebSocket connection established
+          2. Greeting: "Hi! I'm ProjectPro Assistant. How can I help?"
+          3. Customer types message -> streamed to Chat Service
+          4. Intent classification (~2ms)
+          5. Context assembly (customer profile + article retrieval, ~200ms)
+          6. LLM response generation, streamed back token-by-token (~1-2s)
+          7. Response appears character-by-character in the widget (perceived instant)
+          8. If escalation needed: "Let me connect you with a specialist. One moment..."
+             -> Create Zendesk ticket with conversation summary
+             -> Transfer WebSocket to human agent dashboard
+
+          **Session management:**
+          - Conversation state stored in Redis (TTL: 24 hours)
+          - If customer returns within 24 hours, resume conversation
+          - Conversation history summarized after 10 turns to manage context window
+
+          **Multi-channel support:**
+          - Same Chat Service backend serves: web widget, mobile app, Slack integration, email
+          - Email: Asynchronous mode (no streaming), responds within 5 minutes
+          - Slack: Bot responds in thread, maintains context per thread
+        next: deploy_detail
+      - label: "API-first with Zendesk integration"
+        answer: |
+          I'd deploy as an **API service** that integrates directly into the existing Zendesk workflow.
+
+          **Architecture:**
+          ```
+          Zendesk (incoming tickets) -> Webhook -> Bot API Service
+            -> Intent Classifier
+            -> RAG Pipeline
+            -> LLM Service
+            -> Response -> Zendesk (auto-reply or agent assist)
+          ```
+
+          **How it works within Zendesk:**
+          1. Customer submits ticket (chat, email, or web form)
+          2. Zendesk fires webhook to Bot API with ticket details
+          3. Bot API classifies intent, assembles context, generates response
+          4. **Auto-resolve path**: If confidence >0.85, send response directly to customer via Zendesk. Mark ticket as "Pending - Bot Resolved".
+          5. **Agent assist path**: If confidence 0.5-0.85, draft a suggested response for the human agent. Agent reviews, edits if needed, and sends. This reduces agent handle time by 40%.
+          6. **Escalation path**: If confidence <0.5 or sensitive topic detected, route to human agent with context summary.
+
+          **Why Zendesk-integrated?**
+          - No new UI to build or maintain -- leverages existing customer-facing channels
+          - Agents see bot suggestions in their existing workflow (Zendesk sidebar)
+          - Unified analytics: all conversations (bot and human) in one place
+          - Gradual rollout: Start with agent-assist mode (human reviews all responses), graduate to auto-resolve as confidence builds
+
+          **Gradual rollout plan:**
+          - Week 1-4: Agent-assist only. Bot drafts responses, agents review and send.
+          - Week 5-8: Auto-resolve for top 5 FAQ categories (password reset, pricing, basic how-to). Agents handle everything else.
+          - Week 9-12: Expand auto-resolve to all categories where accuracy >90%.
+          - Month 4+: Full auto-resolve for qualifying conversations, continuous improvement.
+
+          **Cost**: API Service on Kubernetes (~$500/month) + LLM costs (~$1,400/month) = ~$1,900/month total.
+        next: deploy_detail
+
+  - id: deploy_detail
+    stage: deployment
+    type: info
+    label: "Deployment Details"
+    speaker: interviewer
+    content: |
+      Good architecture. Let me add important production concerns.
+
+      **Graceful escalation (the most critical UX moment):**
+      - When the bot can't resolve, the handoff must be seamless, not frustrating
+      - **Context transfer**: Bot creates a structured summary for the agent:
+        ```
+        Customer: Jane Doe (Pro plan, 2 years)
+        Issue: Double charge on January invoice
+        Bot actions: Looked up billing (found upgrade proration charge)
+        Customer response: Not satisfied with explanation, wants refund
+        Suggested next step: Review upgrade charges, consider prorated refund
+        ```
+      - Agent sees full conversation history + summary in their dashboard
+      - Customer should NOT have to repeat their issue. "I've shared our conversation with Sarah, who can help with billing adjustments."
+
+      **Safety and compliance:**
+      - **Authentication**: Customer must verify identity before account actions (email OTP, security question)
+      - **Audit logging**: Every bot response, tool call, and customer message is logged with timestamps
+      - **PII handling**: Responses are scanned for PII before sending. Customer data is encrypted at rest and in transit.
+      - **Jailbreak prevention**: Input sanitization (strip injection attempts), output validation (check for off-topic responses)
+      - **Compliance**: GDPR (customer can request conversation deletion), SOC 2 (audit trails), PCI DSS (if handling payment info)
+
+      **High availability:**
+      - LLM API fallback chain: GPT-4o-mini -> GPT-4o -> "Sorry, experiencing issues. Creating a ticket for you."
+      - If entire bot service is down: Auto-route to human agents with apology message
+      - Target: 99.9% uptime (8.7 hours downtime/year max)
+
+      Let's discuss monitoring.
+    dialogue:
+      - speaker: interviewer
+        text: "The escalation handoff is the most critical UX moment. The agent must get a structured summary so the customer never repeats their issue."
+      - speaker: candidate
+        text: "Safety is non-negotiable -- authentication before account actions, audit logging, PII scanning, and jailbreak prevention."
+      - speaker: interviewer
+        text: "Good. Also plan for the fallback chain -- if the LLM API is down, auto-route to humans with an apology. Let's discuss monitoring."
+    next: mon_question
+
+  - id: mon_question
+    stage: monitoring
+    type: question
+    label: "Monitoring Strategy"
+    speaker: interviewer
+    content: |
+      How would you monitor this chatbot in production to ensure quality and continuous improvement?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you monitor the chatbot to catch issues before they impact customers?"
+      - speaker: candidate
+        text: "I need to monitor at multiple levels -- conversation quality, system health, and business impact."
+      - speaker: interviewer
+        text: "What would trigger an alert?"
+    choices:
+      - label: "Conversation quality monitoring"
+        answer: |
+          I'd implement **multi-layer conversation quality monitoring** with automated evaluation and human review.
+
+          **Real-time monitoring:**
+          - **Hallucination detection**: For every bot response, check if claims are grounded in retrieved articles or tool results. Flag ungrounded claims for review. Target: <2% hallucination rate.
+          - **Confidence tracking**: Log the LLM's self-reported confidence and retrieval similarity scores. Alert if average confidence drops below threshold (indicates model struggling with new query patterns).
+          - **Escalation rate**: Track hourly. If escalation rate spikes above 60% (normal: ~50%), something is wrong -- model degradation, help center issue, or product bug.
+          - **Response latency**: P50, P95, P99 for each component (intent classification, retrieval, LLM generation). Alert if P99 >5s.
+
+          **Daily automated evaluation:**
+          - Run 100 conversations through an LLM judge (GPT-4 evaluating GPT-4o-mini responses)
+          - Score on: correctness, helpfulness, tone, safety
+          - Track trends over time. Alert on any metric dropping >5% week-over-week.
+
+          **Weekly human review:**
+          - Sample 50 bot-resolved conversations. Human agents rate: "Was this correctly resolved?"
+          - Sample 20 escalated conversations. Review: "Was escalation appropriate? Could the bot have resolved this?"
+          - Sample 10 low-CSAT conversations. Deep-dive: what went wrong?
+
+          **Conversation clustering:**
+          - Embed all conversations, cluster with HDBSCAN
+          - Identify new clusters (emerging issue types the bot hasn't seen)
+          - Track resolution rate per cluster. Low-resolution clusters need attention (new training data or help articles).
+        next: mon_terminal
+      - label: "Business impact dashboard"
+        answer: |
+          I'd build a **business impact dashboard** that ties chatbot performance to revenue and cost metrics.
+
+          **Executive dashboard (updated hourly):**
+          - **Automated Resolution Rate**: Current: X% (target: 45%). Trend: up/down/flat.
+          - **Cost savings**: $(human cost avoided) - $(bot operating cost) = net savings this month
+          - **CSAT comparison**: Bot CSAT vs human agent CSAT. Goal: within 10%.
+          - **First Response Time**: Bot: <5s. Human (with bot triage): X min. Previous (no bot): 4.2 hrs.
+
+          **Operational dashboard (real-time):**
+          - Active conversations: X bot, Y human, Z in queue
+          - Escalation rate (rolling 1 hour): X%
+          - Intent distribution today: billing 30%, how-to 25%, technical 20%, account 15%, other 10%
+          - Unresolved conversations: X (auto-escalate if >15 minutes)
+
+          **Quality alerts:**
+          - CSAT for bot conversations drops below 3.5 (P1 alert)
+          - Repeat contact rate exceeds 15% (P1 alert -- bot is giving wrong answers)
+          - Escalation rate exceeds 65% for 2+ hours (P2 alert)
+          - Customer explicitly complains about bot ("your bot is useless") -- route to human immediately + log for review
+
+          **Weekly review meeting:**
+          - Top 10 queries the bot can't answer (knowledge gaps to fill)
+          - Top 5 incorrect bot answers (training data to add)
+          - Feature requests from customers (product feedback channel)
+          - ROI update: cost savings, CSAT trends, volume trends
+
+          **Continuous improvement cycle:**
+          - Monthly: Retrain/re-evaluate model, update prompt, refresh help center embeddings
+          - Quarterly: Deep analysis of all low-CSAT conversations, major prompt overhaul
+          - Annually: Evaluate whether to switch models (new releases from OpenAI, Anthropic, or open-source)
+        next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Support Chatbot Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive LLM-powered customer support chatbot.
+
+      **Your architecture summary:**
+      - **Capabilities**: Knowledge Q&A, account actions, triage and escalation
+      - **Context**: RAG pipeline with customer context injection or agentic tool-use
+      - **Model**: GPT-4o-mini (cost-effective) or fine-tuned Llama 3.1 8B (privacy-first)
+      - **Deployment**: Chat widget with WebSocket streaming or API-first Zendesk integration
+      - **Monitoring**: Conversation quality monitoring or business impact dashboard
+
+      **Strengths of your design:**
+      - Clear separation of capabilities (Q&A, actions, escalation)
+      - Safety-first approach with authentication, guardrails, and audit trails
+      - Graceful escalation with context transfer to human agents
+      - Cost-effective at scale (~$0.002 per conversation)
+
+      **Advanced topics to explore:**
+      - **Proactive support**: Bot detects user struggling in-product and offers help before they open a ticket
+      - **Voice support**: Extend to phone support using speech-to-text + LLM + text-to-speech
+      - **Multi-language fine-tuning**: Specialized models per language vs single multilingual model
+      - **Customer emotion detection**: Detect frustration/anger early and adjust tone or escalate
+      - **Knowledge gap detection**: Automatically identify topics where the help center lacks content and alert the content team
+
+      This design demonstrates strong product thinking alongside technical depth -- balancing automation rate, quality, cost, and customer experience. Great job!
+    dialogue:
+      - speaker: interviewer
+        text: "Excellent work! You've designed a comprehensive LLM-powered customer support chatbot."
+      - speaker: candidate
+        text: "Thank you! The most critical design decision was the graceful escalation -- making sure customers never have to repeat their issue when handed off to a human agent."
+      - speaker: interviewer
+        text: "Absolutely. Your safety-first approach with authentication, guardrails, and audit trails shows production readiness. Great job!"

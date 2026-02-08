@@ -1,0 +1,1363 @@
+id: fraud-detection
+title: "Financial Fraud Detection"
+description: "Design a real-time fraud detection system for financial transactions."
+companies: ["Stripe", "PayPal", "Square"]
+domains: ["Tabular/Structured", "Real-time", "Anomaly Detection"]
+category: "Security, Safety & Fraud"
+root: pd_start
+
+nodes:
+  # ============ PROBLEM DEFINITION ============
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design a **real-time fraud detection system** for financial transactions, similar to what companies like Stripe, PayPal, and Square operate at scale.
+
+      **Business context:**
+      - The payment platform processes **~$1 trillion/year** across hundreds of millions of merchants
+      - Current fraud rate is approximately **0.1%** of transactions by volume but can represent **$1B+** in annual losses
+      - Transactions must be scored in **<100ms** at payment time to avoid degrading checkout UX
+      - The system must comply with **PCI-DSS**, **PSD2 (Strong Customer Authentication)**, and regional regulations
+      - False positives (blocking legitimate transactions) directly cause **merchant churn** and lost revenue
+
+      **Goal:** Design an ML system that scores every transaction in real-time, assigning a fraud probability that the downstream decisioning engine uses to approve, decline, or trigger step-up authentication (e.g., 3D Secure).
+
+      **Key tension:** Catching more fraud (higher recall) inevitably blocks more legitimate transactions (lower precision). The optimal trade-off depends on the merchant's risk tolerance and the transaction context.
+
+      Let's start by scoping the problem.
+    dialogue:
+      - speaker: interviewer
+        text: "Let's design a real-time fraud detection system for a major payment processor. Where would you start?"
+      - speaker: candidate
+        text: "I'd start by understanding the scale and constraints. What volume of transactions are we processing?"
+      - speaker: interviewer
+        text: "Think Stripe-scale: billions of transactions per year, sub-100ms latency requirements, and the fraud rate is roughly 0.1% by volume."
+      - speaker: candidate
+        text: "So we have a massive class imbalance problem with strict latency requirements. The key challenge will be maintaining high recall without overwhelming merchants with false declines."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: info
+    label: "Problem Scoping"
+    speaker: interviewer
+    content: |
+      Let's scope the system more precisely.
+
+      **What we're building:**
+      - A **transaction scoring service** that receives a transaction payload (amount, card, merchant, device info) and returns a fraud score (0-1) plus risk signals
+      - The scoring service feeds a **decisioning engine** that maps scores to actions (approve/decline/step-up)
+      - We need to support both **card-present** (POS terminals) and **card-not-present** (online) transactions
+
+      **What we're NOT building:**
+      - Chargeback dispute resolution (downstream process)
+      - Account takeover detection (separate system, though features overlap)
+      - Merchant onboarding risk scoring (separate model)
+
+      **ML formulation options:**
+      - **Binary classification**: Transaction is fraud (1) or legitimate (0)
+      - **Anomaly detection**: Score how "unusual" a transaction is relative to the cardholder's history
+      - **Hybrid**: Classification model boosted by anomaly signals as features
+
+      Most production systems use **binary classification** as the backbone, with anomaly scores as input features. The labeled data from chargebacks provides strong supervision, despite being delayed by 30-90 days.
+
+      Now, let's discuss the critical trade-off that shapes the entire system.
+    dialogue:
+      - speaker: interviewer
+        text: "How would you formulate this as an ML problem?"
+      - speaker: candidate
+        text: "I'd frame it as binary classification -- predicting whether a transaction is fraudulent or legitimate. We have strong labels from chargeback data."
+      - speaker: interviewer
+        text: "Good. What about the label delay problem? Chargebacks can take 30-90 days."
+      - speaker: candidate
+        text: "That's a major challenge. We'd need to handle label delay in training -- either by using a fixed observation window or by incorporating early fraud signals like customer reports and bank alerts."
+      - speaker: interviewer
+        text: "Exactly. Let's discuss the metrics trade-off next."
+    next: met_question
+
+  # ============ METRICS ============
+  - id: met_question
+    stage: metrics
+    type: question
+    label: "Precision vs Recall Trade-off"
+    speaker: interviewer
+    content: |
+      The fundamental tension in fraud detection is **precision vs recall**. Every fraud system must choose where to operate on this curve.
+
+      Consider: Stripe reports that even a **1% increase in false decline rate** can cost merchants millions in lost revenue. But missing fraud erodes trust and increases chargeback costs.
+
+      How would you optimize this system -- lean toward catching more fraud, or minimizing false positives?
+    choices:
+      - label: "Precision-focused: Minimize false declines"
+        answer: |
+          I'd optimize for **high precision** (minimizing false positives) for several strategic reasons:
+
+          **Why precision matters more in payments:**
+          - **False declines cost 13x more than fraud** according to Aite-Novarica research -- a declined legitimate customer may never return
+          - Stripe and PayPal compete on **approval rates** -- merchants choose payment processors that approve more transactions
+          - Each false decline is an immediate, measurable revenue loss; fraud losses are partially absorbed by insurance and chargebacks
+
+          **Target metrics:**
+          - **Precision at 90% recall**: Target >95% precision (i.e., <5% of blocks are false positives)
+          - **False Positive Rate (FPR)**: <0.5% of all legitimate transactions incorrectly blocked
+          - **$ fraud caught / $ legitimate blocked ratio**: Target >10:1
+          - **Approval rate**: Maintain >98% overall transaction approval rate
+
+          **Operating point strategy:**
+          - Set the decision threshold high enough that only high-confidence fraud is auto-declined
+          - For medium-risk transactions (score 0.3-0.7), trigger **step-up authentication** (3D Secure, SMS OTP) instead of hard decline
+          - This three-tier approach (approve / step-up / decline) captures fraud while preserving most legitimate transactions
+
+          **Business metric:** Track **net fraud savings** = (fraud caught) - (revenue lost from false declines) - (step-up authentication friction costs). This single metric captures the full economic impact.
+        next: met_precision
+      - label: "Recall-focused: Catch maximum fraud"
+        answer: |
+          I'd optimize for **high recall** (catching as much fraud as possible) because:
+
+          **Why recall matters more:**
+          - A single undetected fraud ring can cause **$10M+ in losses** before manual detection
+          - **Chargeback rates above 1%** trigger card network penalties (Visa/Mastercard programs) that can result in fines or losing processing ability entirely
+          - **Brand trust** -- one viral fraud story on social media causes disproportionate damage
+          - Sophisticated fraud (synthetic identity, account takeover) is harder to detect and more damaging
+
+          **Target metrics:**
+          - **Recall**: >95% of fraud caught (by dollar value, not just transaction count)
+          - **Precision at 95% recall**: Target >80% (accept up to 20% false positive rate among flagged transactions)
+          - **Detection latency**: Fraud caught within first 2 transactions of a fraud pattern
+          - **Dollar-weighted recall**: Weight recall by transaction amount -- catching a $5,000 fraud matters more than catching a $5 fraud
+
+          **Handling the false positive problem:**
+          - Use a **tiered decisioning system** with soft declines and step-up auth
+          - Invest in **fast customer verification** (push notifications, biometric auth) to resolve false positives in seconds rather than blocking
+          - Segment thresholds by merchant risk profile -- high-risk merchants (digital goods, crypto) get tighter thresholds
+
+          **Business metric:** **Total fraud losses** as a percentage of gross payment volume (GPV). Target <0.05% of GPV.
+        next: met_recall
+
+  - id: met_precision
+    stage: metrics
+    type: info
+    label: "Precision-Focused Metrics Framework"
+    speaker: interviewer
+    content: |
+      Good choice. A precision-focused approach aligns with how modern payment processors compete.
+
+      **Complete metrics framework:**
+
+      | Category | Metric | Target | Why |
+      |----------|--------|--------|-----|
+      | **Primary** | Precision @ 90% recall | >95% | Core optimization target |
+      | **Primary** | False Positive Rate | <0.5% | Direct merchant impact |
+      | **Business** | Net fraud savings ($) | Positive | Economic justification |
+      | **Business** | Approval rate | >98% | Competitive benchmark |
+      | **Operational** | P99 scoring latency | <100ms | Checkout UX |
+      | **Operational** | Model freshness | <24h | Adapt to new patterns |
+      | **Fairness** | FPR parity across demographics | <2x disparity | Regulatory compliance |
+
+      **Evaluation methodology:**
+      - Use **Precision-Recall curves** (not ROC) because the class imbalance makes ROC misleadingly optimistic
+      - Evaluate on **dollar-weighted** metrics, not just transaction counts
+      - **Temporal holdout**: Always evaluate on future data (never random splits) because fraud patterns evolve
+      - **Segment-level evaluation**: Break down performance by merchant category (MCC), region, transaction type
+
+      **Key insight:** The threshold is not a single number. Different merchant segments, transaction amounts, and risk contexts should have **different thresholds**, tuned based on each segment's false-decline tolerance.
+
+      Let's move on to the data pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "How would you evaluate the model beyond standard precision/recall?"
+      - speaker: candidate
+        text: "I'd look at dollar-weighted metrics since catching a $5,000 fraud matters much more than a $5 one. I'd also evaluate per-segment -- high-risk MCCs like digital goods need different thresholds than grocery stores."
+      - speaker: interviewer
+        text: "That's a sophisticated approach. What about the evaluation methodology?"
+      - speaker: candidate
+        text: "Strictly temporal holdouts. Fraud patterns evolve weekly, so random train/test splits give inflated metrics. I'd use a rolling window: train on months 1-3, validate on month 4, test on month 5."
+    next: data_collection
+
+  - id: met_recall
+    stage: metrics
+    type: info
+    label: "Recall-Focused Metrics Framework"
+    speaker: interviewer
+    content: |
+      Good reasoning. A recall-focused approach is appropriate when fraud losses are the primary concern.
+
+      **Complete metrics framework:**
+
+      | Category | Metric | Target | Why |
+      |----------|--------|--------|-----|
+      | **Primary** | Recall (dollar-weighted) | >95% | Catch maximum fraud value |
+      | **Primary** | Detection speed | <2 txns | Catch fraud rings early |
+      | **Business** | Fraud-to-GPV ratio | <0.05% | Network compliance |
+      | **Business** | Chargeback rate | <0.5% | Avoid Visa/MC penalties |
+      | **Guardrail** | False decline rate | <3% | Prevent merchant churn |
+      | **Operational** | P99 scoring latency | <100ms | Checkout UX |
+      | **Fairness** | Recall parity across demographics | <10% gap | Equitable protection |
+
+      **Evaluation methodology:**
+      - **PR-AUC** (Area Under Precision-Recall Curve) as the primary model comparison metric
+      - **Time-to-detection**: For fraud rings, measure how many transactions occur before the first flag
+      - **Evaluation by fraud type**: Card-not-present, counterfeit, lost/stolen, account takeover each have different detection difficulty
+      - **Adversarial evaluation**: Red-team the model with synthetic attack patterns
+
+      **Handling the precision trade-off:**
+      - Track **false positive volume** as a guardrail metric with alerting if it exceeds 3%
+      - Use customer friction metrics (step-up auth rate, authentication success rate) as secondary signals
+      - Implement merchant-level feedback loops -- if a merchant reports excessive false declines, adjust their threshold
+
+      Now let's design the data pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "With a recall-focused approach, how do you prevent the false positive rate from becoming unacceptable?"
+      - speaker: candidate
+        text: "Three mechanisms: tiered decisioning with step-up auth for medium-risk scores, merchant-specific threshold tuning, and a hard guardrail that triggers alerts if false decline rate exceeds 3%."
+      - speaker: interviewer
+        text: "Good. The step-up authentication layer is key -- it lets you cast a wider net without hard-blocking."
+    next: data_collection
+
+  # ============ DATA ============
+  - id: data_collection
+    stage: data
+    type: info
+    label: "Data Sources & Collection"
+    speaker: interviewer
+    content: |
+      Before we design the pipeline, let's map out the data sources available for fraud detection.
+
+      **Primary data sources:**
+
+      | Source | Description | Volume | Availability |
+      |--------|-------------|--------|-------------|
+      | **Transaction logs** | Every payment attempt with amount, merchant, card, device, IP | ~10K TPS peak | Real-time streaming via Kafka |
+      | **Chargeback data** | Confirmed fraud cases from card networks (Visa TC40, Mastercard SAFE) | ~0.1% of transactions | 30-90 day delay |
+      | **Customer reports** | Fraud reported by cardholders via support channels | ~0.05% of transactions | Hours to days |
+      | **Issuer alerts** | Bank-initiated fraud flags before formal chargeback | ~0.03% of transactions | 1-7 day delay |
+      | **Device intelligence** | Browser fingerprints, device attributes, behavioral biometrics | Per session | Real-time |
+      | **External enrichment** | MaxMind IP data, BIN tables, threat intelligence feeds | Per lookup | Real-time APIs |
+
+      **Data quality challenges:**
+      - **Label noise**: Not all chargebacks are true fraud -- friendly fraud (buyer's remorse) accounts for 20-40% of disputes
+      - **Survivorship bias**: We only see outcomes for approved transactions. Declined transactions never generate chargebacks, creating a biased view
+      - **Data freshness**: Device fingerprints change frequently; IP-to-geolocation mappings are updated daily
+      - **PII handling**: Card numbers, names, and addresses must be hashed/tokenized per PCI-DSS requirements
+
+      **Data consent and compliance:**
+      - All data collection must comply with **GDPR** (EU), **CCPA** (California), and **PCI-DSS**
+      - Transaction data retention: 7 years for regulatory compliance, but features derived from older data are aggregated and anonymized
+      - Right to erasure: Must support removing individual cardholder data while preserving aggregate model training data
+
+      Let's now design how this data flows through the pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "What data sources would you leverage for fraud detection?"
+      - speaker: candidate
+        text: "The core is transaction logs enriched with device fingerprints and IP intelligence. But the most valuable signal comes from confirmed labels -- chargebacks, issuer alerts, and customer reports."
+      - speaker: interviewer
+        text: "How do you handle the label quality issue?"
+      - speaker: candidate
+        text: "Friendly fraud is a big problem. I'd create confidence-weighted labels: chargebacks confirmed by issuer investigation get weight 1.0, simple disputes get 0.5, and we'd build a separate model to classify friendly fraud vs true fraud."
+      - speaker: interviewer
+        text: "That's sophisticated. What about the survivorship bias from declined transactions?"
+      - speaker: candidate
+        text: "This is critical. We can partially address it with periodic random approval experiments on low-confidence declines, and by using issuer-reported fraud data which arrives regardless of our approval decision."
+    next: data_pipeline
+
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      Now let's design the data pipeline. Fraud detection has some unique data challenges.
+
+      **Data sources and volume:**
+
+      | Source | Data | Volume | Latency |
+      |--------|------|--------|---------|
+      | Transaction events | Amount, merchant, card hash, device, IP, timestamp | ~10K TPS peak | Real-time |
+      | Cardholder history | Past transactions, spending patterns, locations | Billions of records | Pre-computed |
+      | Device fingerprints | Browser/device attributes, behavioral biometrics | Per session | Real-time |
+      | Fraud labels | Chargebacks, issuer reports, customer disputes | ~0.1% of transactions | 30-90 day delay |
+      | External data | IP geolocation, BIN tables, threat intel feeds | Enrichment | Near real-time |
+      | Merchant data | MCC codes, business type, risk tier, history | Millions of merchants | Batch |
+
+      **The label delay problem:**
+      - Chargebacks arrive **30-90 days** after the transaction
+      - Early fraud signals: customer reports (hours), issuer alerts (days), velocity triggers (minutes)
+      - Training strategy: Use a **60-day label maturation window** -- only train on transactions older than 60 days where labels are considered stable
+      - For recent data, use **semi-supervised** techniques or **early fraud signals** as soft labels
+
+      **Class imbalance:**
+      - Fraud rate: ~0.1% (1 in 1,000 transactions)
+      - A naive model predicting "legitimate" for everything achieves 99.9% accuracy
+      - Solutions: SMOTE oversampling, class weights, focal loss, or ensemble with anomaly detection
+
+      Now let's decide on the feature engineering approach.
+    dialogue:
+      - speaker: interviewer
+        text: "What's the biggest data challenge in fraud detection?"
+      - speaker: candidate
+        text: "Label delay. Chargebacks take 30-90 days, so we're always training on stale labels. We need to incorporate early fraud signals and handle the maturation window carefully."
+      - speaker: interviewer
+        text: "How would you handle the class imbalance?"
+      - speaker: candidate
+        text: "I'd use class weights in the loss function rather than oversampling. With billions of transactions, even 0.1% fraud gives us millions of positive examples -- enough for the model to learn from. The issue is more about the ratio affecting threshold selection than training signal."
+    next: feat_overview
+
+  # ============ FEATURES ============
+  - id: feat_overview
+    stage: features
+    type: info
+    label: "Feature Engineering Overview"
+    speaker: interviewer
+    content: |
+      Feature engineering is where fraud detection models are won or lost. Raw transaction attributes alone are weak predictors -- the real signal comes from **contextual features** that capture deviations from normal behavior.
+
+      **Feature categories for fraud detection:**
+
+      1. **Transaction-level features**: Direct attributes of the current transaction (amount, MCC, card type, time)
+      2. **Velocity/aggregation features**: Rolling window statistics per entity (card, device, IP, merchant)
+      3. **Profile deviation features**: How different is this transaction from the cardholder's established pattern?
+      4. **Network/graph features**: Relationships between entities (shared devices, linked accounts)
+      5. **External enrichment features**: Third-party signals (IP risk, BIN country, device intelligence)
+
+      **Feature engineering best practices for fraud:**
+      - **Compute at prediction time, not training time**: Features must be available in real-time (<5ms) during scoring
+      - **Use a feature store** (Redis + offline store): Real-time features in Redis, historical features in S3/Hive
+      - **Log features at scoring time**: This creates the ground truth for training and eliminates train-serve skew
+      - **Version features**: Each model version is tied to a specific feature schema; changing features requires retraining
+
+      **Feature dimensionality:**
+      - Typical production fraud models use **150-500 features**
+      - Stripe Radar reportedly uses ~200 features
+      - Top features by importance typically include velocity measures, amount deviation, and device/IP risk signals
+
+      Let's now decide on the primary feature engineering strategy.
+    dialogue:
+      - speaker: interviewer
+        text: "What's the most important category of features for fraud detection?"
+      - speaker: candidate
+        text: "Velocity features -- rolling aggregates per card over different time windows. A card doing 5 transactions in an hour when it normally does 2 per day is the strongest signal. The absolute transaction attributes matter less than the deviation from normal behavior."
+      - speaker: interviewer
+        text: "How would you serve these velocity features in real-time?"
+      - speaker: candidate
+        text: "Redis with atomic increment operations. Each transaction updates the rolling counters, and at scoring time we read the current values. The key pattern would be card:{hash}:txn_count:{window}, with TTLs matching the window sizes."
+      - speaker: interviewer
+        text: "Good. Let's dive into the specific feature engineering strategy."
+    next: feat_question
+
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Engineering Strategy"
+    speaker: interviewer
+    content: |
+      Feature engineering is arguably the most impactful part of fraud detection. The raw transaction payload alone is not enough -- the model needs contextual signals.
+
+      What feature engineering strategy would you prioritize?
+    choices:
+      - label: "Transaction + velocity features (tabular approach)"
+        answer: |
+          I'd focus on **transaction-level features and velocity aggregates** -- the proven backbone of production fraud systems.
+
+          **Transaction features (computed at scoring time):**
+          - Amount (raw, log-transformed, percentile relative to cardholder history)
+          - Is amount a round number? (Fraudsters often test with $1.00, $100.00)
+          - Merchant category code (MCC) and risk tier
+          - Card-present vs card-not-present flag
+          - Cross-border flag (card country != merchant country)
+          - Time since last transaction, time of day, day of week
+
+          **Velocity features (pre-aggregated in feature store):**
+          - Transaction count in last 1h / 6h / 24h / 7d per card
+          - Unique merchant count in last 24h per card
+          - Unique country count in last 7d per card
+          - Amount percentile: Is this transaction unusually large for this cardholder?
+          - Velocity change ratio: `txn_count_last_1h / avg_txn_count_per_hour_last_30d`
+
+          **Device/network features:**
+          - IP risk score (from threat intel feeds like MaxMind)
+          - Device fingerprint match (same device as previous legitimate transactions?)
+          - Browser/OS match with cardholder history
+          - Proxy/VPN/Tor detection flag
+
+          **Why this approach:**
+          - **Interpretable**: Each feature has clear fraud-signal meaning
+          - **Fast**: Pre-aggregated features from Redis/feature store, lookup in <5ms
+          - **Proven**: Stripe's Radar and PayPal's risk engine rely heavily on velocity features
+          - **Debuggable**: When a transaction is blocked, you can explain exactly which features triggered it
+
+          The feature store uses **Redis** for real-time aggregates updated per transaction, with **Apache Flink** streaming jobs maintaining the rolling windows.
+        next: feat_transaction
+      - label: "Graph/network features (behavioral approach)"
+        answer: |
+          I'd invest in **graph-based and behavioral features** that capture relationships between entities -- this is where the next generation of fraud detection is heading.
+
+          **Entity graph construction:**
+          - Build a **transaction graph** connecting: cards, devices, IPs, merchants, emails, phone numbers, shipping addresses
+          - Edges = shared attributes (same device used by two cards, same address for two accounts)
+          - **Fraudsters reuse infrastructure** -- devices, drop addresses, money mules -- creating dense clusters in the graph
+
+          **Graph features (per transaction):**
+          - **Degree centrality**: How many other entities is this card/device/IP connected to?
+          - **Community membership**: Does this entity belong to a suspicious cluster? (Louvain community detection)
+          - **Fraud neighbor ratio**: What fraction of connected entities have been involved in fraud?
+          - **Graph distance to known fraud**: Shortest path length to a confirmed fraudulent entity
+          - **Temporal graph features**: New edges in last 24h (new device, new IP) are high-risk signals
+
+          **Behavioral sequence features:**
+          - Sequence of merchant categories visited: [gas_station, electronics, jewelry] is a classic fraud pattern (small test purchase then big buys)
+          - Time intervals between transactions (fraud tends to be rapid-fire)
+          - Geographic velocity: Distance between consecutive transactions / time elapsed (impossible travel)
+
+          **Why graph features:**
+          - Captures **organized fraud rings** that individual transaction features miss
+          - A new card with no history can be assessed by its connections (shared device with flagged cards)
+          - PayPal's fraud team reported **20% lift in fraud detection** after adding graph features
+          - Handles **synthetic identity fraud** where individual signals look legitimate but the network is suspicious
+
+          **Implementation:** Neo4j or Amazon Neptune for graph storage. Feature computation runs as a **batch process every hour** with the most critical features (1-hop fraud neighbor ratio) computed in real-time via pre-indexed adjacency lists in Redis.
+        next: feat_graph
+
+  - id: feat_transaction
+    stage: features
+    type: info
+    label: "Transaction Feature Details"
+    speaker: interviewer
+    content: |
+      Great choice. Let's detail the feature store architecture.
+
+      **Feature store design (Redis + Flink):**
+
+      ```
+      Transaction Event (Kafka)
+            │
+            ├──► Flink Streaming Job ──► Redis (real-time aggregates)
+            │     - Update velocity counters
+            │     - Update cardholder profiles
+            │     - Update device/IP lookups
+            │
+            └──► Batch Pipeline (Spark, hourly) ──► Feature Table (S3/Hive)
+                  - Historical aggregates
+                  - Statistical profiles
+                  - Training feature generation
+      ```
+
+      **Real-time feature computation (<5ms):**
+
+      | Feature Group | Redis Key Pattern | Update Trigger |
+      |---------------|-------------------|----------------|
+      | Card velocity | `card:{hash}:txn_count:1h` | Every transaction |
+      | Card spend | `card:{hash}:total_amt:24h` | Every transaction |
+      | Device history | `device:{fp}:card_count` | Every transaction |
+      | IP risk | `ip:{addr}:risk_score` | Hourly batch |
+      | Merchant stats | `merchant:{id}:fraud_rate` | Daily batch |
+
+      **Feature freshness is critical:**
+      - Velocity features must reflect the **current** transaction -- if a card does 5 rapid transactions, the 5th should see count=4
+      - Use Redis **atomic increment** operations to ensure consistency under high concurrency
+      - Feature staleness monitoring: Alert if any feature group is >5 minutes stale
+
+      **Feature versioning:** Every model version is tied to a specific feature schema version. When we add new features, we backfill historical data before retraining to avoid train/serve skew.
+
+      Now let's choose the model architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you ensure feature consistency between training and serving?"
+      - speaker: candidate
+        text: "Feature versioning is key. Each model version pins a feature schema version. We log the exact feature values used at scoring time to a data lake, and training pulls from these logged features -- ensuring train/serve parity."
+      - speaker: interviewer
+        text: "That's the right approach. Feature logging at inference time eliminates the most common source of training-serving skew."
+    next: mod_question
+
+  - id: feat_graph
+    stage: features
+    type: info
+    label: "Graph Feature Details"
+    speaker: interviewer
+    content: |
+      Excellent choice. Graph features are a significant competitive advantage in fraud detection.
+
+      **Graph architecture:**
+
+      ```
+      Transaction Stream (Kafka)
+            │
+            ├──► Graph Update Service ──► Neo4j (entity graph)
+            │     - Add transaction edges
+            │     - Update entity properties
+            │     - Maintain TTL on old edges (90-day window)
+            │
+            ├──► Real-time Feature Service ──► Redis (pre-computed graph features)
+            │     - 1-hop fraud neighbor count (updated per transaction)
+            │     - Device-card association count
+            │     - IP reputation score
+            │
+            └──► Batch Graph Analytics (Spark GraphX, hourly)
+                  - Community detection (Louvain)
+                  - PageRank for entity importance
+                  - Connected component analysis
+                  - Feature materialization to feature store
+      ```
+
+      **Real-time vs batch graph features:**
+
+      | Feature | Computation | Latency | Update Frequency |
+      |---------|------------|---------|-----------------|
+      | 1-hop fraud neighbor ratio | Redis lookup | <2ms | Per transaction |
+      | Device-card sharing count | Redis counter | <1ms | Per transaction |
+      | Community fraud density | Batch Spark job | N/A (pre-computed) | Hourly |
+      | PageRank score | Batch Spark job | N/A (pre-computed) | Daily |
+      | Shortest path to fraud | Batch Neo4j query | N/A (pre-computed) | Hourly |
+
+      **Handling the latency constraint:**
+      - Only **1-hop features** are computed in real-time (they're the most predictive anyway)
+      - Multi-hop and global graph features are pre-computed in batch and cached
+      - The graph has ~1B nodes and ~10B edges -- full traversal is too slow for real-time
+
+      **Graph feature importance (from Featurespace research):**
+      The single most predictive graph feature is typically **"fraction of connected devices that have been involved in confirmed fraud in the past 30 days"** -- it catches fraud rings where the same device is used across multiple stolen cards.
+
+      Let's choose the model architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "How would you handle the latency constraint with graph features?"
+      - speaker: candidate
+        text: "I'd split features into two tiers: real-time 1-hop features computed via Redis lookups at scoring time, and batch multi-hop features pre-computed hourly and cached. The 1-hop features capture most of the signal anyway."
+      - speaker: interviewer
+        text: "Smart. What graph database would you use?"
+      - speaker: candidate
+        text: "Neo4j for the graph store with Spark GraphX for batch analytics. For the real-time features, I'd maintain adjacency lists directly in Redis for sub-millisecond lookups."
+    next: mod_question
+
+  # ============ MODEL ============
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Model Architecture"
+    speaker: interviewer
+    content: |
+      Now let's design the model. Fraud detection has a rich history of model architectures, from rule engines to deep learning.
+
+      The key consideration: the model must score transactions in **<50ms** (leaving 50ms budget for feature fetching within the 100ms total SLA). It must also be **interpretable enough** to explain decisions to merchants and regulators.
+
+      What architecture would you choose?
+    choices:
+      - label: "Rules + Gradient Boosting hybrid"
+        answer: |
+          I'd design a **two-layer hybrid** combining hand-crafted rules with a gradient boosting model:
+
+          **Layer 1: Rule Engine (deterministic, <1ms)**
+          - **Hard rules** that auto-decline with no ML needed:
+            - Card on explicit block list (confirmed fraud)
+            - Transaction from sanctioned country
+            - Card-testing pattern: >10 small transactions in 5 minutes
+            - Impossible travel: Transaction in London 30 min after NYC
+          - Rules catch ~20% of fraud with near-zero false positives
+          - Implemented in a **Drools/RETE engine** for fast pattern matching
+
+          **Layer 2: XGBoost/LightGBM ensemble (probabilistic, <10ms)**
+          - Scores all transactions not caught by rules
+          - **LightGBM** as primary: handles tabular features, missing values, and class imbalance natively
+          - Input: ~200 features (transaction, velocity, device, merchant, time)
+          - Output: Fraud probability (0-1)
+          - Trained with **focal loss** to emphasize hard-to-classify examples
+
+          **Why this hybrid:**
+          - **Rules handle known fraud patterns** with certainty -- no model uncertainty for obvious cases
+          - **ML catches novel patterns** that rules miss -- new fraud tactics, subtle anomalies
+          - **Interpretability**: Rules are self-explanatory, and LightGBM supports SHAP values for every prediction
+          - **Stripe's Radar** uses exactly this architecture -- rules for known patterns, ML for everything else
+          - **Operational safety**: Rules can be updated in minutes without model retraining
+
+          **Model size:** ~500 trees, max depth 8, ~50MB serialized. Inference: <5ms with TreeLite compilation.
+        next: mod_hybrid
+      - label: "Deep learning with embeddings"
+        answer: |
+          I'd use a **deep learning model** that learns entity embeddings end-to-end:
+
+          **Architecture: Wide & Deep with Transaction Sequences**
+
+          ```
+          Transaction Features (tabular)  ──► Wide (linear) ──┐
+                                                                ├──► FC(256) ──► FC(128) ──► P(fraud)
+          Card Embedding (dim=64)         ──┐                  │
+          Merchant Embedding (dim=32)     ──┤ Deep Network     │
+          Device Embedding (dim=32)       ──┤ FC(512)──►FC(256)┘
+          Transaction Sequence (LSTM)     ──┘
+          ```
+
+          **Entity embeddings:**
+          - **Card embedding (64-dim):** Learned representation of each card's behavior pattern -- captures spending habits, geographic patterns, typical merchants
+          - **Merchant embedding (32-dim):** Captures merchant risk profile, typical transaction patterns, customer base characteristics
+          - **Device embedding (32-dim):** Represents device trustworthiness based on historical usage
+
+          **Sequence model (LSTM/Transformer):**
+          - Input: Last 20 transactions for this card (amount, MCC, time_delta, country)
+          - The LSTM learns **behavioral sequences** -- e.g., gas station then electronics store is higher risk
+          - Attention mechanism highlights which past transactions are most relevant to the current scoring decision
+
+          **Why deep learning:**
+          - **Entity embeddings** capture latent representations that manual features cannot express
+          - **Sequence modeling** captures temporal patterns in spending behavior
+          - **End-to-end learning** means the model discovers features we wouldn't think to engineer
+          - Amazon and PayPal have published papers showing **5-15% lift** over gradient boosting for fraud detection
+
+          **Trade-offs:**
+          - Slower inference (~20ms with ONNX) vs <5ms for LightGBM
+          - Harder to interpret -- SHAP on deep models is approximate
+          - Requires GPU for training (but CPU for serving with ONNX Runtime)
+          - Cold-start problem for new cards/merchants with no embedding history
+        next: mod_deep
+
+  - id: mod_hybrid
+    stage: model
+    type: info
+    label: "Hybrid Model Details"
+    speaker: interviewer
+    content: |
+      Let's detail the hybrid rules + ML architecture.
+
+      **Rule engine design:**
+      ```
+      Transaction
+           │
+           ▼
+      ┌─────────────┐   Block    ┌──────────┐
+      │ Rule Engine  │──────────►│ DECLINE   │  (~0.05% of transactions)
+      │ (Drools)     │           └──────────┘
+      │  - Blocklist │
+      │  - Velocity  │   Pass
+      │  - Geo rules │──────────►┌──────────────┐
+      └─────────────┘           │ ML Scoring    │
+                                │ (LightGBM)    │
+                                │               │
+                                │ Score < 0.3  ──►  APPROVE
+                                │ Score 0.3-0.7 ──► STEP-UP AUTH
+                                │ Score > 0.7  ──►  DECLINE
+                                └──────────────┘
+      ```
+
+      **LightGBM configuration for fraud:**
+      - **Objective:** `binary` with `scale_pos_weight = 1000` (inverse of fraud rate)
+      - **Metric:** `auc` and custom `precision_at_recall_90`
+      - **Trees:** 500 boosting rounds, max depth 8, learning rate 0.05
+      - **Regularization:** `min_child_samples=100` to prevent overfitting on rare patterns
+      - **Feature fraction:** 0.8 per tree for diversity
+
+      **Ensemble strategy:**
+      - Train 3 LightGBM models on different time windows (30d, 60d, 90d)
+      - Average their scores -- this smooths out temporal volatility
+      - If models disagree significantly (std > 0.2), flag for manual review
+
+      **SHAP explanation pipeline:**
+      - For every declined transaction, compute top-5 SHAP features
+      - Store explanations in a database for merchant queries and regulatory audits
+      - Example: "Transaction declined because: unusual amount (+0.15), new device (+0.12), high-risk merchant category (+0.08)"
+
+      This architecture is battle-tested at companies like Stripe, Adyen, and Featurespace.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you keep the rule engine maintainable as it grows?"
+      - speaker: candidate
+        text: "Version-controlled rule definitions with a review process. Each rule must have: a clear fraud pattern it targets, expected precision/recall impact, and an expiration date for re-evaluation. We'd also track rule hit rates to prune stale rules."
+      - speaker: interviewer
+        text: "Good governance. What about rule-model interaction?"
+      - speaker: candidate
+        text: "Rules and ML should be complementary. Rules handle deterministic patterns with near-100% precision. The ML model should be trained WITHOUT rule-blocked transactions in the training set, since those are easy cases that would inflate apparent model performance."
+    next: train_strategy
+
+  - id: mod_deep
+    stage: model
+    type: info
+    label: "Deep Learning Model Details"
+    speaker: interviewer
+    content: |
+      Let's detail the deep learning architecture.
+
+      **Training pipeline:**
+
+      ```
+      Historical Transactions (S3)
+           │
+           ▼
+      ┌──────────────────────┐
+      │ Feature Engineering   │
+      │ - Entity ID mapping   │
+      │ - Sequence padding    │
+      │ - Feature normalization│
+      └──────────┬───────────┘
+                 ▼
+      ┌──────────────────────┐
+      │ PyTorch Training      │
+      │ - 4x A100 GPUs       │
+      │ - Mixed precision     │
+      │ - Focal loss (gamma=2)│
+      │ - ~6 hours per run    │
+      └──────────┬───────────┘
+                 ▼
+      ┌──────────────────────┐
+      │ Export & Optimize     │
+      │ - ONNX export        │
+      │ - INT8 quantization  │
+      │ - Inference: ~15ms   │
+      └──────────────────────┘
+      ```
+
+      **Handling cold-start entities:**
+      - New cards/merchants with no embedding history: Use **average embedding** of similar entities
+      - Cards with <5 transactions: Fall back to **tabular-only features** (skip sequence model)
+      - Gradually transition from cold-start to personalized as transaction history accumulates
+
+      **Focal loss for class imbalance:**
+      ```
+      FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
+      ```
+      - `gamma=2` down-weights easy negatives (clearly legitimate transactions)
+      - `alpha=0.25` for positives (fraud), `alpha=0.75` for negatives
+      - This focuses training on the **hard boundary cases** where fraud looks legitimate
+
+      **Multi-task learning benefits:**
+      - Auxiliary task 1: Predict merchant category (helps learn card behavior patterns)
+      - Auxiliary task 2: Predict transaction amount bucket (helps learn spending patterns)
+      - These tasks improve the entity embeddings, which benefits fraud detection even though they aren't fraud-specific
+
+      **Model size:** ~5M parameters. ONNX Runtime inference: ~15ms on CPU, ~3ms on GPU.
+    dialogue:
+      - speaker: interviewer
+        text: "How would you handle the cold-start problem for new cards?"
+      - speaker: candidate
+        text: "For brand new cards, I'd use the average embedding from cards with similar attributes -- same issuing bank, same card type, same country. After 5 transactions, I'd start personalizing the embedding."
+      - speaker: interviewer
+        text: "What about adversarial robustness? Fraudsters will try to game the model."
+      - speaker: candidate
+        text: "I'd add adversarial training -- generate perturbations on transaction features and train the model to be robust. Also, regularly retrain and monitor for distribution shifts that signal adversarial adaptation."
+    next: train_strategy
+
+  # ============ TRAINING ============
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: interviewer
+    content: |
+      Let's design the training pipeline. Fraud models have unique training challenges.
+
+      **Training data construction:**
+      - **Label maturation window:** Only use transactions older than 60 days for definitive labels
+      - **Label sources (in order of reliability):**
+        1. Confirmed chargebacks (highest confidence)
+        2. Issuer fraud reports (TC40/SAFE data)
+        3. Customer-reported fraud (via support tickets)
+        4. Velocity-triggered blocks confirmed by investigation
+      - **Negative sampling:** Use all legitimate transactions (no downsampling) -- with class weights, the model can handle the 1000:1 ratio
+
+      **Training schedule:**
+      - **Full retrain:** Weekly on rolling 90-day window
+      - **Incremental update:** Daily fine-tuning on last 7 days of newly labeled data
+      - **Emergency retrain:** Triggered when fraud pattern drift detected (>10% recall drop on daily evaluation set)
+
+      **Validation strategy:**
+      - **Temporal split:** Train on weeks 1-10, validate on week 11, test on week 12
+      - **Never random split** -- fraud evolves over time; random splits leak future patterns into training
+      - **Out-of-time evaluation:** Test on data 30 days after training cutoff to simulate real deployment delay
+
+      **Handling adversarial concept drift:**
+      - Fraudsters adapt to the model -- this is **adversarial drift**, not just natural distribution shift
+      - Monitor feature importance changes: if a top feature suddenly loses importance, fraudsters may have found a workaround
+      - Maintain a **fraud taxonomy** and track detection rates per fraud type -- catch drops in specific categories
+
+      **Training infrastructure:** Spark for feature engineering (distributed across 100+ nodes), GPU cluster for deep models, MLflow for experiment tracking.
+    dialogue:
+      - speaker: interviewer
+        text: "How would you handle the adversarial nature of fraud -- the fact that fraudsters actively adapt?"
+      - speaker: candidate
+        text: "Continuous retraining is essential, but not sufficient. I'd also maintain a fraud taxonomy -- card testing, account takeover, synthetic identity, etc. -- and track recall per category. If recall drops for a specific type, it signals adversarial adaptation."
+      - speaker: interviewer
+        text: "Good. What about the cold-start problem for the labels?"
+      - speaker: candidate
+        text: "For the first 60 days of a new model, we'd use the previous model's labels plus early fraud signals. We can also use customer reports and issuer alerts as soft labels with lower confidence weights."
+      - speaker: interviewer
+        text: "Let's move to deployment."
+    next: train_evaluation
+
+  - id: train_evaluation
+    stage: training
+    type: info
+    label: "Offline Evaluation & Validation"
+    speaker: interviewer
+    content: |
+      Before deploying any model, we need rigorous offline evaluation. Fraud detection evaluation has several unique pitfalls.
+
+      **Evaluation methodology:**
+
+      | Aspect | Approach | Rationale |
+      |--------|----------|-----------|
+      | **Data split** | Temporal (never random) | Fraud evolves; random splits leak future patterns |
+      | **Train window** | Rolling 90 days | Balance recency with volume |
+      | **Validation** | Next 14 days after train | Tune hyperparameters and thresholds |
+      | **Test** | Next 14 days after validation | Final unbiased evaluation |
+      | **Out-of-time** | 30-60 days post-training | Simulates real deployment gap |
+
+      **Evaluation metrics (in priority order):**
+      1. **PR-AUC** (Precision-Recall Area Under Curve) -- primary model comparison metric. Never use ROC-AUC for imbalanced fraud data; it is misleadingly optimistic
+      2. **Precision @ fixed recall** (e.g., precision at 90% recall) -- operational target
+      3. **Dollar-weighted recall** -- catching $5K fraud matters more than $5 fraud
+      4. **Detection speed** -- for fraud rings, how many transactions before first flag?
+      5. **Segment-level performance** -- break down by MCC, region, card type
+
+      **Common evaluation pitfalls in fraud:**
+      - **Information leakage**: Using features derived from future transactions during training (e.g., "this merchant will have 50 chargebacks next month")
+      - **Label maturation**: Evaluating on immature labels underestimates true recall
+      - **Survivorship bias**: Only approved transactions have outcomes; declined transactions are unlabeled
+      - **Concept drift**: A model that scores well on last month's data may fail on this month's new fraud patterns
+
+      **A/B test simulation:**
+      Before live deployment, run **replay evaluation**: Apply the new model to the last 30 days of production-scored transactions and compare decisions. This catches regressions without risking live traffic.
+
+      Let's now discuss deployment architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "What's the biggest evaluation pitfall in fraud detection?"
+      - speaker: candidate
+        text: "Using random train/test splits. Fraud patterns evolve weekly, so a random split allows the model to 'see' future fraud patterns during training. You must use temporal splits to get realistic performance estimates."
+      - speaker: interviewer
+        text: "How would you handle the survivorship bias issue?"
+      - speaker: candidate
+        text: "Two approaches: periodic random approval experiments on a tiny fraction of declines, and using issuer-reported TC40/SAFE data which reports fraud regardless of whether we approved or declined the transaction."
+      - speaker: interviewer
+        text: "Good. What about comparing a new model against the current production model?"
+      - speaker: candidate
+        text: "Replay evaluation -- apply both models to the last 30 days of production traffic with known outcomes. This gives a head-to-head comparison on real data without risking live transactions. Only deploy if the new model wins on both PR-AUC and dollar-weighted recall."
+    next: deploy_question
+
+  # ============ DEPLOYMENT ============
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Deployment Architecture"
+    speaker: interviewer
+    content: |
+      How would you deploy this fraud detection system? Remember the constraints: <100ms end-to-end latency, ~10K TPS peak, and the system must be available 99.99% of the time (payment-critical).
+
+      The deployment choice also affects how quickly you can respond to emerging fraud patterns.
+    choices:
+      - label: "Real-time synchronous scoring"
+        answer: |
+          I'd deploy as a **synchronous real-time scoring service** in the critical payment path:
+
+          **Architecture:**
+          ```
+          Payment Request
+               │
+               ▼
+          API Gateway (rate limiting, auth)
+               │
+               ▼
+          Feature Assembly Service  ◄──── Redis Feature Store
+               │                          (velocity, profiles)
+               │ (~15ms)
+               ▼
+          Model Scoring Service     ◄──── Model Registry (MLflow)
+               │                          (versioned models)
+               │ (~10ms)
+               ▼
+          Decision Engine
+               │ (~2ms)
+               ├── APPROVE (score < threshold_low)
+               ├── STEP-UP (threshold_low < score < threshold_high)
+               └── DECLINE (score > threshold_high)
+          ```
+
+          **Why synchronous:**
+          - **Instant protection** -- every transaction is scored before approval
+          - **Zero fraud window** -- no gap between transaction and scoring
+          - **Required for compliance** -- PSD2 mandates risk-based authentication at transaction time
+
+          **High availability design:**
+          - **Multi-region deployment** (us-east, us-west, eu-west) with geo-routing
+          - **Circuit breaker pattern**: If model service is degraded, fall back to rule engine only
+          - **Canary deployments**: New model versions serve 1% traffic, auto-rollback if decline rate spikes
+          - **Feature store replication**: Redis cluster with 3 replicas, automatic failover
+
+          **Scaling:** Kubernetes pods with HPA targeting P99 <50ms. Auto-scale from 20 to 200 pods based on TPS. Model compiled with TreeLite (gradient boosting) or ONNX Runtime (deep learning) for optimized inference.
+
+          **Latency budget breakdown:**
+          - Feature fetch from Redis: 5-15ms
+          - Model inference: 5-20ms (depending on model type)
+          - Decision logic: 1-2ms
+          - Network overhead: 5-10ms
+          - **Total: 20-50ms P99** (well within 100ms budget)
+        next: deploy_realtime
+      - label: "Async scoring with pre-authorization hold"
+        answer: |
+          I'd use an **asynchronous scoring architecture** with a pre-authorization hold pattern:
+
+          **Architecture:**
+          ```
+          Payment Request
+               │
+               ▼
+          Quick Rule Check (~5ms)
+               │
+               ├── Obvious fraud → DECLINE immediately
+               │
+               ├── Obvious legitimate → APPROVE with auth hold
+               │
+               └── Needs scoring → HOLD (authorize but don't capture)
+                    │
+                    ▼
+              Kafka Queue ──► Fraud Scoring Workers
+                    │              │ (~200ms)
+                    │              ▼
+                    │         Score computed
+                    │              │
+                    ▼              ▼
+              After scoring: CAPTURE or VOID the held authorization
+          ```
+
+          **How pre-authorization hold works:**
+          - The payment gateway **authorizes** the transaction (reserves funds) but does not **capture** (settle)
+          - The fraud scoring happens asynchronously in the 200ms-2s window before capture
+          - If fraud score is high, the authorization is **voided** before funds move
+          - The customer sees a brief "processing" state, which is normal for most payment flows
+
+          **Why async:**
+          - **Higher scoring throughput**: Workers process in batches, better hardware utilization
+          - **Richer features**: Extra 200ms allows querying graph database, running ensemble models, even calling external verification services
+          - **More resilient**: Scoring failure doesn't block the payment -- transactions default to approve with post-capture monitoring
+          - **Cost-effective**: Don't need to scale scoring service to handle peak TPS synchronously
+
+          **Trade-offs:**
+          - Small fraud window (~200ms-2s) where funds are authorized but not yet scored
+          - More complex architecture with auth hold state management
+          - Not all payment methods support auth/capture separation (some require instant settlement)
+          - Need fallback for real-time-only payment rails (instant bank transfers)
+        next: deploy_async
+
+  - id: deploy_realtime
+    stage: deployment
+    type: info
+    label: "Real-time Deployment Details"
+    speaker: interviewer
+    content: |
+      Let's detail the real-time deployment.
+
+      **Model serving infrastructure:**
+
+      | Component | Technology | Scaling | SLA |
+      |-----------|-----------|---------|-----|
+      | API Gateway | Kong / AWS API Gateway | Auto-scale | 99.99% |
+      | Feature Store | Redis Cluster (6 nodes) | Horizontal sharding | 99.99% |
+      | Model Service | K8s + TreeLite/ONNX | HPA, 20-200 pods | 99.99% |
+      | Decision Engine | K8s microservice | HPA, 10-50 pods | 99.99% |
+      | Model Registry | MLflow | N/A (read-only at deploy) | 99.9% |
+
+      **Model update strategy:**
+      - **Blue-green deployment**: Two model versions always running
+      - New model deployed to "green" environment, verified with shadow traffic
+      - Traffic shifted via feature flag: 1% -> 10% -> 50% -> 100% over 4 hours
+      - **Automated rollback**: If decline rate increases >0.5% or P99 latency >80ms, revert automatically
+
+      **Feature store resilience:**
+      - Redis Sentinel for automatic failover (<30s recovery)
+      - Feature cache with TTL: If Redis is down, use last known feature values (stale by at most 60s)
+      - Degraded mode: If features unavailable, score with transaction-only features (reduced accuracy but still functional)
+
+      **Observability:**
+      - Distributed tracing (Jaeger) across all services for latency debugging
+      - Feature value logging: Every scored transaction's features saved to data lake for training
+      - Score distribution monitoring: Alert if score distribution shifts significantly from baseline
+
+      **Cost estimation:** For 10K TPS, ~100 inference pods (16 CPU each), Redis cluster with 128GB RAM. Estimated: ~$50K/month on AWS.
+    dialogue:
+      - speaker: interviewer
+        text: "What happens when the model service goes down?"
+      - speaker: candidate
+        text: "Circuit breaker pattern. If model service fails, we fall back to the rule engine, which runs in-process and handles the obvious fraud patterns. We accept slightly lower recall for the duration of the outage. The rule engine alone catches about 20% of fraud, which is better than approving everything."
+      - speaker: interviewer
+        text: "Good degradation strategy. How do you prevent model deployment from causing downtime?"
+      - speaker: candidate
+        text: "Blue-green deployment with gradual traffic shifting. Both old and new models run simultaneously. If the new model degrades any metric beyond tolerance, we shift 100% back to the old model within seconds."
+    next: deploy_infrastructure
+
+  - id: deploy_async
+    stage: deployment
+    type: info
+    label: "Async Deployment Details"
+    speaker: interviewer
+    content: |
+      Let's detail the async scoring architecture.
+
+      **Event-driven pipeline:**
+
+      ```
+      Payment Auth Event
+           │
+           ▼
+      ┌─────────────┐     ┌──────────────────┐
+      │ Kafka Topic  │────►│ Scoring Workers   │
+      │ (partitioned │     │ (K8s, 50 pods)   │
+      │  by card_id) │     │ - Fetch features  │
+      └─────────────┘     │ - Run ensemble    │
+                          │ - Graph features  │
+                          │ - Score: 0-1      │
+                          └────────┬─────────┘
+                                   │
+                                   ▼
+                          ┌──────────────────┐
+                          │ Decision Service  │
+                          │ - Apply threshold │
+                          │ - Void if fraud   │
+                          │ - Log decision    │
+                          └──────────────────┘
+      ```
+
+      **Kafka partitioning by card_id:**
+      - Ensures all transactions for the same card are processed in order
+      - Prevents race conditions in velocity feature updates
+      - Enables per-card sequence analysis within the worker
+
+      **Worker processing time budget (200ms target):**
+      - Feature assembly: 20ms (Redis + graph DB)
+      - Primary model inference: 30ms
+      - Secondary model (ensemble): 30ms
+      - Graph feature computation: 50ms
+      - Decision logic + logging: 20ms
+      - Buffer: 50ms
+
+      **Advantages of the extra time budget:**
+      - Can run **model ensemble** (gradient boosting + deep learning + anomaly detection) and average scores
+      - Can query **graph database** for real-time 2-hop features
+      - Can call **external verification** APIs (device intelligence, email risk scoring)
+
+      **Handling auth hold expiry:**
+      - Auth holds typically last 5-7 days (card network rules)
+      - Our 200ms scoring window is well within this
+      - If scoring takes >2s (degraded state), auto-approve with enhanced post-capture monitoring
+      - Track "time-to-score" as an SLA metric -- P99 should be <500ms
+
+      **Fallback:** If async pipeline is backed up (Kafka consumer lag >5s), switch to synchronous rule-only scoring for all transactions until pipeline recovers.
+    dialogue:
+      - speaker: interviewer
+        text: "What about payment methods that don't support auth/capture separation?"
+      - speaker: candidate
+        text: "For instant settlement methods like bank transfers or crypto, we'd run synchronous scoring with a simpler model. The rule engine plus a lightweight LightGBM model can score in <20ms. We accept lower accuracy for these rails."
+      - speaker: interviewer
+        text: "How do you handle Kafka consumer failures?"
+      - speaker: candidate
+        text: "Dead letter queue for failed scoring attempts. Transactions that fail scoring three times get flagged for manual review. We also monitor consumer lag as a primary SLA metric -- if lag exceeds 5 seconds, we activate the synchronous fallback path."
+    next: deploy_infrastructure
+
+  - id: deploy_infrastructure
+    stage: deployment
+    type: info
+    label: "CI/CD & Safety Infrastructure"
+    speaker: interviewer
+    content: |
+      Regardless of the scoring architecture, the deployment pipeline needs robust safety infrastructure. A bad model deployment in fraud detection can cause millions in losses within hours.
+
+      **CI/CD pipeline for model deployment:**
+
+      ```
+      Model Training Complete
+           │
+           ▼
+      Automated Validation Gates:
+      1. PR-AUC > minimum threshold (0.85)
+      2. No regression vs champion on replay evaluation
+      3. Latency benchmark passes (<50ms P99)
+      4. Feature coverage check (no null features >5%)
+      5. Fairness audit passes (FPR disparity <2x)
+           │
+           ▼
+      Shadow Deployment (1 week):
+      - Score all transactions alongside champion
+      - Log scores, don't influence decisions
+      - Compare distributions and metrics
+           │
+           ▼
+      Canary Deployment:
+      - 1% traffic for 24h → 10% for 24h → 50% for 24h → 100%
+      - Automated rollback triggers:
+        * Decline rate increase >0.5%
+        * Latency P99 >80ms
+        * Score distribution KL-divergence >0.2
+      ```
+
+      **Feature flag system:**
+      - Each model version controlled by feature flags per merchant segment
+      - Allows instant rollback without redeployment
+      - Enables targeted rollout (e.g., new model only for e-commerce merchants first)
+
+      **Model versioning & rollback:**
+      - All model artifacts versioned in MLflow with full reproducibility (code, data snapshot, hyperparameters, features)
+      - Keep last 5 model versions warm in memory for instant rollback (<30 seconds)
+      - Rollback triggers: automated (metric degradation) or manual (fraud analyst escalation)
+
+      **Disaster recovery:**
+      - If all ML infrastructure fails, the rule engine operates independently as a fallback
+      - Rule engine catches ~20% of fraud with near-zero false positives
+      - Maximum tolerable ML outage: 4 hours before fraud losses become unacceptable
+
+      Now let's design the monitoring system.
+    dialogue:
+      - speaker: interviewer
+        text: "What safety gates would you require before deploying a new fraud model?"
+      - speaker: candidate
+        text: "Five gates: minimum PR-AUC threshold, no regression on replay evaluation, latency benchmark pass, feature coverage check, and fairness audit. All automated -- if any gate fails, deployment is blocked."
+      - speaker: interviewer
+        text: "How quickly can you roll back a bad deployment?"
+      - speaker: candidate
+        text: "Under 30 seconds. We keep the previous 5 model versions warm in memory. Rollback is just a feature flag flip -- no redeployment needed. The automated monitoring triggers rollback if decline rate spikes or latency degrades."
+      - speaker: interviewer
+        text: "That's critical for a payment-path system. Let's discuss ongoing monitoring."
+    next: mon_strategy
+
+  # ============ MONITORING ============
+  - id: mon_strategy
+    stage: monitoring
+    type: question
+    label: "Monitoring Strategy"
+    speaker: interviewer
+    content: |
+      Fraud detection monitoring is uniquely challenging because:
+      1. **Adversarial environment**: Fraudsters actively probe and adapt to the system
+      2. **Label delay**: You won't know your true recall for 30-90 days
+      3. **Asymmetric costs**: A 1-hour outage can cause millions in fraud losses
+
+      How would you design the monitoring system?
+    choices:
+      - label: "Proactive drift detection + business metric alerting"
+        answer: |
+          I'd build a **proactive monitoring system** that detects problems before fraud losses materialize:
+
+          **Real-time alerts (within minutes):**
+
+          | Signal | Alert Condition | Action |
+          |--------|----------------|--------|
+          | Score distribution shift | KL-divergence > 0.1 from 7-day baseline | Investigate model degradation |
+          | Decline rate spike | >2x normal for any merchant segment | Check for false positive surge |
+          | Approval rate drop | >1% drop sustained 30min | Potential over-blocking |
+          | Feature staleness | Any feature >5 min stale | Alert data pipeline team |
+          | Scoring latency P99 | >80ms | Scale infrastructure |
+          | Rule engine fallback rate | >5% | Fix model service |
+
+          **Daily monitoring (label-free):**
+          - **Score entropy**: If the model becomes overconfident (all scores near 0 or 1), it may be overfitting to stale patterns
+          - **Feature distribution drift**: PSI (Population Stability Index) on each input feature
+          - **Segment-level score shifts**: Score distributions per merchant category, region, card type
+          - **Anomaly detection on model outputs**: Detect if the model is behaving differently than expected
+
+          **Weekly monitoring (with partial labels):**
+          - **Early recall estimate**: Using customer reports and issuer alerts (available in 1-7 days), estimate recall
+          - **False positive rate**: From merchant feedback and customer complaints
+          - **Fraud type breakdown**: Are we missing a specific fraud category?
+
+          **Monthly monitoring (with mature labels):**
+          - Full precision/recall evaluation on 60-day matured labels
+          - Model vs rule engine comparison
+          - Fairness audit across demographics
+          - ROI calculation: (fraud prevented) - (false decline revenue loss) - (system cost)
+        next: mon_proactive
+      - label: "A/B testing framework with challenger models"
+        answer: |
+          I'd center monitoring around a **continuous A/B testing framework** with challenger models:
+
+          **Always-on champion/challenger setup:**
+          ```
+          Transaction ──► Router (based on merchant hash)
+                              │
+                    ┌─────────┼─────────┐
+                    │         │         │
+                    ▼         ▼         ▼
+                Champion   Challenger Challenger
+                (90%)      A (5%)     B (5%)
+                    │         │         │
+                    └─────────┼─────────┘
+                              │
+                              ▼
+                    Decision Engine (uses champion score,
+                    logs all scores for comparison)
+          ```
+
+          **Key design:** All models score every transaction, but only the champion's score drives the decision. Challenger scores are logged for offline comparison. This avoids exposing customers to potentially worse models while still gathering performance data.
+
+          **Challenger model types:**
+          - **Model A**: Same architecture, retrained on more recent data
+          - **Model B**: Different architecture (e.g., deep learning vs gradient boosting)
+          - **Model C**: Same model with different feature set
+          - Rotate challengers weekly to test different improvements
+
+          **Evaluation methodology:**
+          - **Counterfactual evaluation**: "What would have happened if we used the challenger's scores?"
+          - Compare precision-recall curves across all models on the same traffic
+          - Statistical significance testing with Bayesian methods (not just p-values)
+          - Minimum 2 weeks of data before declaring a winner
+
+          **Promotion criteria:**
+          - Challenger must show >2% improvement in PR-AUC
+          - No degradation in any guardrail metric (false decline rate, latency)
+          - Approved by fraud operations team (domain experts review the model)
+          - Gradual promotion: 5% -> 25% -> 50% -> 100% over 1 week
+
+          **Dashboards:** Real-time comparison of champion vs challengers on all metrics, with automated alerts if challenger significantly outperforms champion (opportunity cost of not switching).
+        next: mon_ab
+
+  - id: mon_proactive
+    stage: monitoring
+    type: info
+    label: "Proactive Monitoring Details"
+    speaker: interviewer
+    content: |
+      Excellent proactive monitoring approach. Let's add the operational details.
+
+      **Alerting tiers:**
+
+      | Tier | Response Time | Examples |
+      |------|---------------|---------|
+      | **P0 (Critical)** | <5 min | Model service down, scoring latency >200ms, decline rate >5x normal |
+      | **P1 (Urgent)** | <30 min | Feature staleness, score distribution shift, recall estimate drop |
+      | **P2 (Monitor)** | <4 hours | Feature drift detected, challenger outperforming, retraining pipeline failed |
+      | **P3 (Review)** | Next business day | Monthly fairness audit, cost-benefit analysis, model comparison |
+
+      **Fraud pattern detection dashboard:**
+      - **Real-time heat map**: Fraud score distribution across geographies, merchant categories, transaction types
+      - **Anomaly timeline**: Timeline view of unusual patterns (sudden spike in high-risk scores from a specific BIN range)
+      - **Attack detection**: Automated detection of coordinated fraud attacks (many cards, same merchant, short timeframe)
+
+      **Feedback loops for continuous improvement:**
+      1. **Merchant feedback**: Merchants can report false declines via API -- these feed directly into training labels
+      2. **Fraud analyst feedback**: Manual review decisions become training labels (faster than chargeback cycle)
+      3. **Rule suggestions**: When analysts identify patterns, ML team evaluates if a new rule or model retrain addresses it
+      4. **Automated feature importance tracking**: Alert when a previously important feature loses predictive power (signals adversarial adaptation)
+
+      **Incident response playbook:**
+      - Fraud spike detected -> Tighten thresholds temporarily -> Root cause analysis -> Rule or model update -> Revert thresholds
+      - Model degradation detected -> Roll back to previous version -> Diagnose -> Fix and redeploy
+
+      You've designed a comprehensive fraud detection system!
+    dialogue:
+      - speaker: interviewer
+        text: "How do you detect adversarial adaptation by fraudsters?"
+      - speaker: candidate
+        text: "Three signals: declining recall on specific fraud types in the weekly report, feature importance shifts in the model, and new fraud patterns flagged by the anomaly detection system. When we see these, we trigger an emergency retrain with emphasis on the new patterns."
+      - speaker: interviewer
+        text: "What's the most important single metric to watch?"
+      - speaker: candidate
+        text: "Score distribution shift. If the distribution of fraud scores across all transactions changes significantly, it means either the fraud patterns changed or the model is degrading. Either way, it requires immediate investigation."
+    next: mon_terminal_proactive
+
+  - id: mon_ab
+    stage: monitoring
+    type: info
+    label: "A/B Testing Framework Details"
+    speaker: interviewer
+    content: |
+      Great approach with the champion/challenger framework. Let's detail the implementation.
+
+      **Evaluation pipeline:**
+
+      ```
+      Daily batch job:
+      1. Pull all scored transactions from yesterday
+      2. Join with available labels (customer reports, issuer alerts)
+      3. Compute per-model metrics:
+         - Estimated recall (using early labels)
+         - Precision at fixed recall thresholds
+         - Score calibration (are probabilities well-calibrated?)
+         - Segment-level performance
+      4. Update dashboard
+      5. Run statistical tests (Bayesian)
+      6. Alert if challenger significantly better or champion degrading
+      ```
+
+      **Handling the counterfactual problem:**
+      - We only observe outcomes for the champion's decisions (approved/declined)
+      - For declined transactions, we don't know if they were truly fraud
+      - **Solution 1**: Periodic "random approval" of 0.1% of transactions the champion would decline -- observe outcomes to get unbiased recall estimates
+      - **Solution 2**: Use issuer-level fraud reports (TC40 data) which arrive regardless of our decision
+      - **Solution 3**: Inverse propensity weighting for off-policy evaluation
+
+      **Long-term model evolution tracking:**
+      - Track model performance over months -- is each generation genuinely improving?
+      - Maintain a "model zoo" of past champions for regression testing
+      - Annual review: Has the fraud detection rate improved year-over-year? Is the cost-per-prevented-fraud-dollar improving?
+
+      **Key insight from industry:** Visa reports that the best fraud detection systems are **not just ML** -- they're a combination of ML models, expert rules, velocity checks, and human review. The monitoring system should track the performance of the **entire stack**, not just the ML component.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you evaluate model performance on transactions the champion declined?"
+      - speaker: candidate
+        text: "This is the counterfactual problem. I'd use three approaches: occasional random approval of a tiny sample, issuer fraud reports that arrive regardless of our decision, and inverse propensity weighting for off-policy evaluation."
+      - speaker: interviewer
+        text: "The random approval approach is interesting but risky. How do you manage that risk?"
+      - speaker: candidate
+        text: "Very carefully. Only approve 0.1% of declines, cap at low dollar amounts ($50 max), exclude the highest-risk scores, and have a rapid response team monitoring these transactions. The business cost is small but the evaluation signal is invaluable."
+    next: mon_terminal_ab
+
+  # ============ TERMINALS ============
+  - id: mon_terminal_proactive
+    stage: monitoring
+    type: terminal
+    label: "Proactive Monitoring Path Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive **real-time fraud detection system** with proactive monitoring.
+
+      **Your design summary:**
+      - **Problem**: Binary classification of fraudulent transactions with <100ms latency SLA
+      - **Metrics**: Precision/recall trade-off optimized for your chosen strategy, with business-aligned evaluation
+      - **Data**: Multi-source pipeline handling 30-90 day label delay with feature store architecture
+      - **Features**: Rich feature engineering with velocity aggregates and contextual signals
+      - **Model**: Production-ready architecture balancing accuracy and inference speed
+      - **Training**: Weekly retraining with temporal validation and adversarial drift detection
+      - **Deployment**: High-availability scoring service with fallback mechanisms
+      - **Monitoring**: Proactive drift detection with tiered alerting and feedback loops
+
+      **Key strengths:**
+      - End-to-end latency well within budget
+      - Multiple fallback layers ensure the system never goes fully dark
+      - Proactive monitoring catches degradation before fraud losses materialize
+      - Feedback loops from merchants and analysts accelerate model improvement
+
+      **Areas for future improvement:**
+      - Graph neural networks for fraud ring detection
+      - Federated learning across issuing banks for better signal without sharing raw data
+      - Real-time adversarial training to stay ahead of evolving fraud tactics
+
+      Outstanding design that demonstrates deep understanding of fraud detection at scale!
+
+  - id: mon_terminal_ab
+    stage: monitoring
+    type: terminal
+    label: "A/B Testing Path Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive **real-time fraud detection system** with continuous experimentation.
+
+      **Your design summary:**
+      - **Problem**: Binary classification of fraudulent transactions with <100ms latency SLA
+      - **Metrics**: Clear precision/recall optimization with business-aligned targets
+      - **Data**: Robust pipeline handling label delay and class imbalance
+      - **Features**: Comprehensive feature engineering with real-time serving infrastructure
+      - **Model**: Well-architected model with interpretability and performance balance
+      - **Training**: Temporal training strategy with adversarial drift awareness
+      - **Deployment**: Resilient serving architecture with graceful degradation
+      - **Monitoring**: Champion/challenger framework enabling continuous model improvement
+
+      **Key strengths:**
+      - Always-on experimentation accelerates model iteration
+      - Counterfactual evaluation provides unbiased performance estimates
+      - Statistical rigor in model promotion prevents false improvements
+      - End-to-end system thinking from features to business metrics
+
+      **Areas for future improvement:**
+      - Multi-armed bandit for automatic traffic allocation to best model
+      - Causal inference for understanding feature contributions
+      - Cross-merchant federated learning for collaborative fraud detection
+
+      Outstanding system design with a strong experimentation culture!

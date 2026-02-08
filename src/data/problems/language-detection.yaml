@@ -1,0 +1,823 @@
+id: language-detection
+title: "Language Detection System"
+description: "Design a language detection system for multilingual text inputs."
+companies: ["Google", "Meta", "DeepL"]
+domains: ["NLP", "Classification"]
+root: pd_start
+
+nodes:
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design a **language detection system** for a global content platform. The platform serves user-generated content (social media posts, comments, reviews, messages) across **200+ countries** and needs to identify the language of each piece of text.
+
+      **Business context:**
+      - The platform processes **50 million text inputs per day** (posts, comments, search queries, messages)
+      - Users write in **100+ languages**, with a long tail of low-resource languages
+      - Top 10 languages (English, Spanish, Chinese, Arabic, Hindi, Portuguese, French, Japanese, Korean, German) cover 85% of traffic
+      - Language detection is a **prerequisite** for downstream services: machine translation, content moderation, search indexing, personalization, and ad targeting
+
+      **Current pain points:**
+      - The existing rule-based system (Unicode script detection + dictionary matching) achieves only **78% accuracy**
+      - Fails badly on: short text (<10 characters), mixed-language text (code-switching), transliterated text (Hindi written in Latin script), and similar languages (Norwegian vs Danish, Malay vs Indonesian)
+      - Misdetection cascades: wrong language -> wrong translation -> wrong content moderation -> policy violations go undetected
+
+      **Requirements:**
+      - **Accuracy**: >95% on text longer than 20 characters, >85% on short text (5-20 characters)
+      - **Latency**: <5ms per request (language detection is on the critical path for every API call)
+      - **Throughput**: 50M texts/day = ~580 requests/second sustained, 5,800 peak
+      - **Languages**: Support 100+ languages, with the ability to add new languages without full retraining
+    dialogue:
+      - speaker: interviewer
+        text: "Today we'll design a language detection system for a global platform processing 50 million texts per day in 100+ languages."
+      - speaker: candidate
+        text: "What's the current system doing wrong?"
+      - speaker: interviewer
+        text: "Rule-based detection achieves only 78% accuracy. It fails on short text, mixed languages, transliterated text, and similar languages like Norwegian vs Danish."
+      - speaker: candidate
+        text: "And the latency requirement is extremely tight -- under 5ms since this is on the critical path for every API call."
+      - speaker: interviewer
+        text: "Exactly. Misdetection has cascading effects on translation, content moderation, and ad targeting. Let's scope the problem."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: info
+    label: "Problem Scope"
+    speaker: candidate
+    content: |
+      Let me frame the core ML problem and key challenges.
+
+      **This is a multi-class text classification problem** with 100+ classes (languages). But it has unique characteristics that make it different from typical classification:
+
+      **Challenge 1: Extreme short text**
+      - Search queries average 3-5 words (8-25 characters). "bon appetit" -- is it French or English?
+      - Single words are genuinely ambiguous: "die" is English or German. "pan" is English, Spanish, Japanese, or Polish.
+      - For text <5 characters, even humans can't reliably detect language without context.
+
+      **Challenge 2: Code-switching (mixed languages)**
+      - Bilingual users frequently mix languages: "This meeting bohot boring tha" (English + Hindi)
+      - Code-switching is common in ~20% of texts from multilingual regions (India, Philippines, Africa, EU)
+      - Should we return the dominant language, both languages, or segment by language?
+
+      **Challenge 3: Script vs Language ambiguity**
+      - Latin script is used by 100+ languages. "Casa" could be Spanish, Portuguese, Italian, or Romanian.
+      - Cyrillic script is used by 10+ languages (Russian, Ukrainian, Bulgarian, Serbian, etc.)
+      - CJK characters: Chinese, Japanese (Kanji), and some Korean
+
+      **Challenge 4: Transliterated text**
+      - Hindi written in Latin script ("Namaste, kaise ho?") looks nothing like Hindi in Devanagari
+      - Arabic written in Latin script ("Marhaba, keef halak?")
+      - Common in informal settings (social media, messaging)
+
+      **Decision: Output format**
+      - Return top-1 language with confidence score
+      - If confidence <0.7, return top-3 languages with probabilities
+      - For code-switching: return primary language + secondary language if detected
+    dialogue:
+      - speaker: candidate
+        text: "This is 100+ class classification, but with unique challenges: very short text, code-switching, script ambiguity, and transliteration."
+      - speaker: interviewer
+        text: "How would you handle code-switching -- text that mixes two languages?"
+      - speaker: candidate
+        text: "Return the dominant language plus a secondary language flag when detected. For downstream services like translation, they need to know both languages are present."
+      - speaker: interviewer
+        text: "Good. Let's discuss metrics."
+    next: met_question
+
+  - id: met_question
+    stage: metrics
+    type: question
+    label: "Evaluation Metrics"
+    speaker: interviewer
+    content: |
+      What metrics would you use to evaluate the language detection system?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you measure the quality of language detection across 100+ languages?"
+      - speaker: candidate
+        text: "The challenge is evaluating across both high-resource and low-resource languages with very different data volumes."
+      - speaker: interviewer
+        text: "Tell me about your metric design."
+    choices:
+      - label: "Stratified accuracy by text length and language tier"
+        answer: |
+          I'd use **stratified accuracy** across multiple dimensions, since a single accuracy number is misleading for this problem.
+
+          **Primary metrics (stratified by text length):**
+          - **Accuracy on long text (>50 chars)**: Target >98%. This should be "solved" -- long text has plenty of signal.
+          - **Accuracy on medium text (20-50 chars)**: Target >95%. Most content falls here.
+          - **Accuracy on short text (5-20 chars)**: Target >85%. Genuinely harder.
+          - **Accuracy on ultra-short text (<5 chars)**: Track but don't optimize -- many inputs are genuinely ambiguous.
+
+          **Secondary metrics (stratified by language tier):**
+          - **Tier 1 (top 10 languages, 85% of traffic)**: Target >97% accuracy. These must be near-perfect because volume amplifies errors.
+          - **Tier 2 (next 30 languages, 12% of traffic)**: Target >92% accuracy. Good coverage for most users.
+          - **Tier 3 (remaining 60+ languages, 3% of traffic)**: Target >80% accuracy. Acceptable for low-resource languages.
+
+          **Confusion analysis:**
+          - Track the top-10 language confusion pairs: Norwegian<->Danish, Malay<->Indonesian, Serbian<->Croatian, Hindi(Latin)<->English
+          - These "similar language" confusions are the hardest to fix and most impactful to measure
+          - Build a separate evaluation set for confused pairs (500+ examples per pair)
+
+          **Evaluation dataset:**
+          - 50,000 labeled examples, balanced across length buckets and language tiers
+          - 3 annotators per example for ambiguous cases (short text, transliterated)
+          - Refresh quarterly with recent data to capture new patterns
+          - Include adversarial examples: transliterated text, code-switching, borrowed words
+        next: met_detail
+      - label: "Weighted macro F1 with downstream impact"
+        answer: |
+          I'd use **traffic-weighted macro F1** combined with downstream impact metrics.
+
+          **Why weighted macro F1?**
+          - Standard macro F1 weights all 100+ languages equally, but English (40% of traffic) matters more than Luxembourgish (0.001%).
+          - **Traffic-weighted**: Weight each language's F1 by its share of traffic. This prioritizes getting high-traffic languages right while still tracking low-resource languages.
+          - Formula: `F1_weighted = sum(traffic_share_i * F1_i)` for all languages i
+
+          **Per-language precision/recall:**
+          - **Precision** matters for downstream routing: If we say "this is French", how often is it actually French? Low precision -> wrong translations, wrong moderation.
+          - **Recall** matters for coverage: Of all French texts, how many do we correctly identify? Low recall -> French texts get routed through English pipeline.
+          - Track per-language precision/recall for top 30 languages. For tail languages, track tier-level aggregates.
+
+          **Downstream impact metrics:**
+          - **Translation quality correlation**: Does language detection accuracy improve translation BLEU scores? Track BLEU for correctly vs incorrectly detected languages.
+          - **Content moderation accuracy**: Texts sent to wrong-language moderation pipeline -> higher false negative rate. Track moderation accuracy stratified by detection correctness.
+          - **Search relevance**: Language detection feeds search indexing. Track search click-through rate for correctly vs incorrectly detected languages.
+          - **User-reported language errors**: Users can flag "wrong language" in the UI. Track flag rate as an online accuracy signal.
+
+          **Cost of errors by language:**
+          - English->Spanish misclassification: Moderate impact (different translation pipeline)
+          - Norwegian->Danish misclassification: Low impact (similar languages, translation may still work)
+          - Chinese->Japanese misclassification: High impact (completely different languages using shared characters)
+          - Weight metrics by error impact.
+        next: met_detail
+
+  - id: met_detail
+    stage: metrics
+    type: info
+    label: "Metrics Deep Dive"
+    speaker: interviewer
+    content: |
+      Good metric design. Some practical nuances:
+
+      **The ground truth challenge:**
+      - For long text, ground truth is usually clear. For short text, even humans disagree.
+      - "Pizza" -- English, Italian, or universal? "Taxi" is used in 50+ languages. "OK" is global.
+      - Define a clear annotation guideline: "Label the language the speaker most likely intends, considering the platform context (user's country, profile language)."
+      - For genuinely ambiguous text, allow a "multilingual/ambiguous" label.
+
+      **Online vs offline evaluation:**
+      - **Offline**: Accuracy, F1 on the labeled evaluation set. Run after every model change.
+      - **Online**: User-reported language errors (rate per 10K requests), downstream metric correlations.
+      - **Shadow evaluation**: Run new model alongside production model on same traffic. Compare predictions. If they differ on >1% of requests, investigate before switching.
+
+      **Baseline comparisons:**
+      | Method | Accuracy (overall) | Accuracy (<20 chars) | Latency |
+      |--------|-------------------|---------------------|---------|
+      | Unicode script only | 55% | 30% | <0.1ms |
+      | Dictionary + rules | 78% | 60% | <1ms |
+      | fastText (langdetect) | 92% | 78% | <1ms |
+      | Fine-tuned transformer | 97% | 88% | ~5ms |
+      | Google CLD3 | 95% | 82% | <2ms |
+
+      The gap between fastText and fine-tuned transformers is primarily on short text and similar languages.
+
+      Let's discuss data.
+    dialogue:
+      - speaker: interviewer
+        text: "For short text, even humans disagree. Define clear annotation guidelines and allow an 'ambiguous' label."
+      - speaker: candidate
+        text: "Shadow evaluation is smart -- run the new model alongside production and investigate if they differ on more than 1% of traffic."
+      - speaker: interviewer
+        text: "The key accuracy gap is between fastText (92%) and fine-tuned transformers (97%), primarily on short text and similar languages. Let's discuss data."
+    next: data_pipeline
+
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: candidate
+    content: |
+      The data pipeline needs to handle both training data collection and serving-time preprocessing.
+
+      **Training data sources:**
+      - **Wikipedia**: Articles in 300+ languages with reliable language labels. Extract sentences for sentence-level training data. ~100M sentences across 100 languages.
+      - **OSCAR corpus**: Web-crawled multilingual data (Common Crawl filtered by language). Larger and more diverse than Wikipedia but noisier.
+      - **Tatoeba**: Parallel sentence corpus with verified language labels. Excellent for short text (<20 words). ~10M sentences in 400+ languages.
+      - **Platform's own data**: 50M texts/day with implicit language labels from user profiles and geo-location. Noisy but domain-specific.
+      - **Transliterated text datasets**: Dakshina dataset (12 languages in Latin script), fire emoji corpus, social media transliteration data.
+
+      **Data preprocessing:**
+      - **Text normalization**: Lowercase, normalize Unicode (NFC form), remove excessive whitespace, strip URLs and emails
+      - **Length filtering**: Remove texts <3 characters (too short to classify) and >5000 characters (truncate)
+      - **Deduplication**: Remove exact duplicates within each language (common in web-crawled data)
+      - **Quality filtering**: Remove texts with >50% non-alphabetic characters (likely code/data, not natural language)
+
+      **Label validation:**
+      - Wikipedia/Tatoeba labels are high quality (>99% correct)
+      - Web-crawled labels are noisy (~10% incorrect). Use confident learning (cleanlab) to identify mislabeled examples.
+      - Platform data labels (from user profiles) are ~85% correct. Use as supplementary data, not primary.
+
+      **Training dataset construction:**
+      - 1M sentences per top-10 language, 100K per tier-2, 10K per tier-3
+      - Balanced short/medium/long text per language
+      - Include 50K code-switching examples (manually collected or from multilingual social media)
+      - Include 30K transliterated examples per major language
+      - Total: ~20M training examples
+    dialogue:
+      - speaker: candidate
+        text: "Training data comes from Wikipedia (reliable labels), OSCAR corpus (web-scale), Tatoeba (short text), and the platform's own data (domain-specific but noisy)."
+      - speaker: interviewer
+        text: "How do you handle noisy labels from web-crawled data?"
+      - speaker: candidate
+        text: "Use confident learning with cleanlab to identify mislabeled examples. Wikipedia and Tatoeba are high quality; web-crawled data needs cleaning."
+      - speaker: interviewer
+        text: "Good. Including transliterated text and code-switching examples is important. Let's discuss feature engineering."
+    next: feat_question
+
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Engineering"
+    speaker: interviewer
+    content: |
+      What features would you use for language detection? This is a problem where feature choice directly affects latency.
+    dialogue:
+      - speaker: interviewer
+        text: "What features would you use? Remember, you have a 5ms latency budget -- every feature adds cost."
+      - speaker: candidate
+        text: "The trade-off between accuracy and latency is the central design tension for language detection."
+      - speaker: interviewer
+        text: "Walk me through the options."
+    choices:
+      - label: "Character n-gram features (fast and effective)"
+        answer: |
+          I'd use **character n-gram features** as the primary representation. They're the gold standard for language detection because they capture script patterns, morphological features, and common character sequences unique to each language.
+
+          **Why character n-grams?**
+          - Languages have distinctive character patterns: "tion" is English, "mente" is Spanish/Portuguese/Italian, "ung" is German, "ous" is French
+          - Character-level features work on any script (Latin, Cyrillic, Arabic, CJK, Devanagari) without tokenization
+          - Robust to misspellings and informal text (social media)
+          - Extremely fast to compute -- no neural network needed for feature extraction
+
+          **Feature design:**
+          - Extract character n-grams for n=1,2,3,4 (unigrams through 4-grams)
+          - Vocabulary: Top 100K most frequent n-grams across all languages
+          - Representation: TF-IDF weighted n-gram counts, normalized to unit length
+          - This produces a sparse feature vector (~100K dimensions, ~200 non-zero entries per text)
+
+          **Example discriminative n-grams:**
+          - `"th"`, `"the"`, `"tion"` -> English
+          - `"ch"`, `"sch"`, `"ung"` -> German
+          - `"ment"`, `"eux"`, `"tion"` -> French (yes, "tion" appears in both, but relative frequencies differ)
+          - `"cion"`, `"dad"`, `"mente"` -> Spanish
+          - Script-specific: `"の"`, `"は"`, `"です"` -> Japanese
+
+          **Preprocessing for n-grams:**
+          - Pad text with `^` (start) and `$` (end) markers to capture word boundaries
+          - Lowercase and normalize Unicode (NFC)
+          - Don't remove punctuation -- it carries signal (e.g., inverted question marks `¿` = Spanish)
+          - Don't split on spaces -- cross-word n-grams are valuable ("s t" pattern differs by language)
+
+          **Speed**: Feature extraction in <0.5ms per text. Compatible with extremely fast classifiers (linear models, fastText).
+        next: feat_detail
+      - label: "Subword embeddings (character-aware neural model)"
+        answer: |
+          I'd use **subword embeddings** from a character-aware neural model that jointly learns character patterns and produces compact representations.
+
+          **Architecture:**
+          - **Input**: Raw text characters (up to 512 characters)
+          - **Character embedding layer**: Learned embeddings for each Unicode character (256 dims for 10K most common characters)
+          - **1D CNN layers**: Convolutions with kernel sizes 2,3,4,5 (like TextCNN). Each captures n-gram patterns at different scales.
+          - **Global pooling**: Max-pool across the sequence to produce a fixed-size representation
+          - **Output**: Dense vector (256 dims) that captures the text's linguistic fingerprint
+
+          **Why neural subword features?**
+          - **Learns cross-lingual patterns**: The model can learn that certain character combinations are shared between related languages (Romance, Slavic, etc.) and use contrastive features to distinguish them.
+          - **Handles unknown characters**: Embedding layer can handle any Unicode character, including rare scripts not seen during training.
+          - **Compact representation**: 256-dim dense vector vs 100K-dim sparse vector. Better for downstream models and storage.
+          - **Contextual**: The CNN captures positional patterns -- "ing" at the end of a word (English) vs "ing" in the middle (other languages).
+
+          **Latency budget:**
+          - Character embedding + 4 CNN layers + pooling: ~2ms on CPU
+          - This leaves 3ms for the classifier head
+          - Total: <5ms budget met
+
+          **Pre-training strategy:**
+          - Pre-train the CNN encoder on language detection task with 20M examples
+          - The learned representations transfer well to related tasks (script detection, transliteration detection)
+          - Can be used as a feature extractor for other NLP pipelines
+
+          **Comparison to n-grams:**
+          - +2-3% accuracy improvement, especially on short text and similar languages
+          - Neural features capture more subtle patterns (character frequency distributions, positional patterns)
+          - Trade-off: More complex to deploy, requires GPU for training (but CPU inference is fast enough)
+        next: feat_detail
+
+  - id: feat_detail
+    stage: features
+    type: info
+    label: "Feature Engineering Details"
+    speaker: interviewer
+    content: |
+      Good feature choice. Let me add some important refinements.
+
+      **Script detection as a pre-filter (free accuracy boost):**
+      - Before running the main classifier, detect the Unicode script of the text
+      - Scripts that map to a single language: Thai (Thai), Georgian (Georgian), Armenian (Armenian), Bengali (Bengali), Tamil (Tamil)
+      - For these, return immediately without running the classifier -- 100% accuracy, <0.1ms
+      - This handles ~15% of traffic instantly
+      - Remaining scripts (Latin, Cyrillic, Arabic, CJK, Devanagari) need the full classifier
+
+      **Byte-level features (for extreme speed):**
+      - Google's CLD3 uses byte-level features instead of character-level
+      - UTF-8 byte sequences are distinctive per language (e.g., byte 0xC3 followed by specific bytes -> Spanish accented characters)
+      - Byte features are faster than character features (no Unicode decoding needed)
+      - Accuracy is 1-2% lower than character n-grams but latency is sub-millisecond
+
+      **Context features (when available):**
+      - **User's profile language**: 80% of texts match the user's profile language. Strong prior.
+      - **Geo-location**: IP-based country narrows candidates (text from Japan is likely Japanese, English, or Chinese)
+      - **Previous texts in session**: If the user's last 3 texts were Spanish, the current text is likely Spanish
+      - **Bayesian update**: P(language | text, context) = P(text | language) * P(language | context) / Z
+      - Context features improve accuracy by 3-5%, especially on short/ambiguous text
+
+      **Feature interaction: Script + Context -> Candidate languages:**
+      ```
+      Script = Latin, Country = Brazil -> Candidates: Portuguese, English, Spanish
+      Script = Cyrillic, Country = Ukraine -> Candidates: Ukrainian, Russian
+      Script = CJK, Country = Japan -> Candidates: Japanese, Chinese
+      ```
+      This narrows 100+ classes to 3-10 candidates, making classification much easier.
+
+      Let's discuss model selection.
+    dialogue:
+      - speaker: interviewer
+        text: "Script detection as a pre-filter is a free accuracy boost. Thai script uniquely maps to Thai -- handle it without the classifier."
+      - speaker: candidate
+        text: "Context features like user profile language and geo-location improve accuracy 3-5% on short text. Bayesian update combines text-based and context-based probabilities."
+      - speaker: interviewer
+        text: "Script + context narrows 100+ candidate languages to 3-10, making the classification problem much easier. Let's discuss model selection."
+    next: mod_question
+
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Model Selection"
+    speaker: interviewer
+    content: |
+      What model would you use for language detection at 50M texts per day with <5ms latency?
+    dialogue:
+      - speaker: interviewer
+        text: "What model architecture would you choose? Remember the 5ms latency constraint -- this rules out most transformer models."
+      - speaker: candidate
+        text: "The latency constraint is the key design driver. I need to balance accuracy with extreme speed."
+      - speaker: interviewer
+        text: "Walk me through your options."
+    choices:
+      - label: "fastText classifier (sub-millisecond)"
+        answer: |
+          I'd use **fastText** as the primary classifier. It's the industry standard for language detection, used by Facebook/Meta at scale.
+
+          **Why fastText?**
+          - **Blazing fast**: Sub-millisecond inference on CPU. At 50M texts/day, a single CPU core handles the load.
+          - **Accuracy**: fastText's lid.176 model (trained on Wikipedia + Tatoeba) achieves 92% out-of-the-box on common benchmarks. Fine-tuned on domain data: 95-96%.
+          - **Proven at scale**: Meta uses fastText for language detection on billions of posts per day.
+          - **Simple deployment**: Single binary, no GPU needed, <10MB model file, no dependencies.
+
+          **Architecture:**
+          - Input: Raw text string
+          - Feature extraction: Character n-grams (2-5) + word n-grams (1-2), hashed to 2M buckets
+          - Model: Single hidden layer (64 dims) -> softmax over 100+ languages
+          - Output: Top-K languages with probabilities
+
+          **Training:**
+          - Start from Meta's pre-trained lid.176 model
+          - Fine-tune on 20M domain-specific examples:
+            ```
+            fasttext supervised -input train.txt -output model
+              -dim 64 -wordNgrams 2 -minn 2 -maxn 5
+              -lr 0.5 -epoch 10 -loss hs
+            ```
+          - Hierarchical softmax (`-loss hs`) makes training efficient with 100+ classes
+          - Training time: ~30 minutes on 16 CPU cores
+
+          **Performance expectations:**
+          - Overall accuracy: 95-96% (fine-tuned on domain data)
+          - Short text (<20 chars): 82-85%
+          - Similar languages: 85-90% (the main weakness)
+          - Latency: <0.5ms per text
+          - Model size: 8MB compressed
+
+          **Limitations**: Lower accuracy on short text and similar languages vs neural models. But the speed advantage is massive -- 10x faster than any neural approach.
+        next: mod_detail
+      - label: "Lightweight CNN classifier (2-3ms)"
+        answer: |
+          I'd use a **lightweight character-level CNN** that achieves higher accuracy than fastText while staying within the 5ms latency budget.
+
+          **Architecture:**
+          ```
+          Input: Raw text (up to 256 characters)
+          -> Character embedding (10K chars, 64 dims)
+          -> Conv1D(filters=128, kernel_size=3, stride=1) + ReLU
+          -> Conv1D(filters=128, kernel_size=4, stride=1) + ReLU
+          -> Conv1D(filters=128, kernel_size=5, stride=1) + ReLU
+          -> GlobalMaxPool (concatenate 3 pools = 384 dims)
+          -> Dense(384, 128) + ReLU + Dropout(0.3)
+          -> Dense(128, 100+) + Softmax
+          ```
+
+          **Why CNN over fastText?**
+          - **+2-3% accuracy** on short text and similar languages
+          - CNNs learn positional patterns that n-gram bags cannot capture
+          - The model learns that "ing" at the end of a word signals English, while "ing" in the middle doesn't
+          - Better at distinguishing Norwegian/Danish, Malay/Indonesian, Serbian/Croatian
+
+          **Why CNN over transformer?**
+          - Transformers (even DistilBERT) take 10-50ms per inference -- too slow
+          - Our 3-layer CNN with 384K parameters achieves 96-97% accuracy
+          - Inference: ~2ms on CPU with ONNX Runtime, <1ms on GPU
+          - Model size: ~5MB (smaller than most transformers)
+
+          **Quantization for speed:**
+          - INT8 quantization: 2x speedup, <0.5% accuracy loss
+          - Post-training quantization with calibration dataset
+          - Final inference: ~1ms on CPU (INT8 quantized ONNX)
+
+          **Training:**
+          - Loss: Label-smoothed cross-entropy (handle noisy labels)
+          - Optimizer: AdamW, lr=1e-3, cosine schedule
+          - Batch size: 512, 10 epochs on 20M examples
+          - Training: ~4 hours on single A10G GPU
+          - Validation: Stratified by language tier and text length
+
+          **Performance expectations:**
+          - Overall accuracy: 96-97% (vs 95% fastText)
+          - Short text (<20 chars): 86-88% (vs 82% fastText)
+          - Similar languages: 88-92% (vs 85% fastText)
+          - Latency: 1-2ms (vs <0.5ms fastText)
+        next: mod_detail
+
+  - id: mod_detail
+    stage: model
+    type: info
+    label: "Model Details"
+    speaker: interviewer
+    content: |
+      Good model choice. Let me add important architecture details.
+
+      **Two-stage pipeline (recommended for best accuracy):**
+      ```
+      Stage 1: Script detection (0.1ms)
+        - Unique scripts -> Return immediately (Thai, Georgian, etc.)
+        - Ambiguous scripts -> Stage 2
+
+      Stage 2: Fast classifier (fastText or CNN, 0.5-2ms)
+        - Predict language from text + context features
+        - If confidence >0.90 -> Return prediction
+        - If confidence 0.70-0.90 -> Return prediction with lower confidence
+        - If confidence <0.70 -> Flag for review or use context prior
+      ```
+
+      **Handling similar languages (the hardest problem):**
+      - Train specialized binary classifiers for confused pairs:
+        - Norwegian vs Danish classifier
+        - Malay vs Indonesian classifier
+        - Serbian vs Croatian classifier
+        - Simplified Chinese vs Traditional Chinese
+      - If the main classifier's top-2 predictions are a confused pair, run the specialized classifier
+      - Specialized classifiers achieve 90-95% accuracy on these pairs (vs 80-85% for the general model)
+
+      **Code-switching detection:**
+      - After initial language detection, check if the text contains tokens from a second language
+      - Simple approach: Run language detection on each sentence/segment separately
+      - Advanced: Train a token-level language tagger (sequence labeling) for code-switching
+      - Output: `{primary: "English", secondary: "Hindi", code_switching: true}`
+
+      **Adding new languages without retraining:**
+      - For fastText: Collect 1000+ examples of the new language, retrain with `--pretrainedVectors`
+      - For CNN: Fine-tune the last layer with new language data (freeze feature layers)
+      - Alternatively: Use a nearest-centroid approach -- embed 1000 examples, compute centroid, classify new text by nearest centroid. Zero retraining needed.
+
+      Let's discuss training strategy.
+    dialogue:
+      - speaker: interviewer
+        text: "A two-stage pipeline -- script detection first, then classifier -- maximizes both speed and accuracy."
+      - speaker: candidate
+        text: "Specialized binary classifiers for confused language pairs can boost accuracy from 80% to 90%+ on the hardest cases."
+      - speaker: interviewer
+        text: "Good. Adding new languages without full retraining is important for a 100+ language system. Let's discuss training."
+    next: train_strategy
+
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: candidate
+    content: |
+      Here's my training approach for the language detection model.
+
+      **Dataset construction:**
+      - **Balanced sampling**: For each of 100+ languages, sample up to 1M examples for tier-1, 100K for tier-2, 10K for tier-3
+      - **Length stratification**: Within each language, ensure 30% short (<20 chars), 40% medium (20-100), 30% long (>100)
+      - **Source diversity**: Mix Wikipedia (formal), social media (informal), news (standard), and user content (noisy)
+      - **Negative mining**: For each language, include examples from its most-confused language as hard negatives
+
+      **Training procedure (for CNN):**
+      - **Phase 1 (warm-up)**: Train on all 100+ languages for 5 epochs. lr=1e-3, batch_size=512
+      - **Phase 2 (hard example mining)**: Evaluate on validation set, identify misclassified examples. Upsample misclassified examples 3x. Train for 3 more epochs.
+      - **Phase 3 (confused pair training)**: For the top-10 confused language pairs, add 50K additional hard negatives per pair. Fine-tune for 2 epochs with lr=5e-4.
+
+      **For fastText:**
+      - Much simpler: `fasttext supervised -input train.txt -output model`
+      - Key hyperparameters: `-dim 64 -minn 2 -maxn 5 -wordNgrams 2 -lr 0.5 -epoch 10`
+      - Autotune: `fasttext supervised -input train.txt -output model -autotune-validation valid.txt -autotune-duration 600`
+
+      **Calibration:**
+      - After training, calibrate probabilities using temperature scaling on validation set
+      - Critical because the confidence threshold (0.70, 0.90) drives the two-tier decision
+      - Measure Expected Calibration Error (ECE) -- target <0.05
+
+      **Evaluation during training:**
+      - Track accuracy stratified by: language tier, text length, script type
+      - Track confused pair accuracy separately
+      - Early stopping on tier-1 accuracy (most impactful)
+      - Log training time and model size (deployment constraints)
+    dialogue:
+      - speaker: candidate
+        text: "Three-phase training: warm-up on all languages, then hard example mining for misclassified texts, then focused training on confused language pairs."
+      - speaker: interviewer
+        text: "How do you handle the imbalance between 1M examples for English and 10K for small languages?"
+      - speaker: candidate
+        text: "Balanced sampling caps each language at 1M. For tier-3 languages with only 10K examples, data augmentation helps -- character-level noise injection and cross-lingual transfer from related languages."
+      - speaker: interviewer
+        text: "Good. Calibration is critical since the confidence threshold drives the decision system. Let's discuss deployment."
+    next: deploy_question
+
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Deployment Architecture"
+    speaker: interviewer
+    content: |
+      How would you deploy this language detection system at 50M requests per day?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you deploy this at scale? Remember it needs to be on the critical path of every API call."
+      - speaker: candidate
+        text: "Being on the critical path means latency, reliability, and throughput are all paramount."
+      - speaker: interviewer
+        text: "Walk me through your architecture."
+    choices:
+      - label: "In-process library (embedded in API servers)"
+        answer: |
+          I'd deploy the model as an **in-process library** embedded directly into the API servers, avoiding any network overhead.
+
+          **Architecture:**
+          ```
+          API Server (each instance):
+            -> Request arrives with text
+            -> Language detection library (in-process):
+              1. Script detection (0.1ms)
+              2. Context features (user profile, geo)
+              3. fastText/CNN inference (0.5-2ms)
+              4. Confidence thresholding
+            -> Return language code with response
+          ```
+
+          **Why in-process?**
+          - **Zero network latency**: No HTTP call to a separate service. The model runs in the same process as the API server.
+          - **Reliability**: No additional service to maintain, monitor, or keep available. If the API server is up, language detection is up.
+          - **Simplicity**: No service discovery, load balancing, or circuit breakers needed for language detection.
+          - **Cost**: No additional infrastructure. The model is tiny (8-50MB) and runs on CPU.
+
+          **Implementation options:**
+          - **Python API servers**: Load fastText model via `fasttext` package. ~50MB memory overhead per process.
+          - **Java/Go API servers**: Use ONNX Runtime to load the model. Cross-language support via C++ bindings.
+          - **Rust**: Compile fastText to native code with `fasttext-rs`. <1ms inference, zero garbage collection.
+
+          **Model updates:**
+          - Bundle model file with the API server Docker image
+          - Model update = new Docker image push -> rolling deployment
+          - Alternative: Load model from S3 at startup, with a version file that triggers hot-reload when updated
+
+          **Scaling:**
+          - 580 requests/second sustained = each API server handles this trivially (single core can do 2000+ predictions/second with fastText)
+          - 10 API server replicas provide 10x headroom
+          - No GPU needed at all -- pure CPU inference
+
+          **Trade-off**: Model updates require deploying new API server instances (or implementing hot-reload). Less flexible than a separate service.
+        next: deploy_detail
+      - label: "Lightweight microservice with gRPC"
+        answer: |
+          I'd deploy as a **lightweight gRPC microservice** for flexibility and independent scalability.
+
+          **Architecture:**
+          ```
+          API Server
+            -> gRPC call to Language Detection Service (1-2ms network overhead)
+              -> Script detection
+              -> Model inference (fastText/CNN)
+              -> Return language code + confidence
+            -> API Server continues processing
+          ```
+
+          **Why a separate service?**
+          - **Independent deployment**: Update the language model without redeploying all API servers. This is important when you're iterating on model quality weekly.
+          - **Shared across services**: Multiple services need language detection (content API, search, moderation, ads). One service serves all clients.
+          - **Resource isolation**: If language detection has a memory leak or bug, it doesn't crash the API server.
+          - **Technology flexibility**: API servers can be in any language; the detection service uses the best framework for ML inference.
+
+          **Implementation:**
+          - **Framework**: FastAPI + gRPC for Python, or pure gRPC in Go/Rust for maximum performance
+          - **Model serving**: ONNX Runtime for optimized inference. Model loaded into memory at startup.
+          - **Batching**: Accumulate requests for 1ms, then batch inference. Reduces per-request cost by 3-5x.
+          - **Connection pooling**: API servers maintain persistent gRPC connections (no TCP handshake overhead)
+
+          **Latency budget:**
+          - gRPC call overhead: ~0.5ms (persistent connection, same data center)
+          - Script detection: 0.1ms
+          - Model inference: 0.5-2ms
+          - Total: 1-3ms (within 5ms budget)
+
+          **Scaling:**
+          - 2-4 replicas handle 50M requests/day easily
+          - Auto-scale on CPU utilization (target: 50%)
+          - Health checks + circuit breaker in API servers (fallback: return "unknown" language)
+
+          **Cost**: 2 CPU-only instances (~$100/month on AWS). Extremely cost-effective.
+        next: deploy_detail
+
+  - id: deploy_detail
+    stage: deployment
+    type: info
+    label: "Deployment Details"
+    speaker: interviewer
+    content: |
+      Good architecture. Let me add production hardening details.
+
+      **Caching strategy:**
+      - Cache (text_hash -> language prediction) in local memory (LRU cache, 100K entries)
+      - Duplicate texts are common: reposted content, common phrases, automated messages
+      - Expected cache hit rate: 15-25% (reduces compute and latency significantly)
+      - Cache entries are lightweight: ~100 bytes each. 100K entries = ~10MB memory.
+
+      **Fallback chain:**
+      ```
+      1. Cache hit -> Return immediately (0ms)
+      2. Script detection unique -> Return immediately (0.1ms)
+      3. Model inference -> Return prediction (1-3ms)
+      4. Model error/timeout -> Use context-based prediction (user profile language) (0ms)
+      5. No context available -> Return "en" (English) as default (most common language)
+      ```
+      The system should NEVER fail or throw an error. Language detection is on the critical path -- always return something.
+
+      **A/B testing framework:**
+      - Route 5% of traffic to candidate model, 95% to production model
+      - Compare: accuracy (via downstream metrics), latency, confidence distribution
+      - Use feature flags (LaunchDarkly, Unleash) to control routing
+      - Minimum 1 week experiment, 500K+ requests per variant
+
+      **Graceful degradation under load:**
+      - At 2x peak load: Disable context features (skip DB lookup), use text-only prediction
+      - At 5x peak load: Use script-only detection (55% accuracy but instant)
+      - At extreme load: Return user's profile language without any detection
+      - Monitor: Request queue depth, P99 latency, error rate
+
+      Let's discuss monitoring.
+    dialogue:
+      - speaker: interviewer
+        text: "Cache text hashes for a 15-25% hit rate. The fallback chain should never fail -- always return a language, even if it's just the default."
+      - speaker: candidate
+        text: "Graceful degradation under extreme load is important -- fall back to simpler methods rather than failing."
+      - speaker: interviewer
+        text: "Good. The system should NEVER throw an error on the critical path. Let's discuss monitoring."
+    next: mon_question
+
+  - id: mon_question
+    stage: monitoring
+    type: question
+    label: "Monitoring Strategy"
+    speaker: interviewer
+    content: |
+      How would you monitor this language detection system in production?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you monitor language detection across 100+ languages and 50M daily requests?"
+      - speaker: candidate
+        text: "The challenge is detecting accuracy issues without labeled production data."
+      - speaker: interviewer
+        text: "What signals would you rely on?"
+    choices:
+      - label: "Distribution monitoring and downstream signal tracking"
+        answer: |
+          I'd implement **distribution monitoring** combined with downstream signal tracking since we rarely have labeled production data.
+
+          **Language distribution monitoring:**
+          - Track the hourly distribution of detected languages: {en: 42%, es: 12%, zh: 8%, ...}
+          - Compare to the 30-day rolling average using Jensen-Shannon divergence
+          - Alert if JS divergence exceeds threshold (0.01) -- indicates a sudden shift in model behavior
+          - Example: If Chinese detection suddenly drops from 8% to 3%, either the model degraded or there's a genuine traffic shift. Investigate.
+
+          **Confidence distribution monitoring:**
+          - Track the distribution of confidence scores: mean, median, P10, P90
+          - If mean confidence drops, the model is becoming less certain (possible concept drift)
+          - If the bimodal pattern (high-confidence + low-confidence peaks) shifts, model calibration may have drifted
+          - Alert if mean confidence drops >3% week-over-week
+
+          **Downstream signal tracking (indirect accuracy measurement):**
+          - **Translation user satisfaction**: If language detection is wrong -> wrong translation -> low user satisfaction. Track satisfaction scores stratified by detected language.
+          - **Content moderation flag rate**: If text is sent to wrong-language moderator -> more false positives/negatives. Track moderation accuracy by detected language.
+          - **Search click-through rate**: Wrongly indexed language -> irrelevant search results -> lower CTR. Track CTR by detected language.
+          - **User language corrections**: If users manually change language in the UI, that's an error signal. Track correction rate.
+
+          **Proactive accuracy sampling:**
+          - Sample 1000 predictions/day across all language tiers
+          - Send to annotation team for language verification (cost: ~$100/day)
+          - Compute rolling weekly accuracy, stratified by language tier and text length
+          - Alert if any tier accuracy drops below threshold
+
+          **Latency monitoring:**
+          - P50, P95, P99 per component (script detection, model inference, total)
+          - Alert if P99 exceeds 5ms
+          - Track cache hit rate (should be stable at 15-25%)
+        next: mon_terminal
+      - label: "Active testing with synthetic probes"
+        answer: |
+          I'd implement **active testing** using synthetic probe texts to continuously validate model accuracy.
+
+          **Synthetic probe system:**
+          - Maintain a test suite of 10,000 labeled text samples across all 100+ languages
+          - Every 5 minutes, send 100 random probes through the production pipeline
+          - Compare predictions against ground truth
+          - This gives continuous, real-time accuracy measurement without depending on user data
+
+          **Probe design:**
+          - **Length coverage**: 30% short (<20 chars), 40% medium (20-100), 30% long (>100)
+          - **Difficulty coverage**: 40% easy (unique scripts, long text), 30% medium (common Latin-script languages), 30% hard (similar languages, code-switching, transliterated)
+          - **Freshness**: Refresh 10% of probes monthly with recent text from each language (capture evolving language)
+
+          **Alert rules:**
+          - Overall probe accuracy drops below 93% -> P2 alert (investigate)
+          - Tier-1 language accuracy drops below 95% -> P1 alert (high-traffic impact)
+          - Any confused pair accuracy drops below 80% -> P2 alert
+          - Probe latency P99 exceeds 5ms -> P2 alert
+
+          **Canary testing for model updates:**
+          - Before deploying a new model version, run the full 10K probe suite
+          - Compare against the current production model's probe results
+          - Requirements: No language has accuracy regression >2%. Overall accuracy improves or matches.
+          - If requirements met, proceed with 5% canary deployment for 1 week
+
+          **Language coverage monitoring:**
+          - For each of 100+ languages, track: last probe accuracy, last production request time, detection volume
+          - If a language hasn't been detected in production for 7+ days, investigate (model blind spot? language removed from platform?)
+          - If probe accuracy for a language suddenly drops, check training data quality for that language
+
+          **Dashboard:**
+          - Real-time: Probe accuracy (overall, per tier, per confused pair), latency P50/P99, cache hit rate
+          - Daily: Language distribution, confidence distribution, downstream impact metrics
+          - Weekly: Full accuracy report by language, model comparison metrics, retraining decision
+        next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Language Detection Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive language detection system.
+
+      **Your architecture summary:**
+      - **Problem**: 100+ class classification with extreme latency constraints (<5ms)
+      - **Features**: Character n-grams or character-aware CNN embeddings, with script pre-filtering and context features
+      - **Model**: fastText (sub-millisecond) or lightweight CNN (1-2ms), with specialized classifiers for confused pairs
+      - **Training**: Balanced multi-source dataset, three-phase training with hard example mining, calibrated confidence scores
+      - **Deployment**: In-process library or lightweight gRPC microservice
+      - **Monitoring**: Distribution monitoring with downstream signals or active testing with synthetic probes
+
+      **Strengths of your design:**
+      - Two-stage pipeline (script detection + classifier) maximizes both speed and accuracy
+      - Specialized classifiers for confused language pairs address the hardest cases
+      - Context features (user profile, geo) provide significant accuracy boost on short text
+      - Graceful degradation ensures the system never fails on the critical path
+
+      **Advanced topics to explore:**
+      - **Paragraph-level language segmentation**: Identify language boundaries within mixed-language documents
+      - **Dialect detection**: Distinguish between Brazilian Portuguese and European Portuguese, or Latin American Spanish and Castilian Spanish
+      - **Register detection**: Formal vs informal text in the same language (affects translation quality)
+      - **Transliteration detection and normalization**: Detect Hindi written in Latin script and optionally convert to Devanagari
+      - **Language emergence**: Detect new languages or dialects emerging on the platform (Pidgins, creoles, constructed languages)
+
+      This design demonstrates strong understanding of the trade-offs between latency and accuracy, practical deployment at massive scale, and the nuances of multilingual NLP. Great job!
+    dialogue:
+      - speaker: interviewer
+        text: "Excellent work! You've designed a comprehensive language detection system for 100+ languages at massive scale."
+      - speaker: candidate
+        text: "Thank you! The key constraint was the 5ms latency budget -- it forced creative solutions like the two-stage pipeline and script pre-filtering."
+      - speaker: interviewer
+        text: "Your specialized classifiers for confused language pairs and graceful degradation under load show real production thinking. Great job!"

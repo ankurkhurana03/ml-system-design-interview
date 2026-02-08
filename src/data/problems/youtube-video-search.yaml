@@ -1,0 +1,825 @@
+id: youtube-video-search
+title: "YouTube Video Search"
+description: "Create a search ranking system for YouTube videos based on relevance and freshness."
+companies: ["YouTube/Google", "TikTok", "Netflix"]
+domains: ["NLP", "Ranking/Search", "Recommendation"]
+root: pd_start
+
+nodes:
+  # ============ PROBLEM DEFINITION ============
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design the **search ranking system for YouTube**, the world's largest video platform.
+
+      **Business context:**
+      - YouTube has **~800M+ videos** and **~500 hours of video uploaded every minute**
+      - Users perform **~3-5 billion searches per day** on YouTube
+      - Search is the **second-largest traffic driver** after the homepage recommendation feed
+      - **70% of watch time** comes from algorithmic suggestions (search + recommendations combined)
+      - Revenue: YouTube generated **~$31.5B in ad revenue in 2023**, and search quality directly impacts ad impressions
+
+      **Core problem:** Given a user query (e.g., "how to change a tire"), retrieve and rank the most relevant videos from 800M+ candidates, considering **relevance**, **quality**, **freshness**, and **user preferences**, returning results in **<200ms**.
+
+      **Unique challenges vs. web search:**
+      - **Multimedia understanding**: Videos have visual, audio, text (title/description), and engagement signals -- much richer than web documents
+      - **Freshness pressure**: A video about "latest iPhone review" from 2 years ago is less relevant even if objectively better
+      - **Watch time vs. relevance**: A 30-minute deep dive might be more relevant but a 3-minute summary might better serve the user's intent
+      - **Creator ecosystem**: Ranking decisions directly impact creator livelihoods and the platform's content supply
+      - **Engagement optimization risk**: Optimizing purely for engagement can surface sensational/misleading content
+
+      Let's start by framing the ranking problem.
+    dialogue:
+      - speaker: interviewer
+        text: "Let's design YouTube's video search ranking. What makes this different from web search?"
+      - speaker: candidate
+        text: "The key difference is multimedia content and the engagement-relevance tension. Videos have rich signals beyond text, but we must balance showing engaging content with showing truly relevant results."
+      - speaker: interviewer
+        text: "Good. How does the freshness challenge differ from web search?"
+      - speaker: candidate
+        text: "On YouTube, freshness has a much stronger signal. Users searching for 'Taylor Swift concert' want yesterday's upload, not last year's. But for 'how to tie a tie', an older well-produced video is better."
+    next: pd_formulation
+
+  - id: pd_formulation
+    stage: problem_definition
+    type: question
+    label: "Ranking Objective"
+    speaker: interviewer
+    content: |
+      What should the primary ranking objective be? This is a fundamental design decision that shapes the entire system. YouTube's ranking has historically been controversial -- early systems optimized for clicks (leading to clickbait), then watch time (leading to rabbit holes).
+    dialogue:
+      - speaker: interviewer
+        text: "What should YouTube search optimize for?"
+      - speaker: candidate
+        text: "This is the most important decision. Optimizing for the wrong thing can harm the platform and users."
+      - speaker: interviewer
+        text: "What are the trade-offs between different objectives?"
+    choices:
+      - label: "User satisfaction (multi-objective: relevance + quality + value)"
+        answer: |
+          I'd optimize for **user satisfaction**, defined as a multi-objective function that balances relevance, quality, and value:
+
+          **Satisfaction = f(relevance, quality, watch_satisfaction, long_term_value)**
+
+          **Why not just engagement (watch time)?**
+          - Pure watch time optimization led to the **rabbit hole problem**: YouTube's 2016-2019 era showed that maximizing watch time surfaced conspiratorial, sensational, and misleading content that kept people watching but didn't serve their needs
+          - **Satisfaction != engagement**: A user who watches 45 minutes of conspiracy content isn't necessarily satisfied; a user who watches a 3-minute answer to their question IS satisfied
+
+          **Satisfaction signals:**
+          - **Explicit**: Likes, shares, "not interested" clicks, survey responses ("Was this video helpful?" -- shown to ~0.5% of users)
+          - **Implicit**: Dwell time relative to video length (watching 90% of a video vs. 10%), engagement after watching (subscribe, watch more from creator), NOT returning to search (found what they needed)
+          - **Negative signals**: Dislike, "don't recommend", quick back-button, reformulating the query
+
+          **Multi-objective formulation:**
+          ```
+          score(q, v) = w1 * relevance(q, v) + w2 * quality(v) + w3 * E[satisfaction | watch]
+          ```
+          - **relevance(q, v)**: How well does the video content match the query intent?
+          - **quality(v)**: Production quality, authority, accuracy (not just engagement bait)
+          - **E[satisfaction | watch]**: Expected user satisfaction if they watch this video
+
+          **Guardrails:**
+          - Demote videos with high "regret" signals (user watches then immediately dislikes/reports)
+          - Boost authoritative sources for YMYL queries (health, finance, news)
+          - Freshness boost calibrated by query type
+        next: met_question
+      - label: "Engagement-weighted relevance (watch time + interaction)"
+        answer: |
+          I'd optimize for **engagement-weighted relevance**, using watch time and interaction signals as the primary objective:
+
+          **Why engagement-weighted?**
+          - Engagement is the **most measurable, scalable signal** -- we have billions of data points per day
+          - Watch time correlates with satisfaction at ~0.7 Pearson correlation (YouTube research)
+          - Unlike explicit feedback (sparse), engagement signals are available for every video view
+          - Advertisers care about watch time directly (more watch time = more ad impressions)
+
+          **Primary objective: Expected Watch Time given Relevance**
+          ```
+          score(q, v) = P(click | q, v) * E[watch_time | click, q, v] * relevance_boost(q, v)
+          ```
+
+          **Components:**
+          - **P(click | q, v)**: Click probability given query and video. Captures title/thumbnail attractiveness and perceived relevance
+          - **E[watch_time | click, q, v]**: Expected watch time. A 10-minute video watched for 8 minutes is better than a 2-hour video watched for 3 minutes. Normalized by video length: `fraction_watched = watch_time / video_duration`
+          - **relevance_boost(q, v)**: Multiplicative boost based on query-video text relevance. Prevents pure engagement from overriding topical relevance
+
+          **Engagement signals used:**
+          - Watch time (primary), fraction of video watched
+          - Like/dislike ratio
+          - Share rate, save-to-playlist rate
+          - Comment rate (weighted by sentiment)
+          - Subscribe-after-watch rate (strong positive signal)
+
+          **Guardrails against engagement hacking:**
+          - **Clickbait penalty**: Videos with high CTR but low fraction-watched get demoted (attractive thumbnail but disappointing content)
+          - **Quality floor**: Minimum quality score required for top-10 ranking (filters low-effort content farms)
+          - **Authoritative sources boost** for YMYL (Your Money, Your Life) queries
+          - **Diversity constraint**: Ensure results include different video types (not all the same creator/format)
+        next: met_question
+
+  # ============ METRICS ============
+  - id: met_question
+    stage: metrics
+    type: question
+    label: "Evaluation Metrics"
+    speaker: interviewer
+    content: |
+      How would you measure the quality of YouTube's search ranking? We need both offline metrics (for model development) and online metrics (for A/B testing).
+    dialogue:
+      - speaker: interviewer
+        text: "What metrics capture video search quality?"
+      - speaker: candidate
+        text: "Video search is trickier than web search because there's no single right answer. We need metrics that capture relevance, engagement, and satisfaction."
+      - speaker: interviewer
+        text: "How do you evaluate offline when satisfaction is subjective?"
+    choices:
+      - label: "Offline: NDCG + human ratings; Online: satisfaction surveys"
+        answer: |
+          I'd use a combination of **offline retrieval metrics** and **online satisfaction measurement**:
+
+          **Offline metrics (daily evaluation):**
+          - **NDCG@10** with human-judged relevance: Professional raters evaluate query-video pairs on a 5-point scale (Perfect, Excellent, Good, Fair, Bad). Target: **NDCG@10 > 0.50** across query categories
+          - **Category accuracy@10**: What fraction of top 10 results match the query's topic? Target: >85%
+          - **Freshness-weighted NDCG**: For time-sensitive queries, weight recent videos higher in NDCG computation
+          - **Query coverage**: For what fraction of queries do we return at least 5 relevant results? Target: >95%
+
+          **Online metrics (A/B testing):**
+          - **Search satisfaction rate**: "Was this search helpful?" survey shown to 0.5% of sessions. Target: >75% positive. This is the **ground truth** metric
+          - **Successful search session rate**: Sessions where user: watched >50% of a clicked video AND did not reformulate the query. Target: >60%
+          - **Time to satisfaction**: How many seconds/clicks before the user finds a satisfying result
+          - **Search abandonment rate**: Fraction of searches where user leaves without clicking. Target: <15%
+
+          **Guardrail metrics (must not degrade):**
+          - Watch time per search session (total minutes watched from search results)
+          - Creator diversity in results (avoid monopolizing search by top creators)
+          - Authoritative source rate for YMYL queries
+          - Offensive/harmful content in top 10 rate (must be <0.01%)
+
+          **Why this combination?** Human ratings provide **unbiased relevance measurement** (no position bias, no engagement bias). Online satisfaction surveys measure **real user experience**. Using both avoids the trap of optimizing for click-based metrics that miss true satisfaction.
+        next: data_pipeline
+      - label: "Online engagement metrics with implicit satisfaction signals"
+        answer: |
+          I'd rely primarily on **scalable engagement metrics** augmented with **implicit satisfaction signals**:
+
+          **Primary online metrics:**
+          - **Expected Satisfied Watch Time (ESWT)**: `SUM(watch_time_i * satisfaction_probability_i)` across all results. Combines engagement with predicted satisfaction. This is the **single most important metric**
+          - **Search result CTR**: Click-through rate on search results. Baseline: ~40% for position 1, ~15% for position 5
+          - **Watch-through rate**: Fraction of clicked videos where the user watches >50% of the video. Distinguishes satisfying clicks from clickbait
+          - **Search-to-subscribe rate**: Users who subscribe to a creator after finding them through search. Strong satisfaction signal
+
+          **Implicit satisfaction signals:**
+          - **Positive signals**: Long watch, like, share, add-to-playlist, subscribe, comment (positive sentiment)
+          - **Negative signals**: Quick back-click (<10s), dislike, "not interested", query reformulation, skip to next result immediately
+          - **Aggregate**: `satisfaction_score = weighted_sum(positive_signals) - weighted_sum(negative_signals)`
+
+          **Segment-level tracking:**
+          - **By query type**: Informational ("how to"), navigational ("MrBeast"), discovery ("best movies 2026"), music
+          - **By video category**: Music, gaming, education, news, entertainment, sports
+          - **By user segment**: New users, power users, mobile vs. desktop, geographic region
+          - Alert if any segment degrades >2% while overall metrics are flat
+
+          **Offline proxy metric:**
+          - **Predicted Satisfaction**: Train a satisfaction model on the implicit signals above, use its predictions as offline evaluation metric
+          - Correlate with online satisfaction surveys quarterly to calibrate
+
+          **Why engagement-based?** Scale -- billions of implicit signals per day vs. thousands of survey responses. With proper satisfaction modeling, implicit signals are nearly as informative as explicit ratings.
+        next: data_pipeline
+
+  # ============ DATA ============
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      Let's design the data pipeline. YouTube's data is uniquely rich -- every video is a multimedia document with text, visual, audio, and engagement signals.
+
+      **Data sources:**
+
+      | Source | Data | Volume | Use |
+      |--------|------|--------|-----|
+      | **Video metadata** | Title, description, tags, category, upload date, duration, language | ~800M videos | Primary index |
+      | **Transcripts** | Auto-generated captions (ASR), manual subtitles | ~500M videos have ASR | Content understanding |
+      | **Visual features** | Thumbnail embedding, keyframe embeddings, video-level embedding | Pre-computed for all videos | Visual matching |
+      | **Audio features** | Music detection, speech detection, audio quality signals | Pre-computed | Content classification |
+      | **Engagement logs** | Views, watch time, likes, dislikes, shares, comments, CTR per impression | ~1B watch sessions/day | Training labels + features |
+      | **Search logs** | Queries, clicked results, dwell time, reformulations | ~3-5B searches/day | Training data |
+      | **Creator signals** | Subscriber count, upload frequency, channel authority, community guidelines strikes | Per channel | Quality signals |
+
+      **Content understanding pipeline:**
+      1. **Text processing**: Title + description → tokenize, entity extraction, topic classification, language detection
+      2. **ASR transcription**: Auto-caption generation (Whisper-large quality) → full-text transcript for indexing
+      3. **Visual processing**: Extract keyframes (1/sec), compute embeddings (ViT), thumbnail analysis
+      4. **Audio analysis**: Music detection, speech ratio, audio quality classification
+      5. **Content safety**: Multi-modal safety classifier (text + visual + audio) → flag harmful content
+
+      **Training data for ranking model:**
+      - **Positives**: (query, clicked_video) pairs with watch_time > 50% of video duration
+      - **Negatives**: (query, shown_but_not_clicked) and (query, clicked_but_abandoned) pairs
+      - **Label grading**: satisfaction_label = f(watch_fraction, like/dislike, subscribe_after_watch)
+      - **Volume**: ~500M labeled (query, video, label) tuples per day from search logs
+
+      **Freshness pipeline:**
+      - New video uploaded → metadata indexed within **<5 minutes**
+      - ASR transcript available within **~30 minutes**
+      - Visual features computed within **~1 hour**
+      - Full feature set (engagement signals) available within **~24 hours** (cold start problem)
+    dialogue:
+      - speaker: interviewer
+        text: "What data signals are unique to video search?"
+      - speaker: candidate
+        text: "The multimodal nature -- transcripts, visual features, audio -- plus rich engagement signals like watch time and like/dislike ratios."
+      - speaker: interviewer
+        text: "How do you handle newly uploaded videos that have no engagement data?"
+      - speaker: candidate
+        text: "Cold start. We rely on text signals, creator authority, and content quality predictions for the first 24 hours. Engagement data fills in quickly once the video gets initial impressions."
+      - speaker: interviewer
+        text: "Good. That cold start period is critical for creator experience."
+    next: feat_question
+
+  # ============ FEATURES ============
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Design"
+    speaker: interviewer
+    content: |
+      What features would you design for the YouTube search ranking model? Think about query features, video features, and query-video interaction features.
+    dialogue:
+      - speaker: interviewer
+        text: "What features are most predictive for video search ranking?"
+      - speaker: candidate
+        text: "Video search benefits from multimodal features that text search doesn't have."
+      - speaker: interviewer
+        text: "Which feature category has the highest impact?"
+    choices:
+      - label: "Text + engagement features (proven, high-signal)"
+        answer: |
+          I'd focus on **text matching** and **engagement features** -- these are the highest-signal, most battle-tested features:
+
+          **Query-video text matching (~15 features):**
+          - **BM25 score on title**: Most important single text feature. Exact title match is extremely predictive
+          - **BM25 score on description**: Weaker signal but captures additional context
+          - **BM25 score on transcript**: Full video content matching. Critical for "how to" queries where the answer is spoken
+          - **Tag match score**: Exact and partial tag matching
+          - **Exact query match in title**: Binary feature, very high precision
+          - **Query-title embedding similarity**: BERT-based semantic similarity (handles "car repair" matching "automotive maintenance")
+
+          **Video engagement features (~15 features):**
+          - **View count** (log-scaled): Raw popularity signal
+          - **Click-through rate (CTR)** from impressions: How attractive is this video when shown? Average YouTube CTR is ~4-5%, top videos reach 10%+
+          - **Average watch fraction**: What fraction of the video do viewers watch on average? High watch fraction = satisfying content
+          - **Like/dislike ratio**: Explicit quality signal. Videos with >95% likes are generally high quality
+          - **Subscribe-after-watch rate**: Strong satisfaction indicator
+          - **Share rate**: Viral/valuable content signal
+          - **Comment rate**: Engagement depth (high comment rate = engaging content)
+          - **Average watch time (absolute)**: Longer average watch time is generally positive
+
+          **Context features (~10 features):**
+          - **Video age**: Days since upload (log-scaled). Newer videos get a freshness boost
+          - **Creator subscriber count**: Channel authority signal
+          - **Creator upload consistency**: Channels that upload regularly tend to be higher quality
+          - **Language match**: Query language matches video language
+          - **Query freshness indicator**: Is this a trending/news query? (detected from query volume spike)
+
+          **Why text + engagement?**
+          - **CTR and watch fraction** together explain ~40% of ranking quality in ablation studies
+          - **BM25 title score** explains another ~20%
+          - These ~40 features cover 80% of ranking signal and are all **pre-computable** (no real-time inference needed)
+
+          Total: ~40 features, all pre-computable, no GPU needed for feature serving.
+        next: mod_question
+      - label: "Multimodal features (text + visual + audio + transcript)"
+        answer: |
+          I'd leverage **all available modalities** for comprehensive video understanding:
+
+          **Text features (~15 features):**
+          - BM25 scores on title, description, tags, transcript (4 features)
+          - Semantic similarity (BERT) between query and title/description (2 features)
+          - Named entity overlap between query and video metadata
+          - Query-title exact match, partial match, fuzzy match (3 features)
+          - Topic model alignment between query topic and video topic
+
+          **Visual features (~10 features):**
+          - **Thumbnail quality score**: Trained classifier predicting CTR from thumbnail alone. High-quality thumbnails correlate with better content quality
+          - **Thumbnail-query relevance**: CLIP similarity between query text and thumbnail image. If query is "mountain biking" and thumbnail shows a bike on a mountain, that's a strong signal
+          - **Video content classification**: Scene classification from keyframes (outdoor, indoor, tutorial, presentation, vlog, gaming)
+          - **Visual production quality**: Resolution, stability, lighting quality (learned from engagement data)
+          - **Text-in-thumbnail detection**: OCR on thumbnail -- does it contain the query terms?
+
+          **Audio/speech features (~8 features):**
+          - **Speech clarity score**: ASR confidence as a proxy for audio quality
+          - **Music-to-speech ratio**: Tutorials should have more speech; music videos should have more music. Match expectation to query type
+          - **Speaking pace**: Educational content benefits from moderate pace
+          - **Audio quality classification**: Professional studio vs. phone recording
+
+          **Transcript-based features (~8 features):**
+          - **Query term density in transcript**: How frequently do query terms appear in the spoken content?
+          - **First mention position**: How early in the video is the query topic discussed? (Earlier = more relevant)
+          - **Answer span detection**: For "how to" queries, detect if the transcript contains an answer passage
+          - **Transcript-query semantic similarity**: BERT embedding of relevant transcript passages vs. query
+          - **Topic coverage**: Does the transcript thoroughly cover the query topic or just mention it in passing?
+
+          **Personalization features (~10 features):**
+          - User's watch history in this category
+          - User's engagement with this creator
+          - User's preferred video duration
+          - User's language and region
+
+          **Why multimodal?**
+          - A video about "quiet mechanical keyboards" might have a bad title but excellent audio demonstrations and visual typing tests. Multimodal features catch this
+          - Transcript features add **~5-8% NDCG improvement** over text-only (YouTube's published research)
+          - Visual features help detect quality and filter clickbait (misleading thumbnails)
+          - Total: ~50+ features, some require GPU-computed embeddings (pre-computed offline)
+        next: mod_question
+
+  # ============ MODEL ============
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Ranking Model"
+    speaker: interviewer
+    content: |
+      What model architecture would you use for the YouTube video search ranker? Remember the constraints: <200ms latency, 3-5 billion searches per day, ranking ~1000 candidate videos.
+    dialogue:
+      - speaker: interviewer
+        text: "What model would you use for the ranking stage?"
+      - speaker: candidate
+        text: "We need a model that handles heterogeneous features, learns from massive click data, and serves in real time."
+      - speaker: interviewer
+        text: "How does the YouTube recommendation system paper influence your design?"
+    choices:
+      - label: "Deep & Cross Network (DCN-V2) with multi-task learning"
+        answer: |
+          I'd use **DCN-V2 (Deep & Cross Network)** with **multi-task learning**, inspired by YouTube's published recommendation architecture:
+
+          **Architecture:**
+          ```
+          Input Features
+          (text scores, engagement, context, embeddings)
+                │
+                ▼
+          ┌─────────────────┐
+          │ Embedding Layer  │ (sparse features → dense)
+          │ Query emb (64)   │
+          │ Video emb (128)  │
+          │ Creator emb (32) │
+          └────────┬────────┘
+                   │
+          ┌────────┼────────┐
+          │        │        │
+          Cross    Deep     Cross
+          Network  Network  Network
+          (3 layers) (256→128→64) (explicit interactions)
+          │        │        │
+          └────────┼────────┘
+                   │
+          ┌────────┼────────────┐
+          │        │            │
+          Task 1   Task 2      Task 3
+          P(click) E[watch_time] P(satisfaction)
+          ```
+
+          **Why DCN-V2?**
+          - **Explicit feature crosses**: The Cross Network learns bounded-degree feature interactions WITHOUT manual feature engineering. Critical for capturing interactions like "query_match * video_age * user_history"
+          - **Multi-task learning**: Jointly predict click probability, watch time, and satisfaction. Each task reinforces the others through shared representations
+          - **Proven at scale**: Google/YouTube uses similar architectures for recommendations (published in RecSys papers)
+          - **Efficient inference**: ~3M params, <5ms per 1000 candidates on CPU
+
+          **Multi-task formulation:**
+          - **Task 1 -- P(click | q, v)**: Binary classification, log loss. Captures relevance + attractiveness
+          - **Task 2 -- E[watch_time | click]**: Regression (log-transformed minutes). Captures content quality
+          - **Task 3 -- P(satisfaction | watch)**: Binary classification based on satisfaction labels (like, long watch, subscribe). Captures user value
+
+          **Final score:**
+          ```
+          score(q, v) = P(click) * E[watch_time]^0.7 * P(satisfaction)^0.5
+          ```
+          The exponents control the trade-off: we want watch time but satisfaction even more.
+
+          **Training:**
+          - Optimizer: Adagrad with learning rate 0.01
+          - Batch size: 4096, ~500M examples per training run
+          - Daily retraining with last 14 days of data
+          - Evaluation on held-out day (next day prediction)
+        next: train_pipeline
+      - label: "LambdaMART + BERT re-ranker (two-stage)"
+        answer: |
+          I'd use a **two-stage approach**: LambdaMART for efficient initial ranking, followed by a BERT-based re-ranker for the top results:
+
+          **Stage 1 -- LambdaMART (Top 1000 → Top 100, ~5ms):**
+          - **Algorithm**: LightGBM with lambdarank objective
+          - **Features**: ~40 pre-computed features (BM25 scores, engagement metrics, context)
+          - **Why LambdaMART for stage 1?**
+            - Scores 1000 candidates in <5ms on CPU
+            - Directly optimizes NDCG (learning-to-rank)
+            - Handles heterogeneous features naturally
+            - Feature importance via SHAP for interpretability
+
+          **Stage 2 -- BERT re-ranker (Top 100 → Top 20, ~30ms):**
+          ```
+          Input: [CLS] query [SEP] video_title | video_description_snippet [SEP]
+                                    │
+                            BERT-base (12 layers, 110M params)
+                                    │
+                            [CLS] → FC(768 → 128) → FC(128 → 1)
+                                    │
+                            Relevance Score
+          ```
+
+          **Why two-stage?**
+          - LambdaMART handles **scale** (1000 candidates cheaply)
+          - BERT handles **semantic understanding** (top 100 need deeper analysis)
+          - Combined: better relevance than either alone
+
+          **BERT re-ranker enhancements:**
+          - **Transcript injection**: Append top-matching transcript passage to input
+          - **Multi-field**: Separate attention over title, description, transcript fields
+          - **Distillation**: Distill from BERT-large teacher to BERT-tiny (4 layers) for serving speed
+
+          **Final scoring:**
+          ```
+          score(q, v) = alpha * bert_score + (1-alpha) * lambdamart_score + engagement_boost
+          ```
+          alpha tuned by query type: informational queries (alpha=0.7, more BERT), navigational (alpha=0.3, more engagement).
+
+          **Training data:**
+          - LambdaMART: 30 days of click data, ~500M examples
+          - BERT: Fine-tuned on MS MARCO first, then YouTube-specific (query, video_text, satisfaction_label) pairs
+
+          **Trade-off vs. DCN-V2:**
+          - (+) More interpretable (can explain LambdaMART features and BERT attention)
+          - (+) BERT captures deep semantics
+          - (-) More complex serving (two models, GPU needed for BERT)
+          - (-) Multi-task learning in DCN-V2 is more elegant for balancing multiple objectives
+        next: train_pipeline
+
+  # ============ TRAINING ============
+  - id: train_pipeline
+    stage: training
+    type: info
+    label: "Training Pipeline"
+    speaker: interviewer
+    content: |
+      Let's design the training pipeline for the video search ranking model.
+
+      **Training data construction:**
+
+      **Label engineering (critical):**
+      The quality of labels determines everything. For video search, we construct **graded relevance labels** from user behavior:
+
+      | Behavior | Label | Interpretation |
+      |----------|-------|---------------|
+      | Click + watch >80% + like | 4 (Excellent) | Highly satisfying result |
+      | Click + watch 50-80% | 3 (Good) | Relevant and engaging |
+      | Click + watch 20-50% | 2 (Fair) | Somewhat relevant |
+      | Click + watch <20% | 1 (Poor) | Clickbait or wrong result |
+      | Impression, no click | 0 (Bad) | Not attractive/relevant |
+
+      **Position bias correction:**
+      - YouTube search results are heavily position-biased (position 1 gets ~30% of clicks, position 10 gets ~2%)
+      - **Method 1**: Result randomization for 0.5% of traffic (swap positions 1-5 randomly)
+      - **Method 2**: Position as a training feature, dropped at inference time
+      - **Method 3**: Propensity-weighted loss (weight each example by 1/P(click | position))
+
+      **Training schedule:**
+      - **Daily retraining** with sliding 14-day window
+      - Pipeline: Click logs (Kafka) → Label creation (Spark, ~2 hours) → Feature extraction (Spark, ~3 hours) → Training (GPU cluster, ~4 hours) → Evaluation (~1 hour) → Deploy
+      - **Evaluation gate**: New model must improve NDCG@10 by >0.3% on held-out queries and pass all guardrails
+      - **Canary deployment**: Serve 2% of traffic for 4 hours, monitor all metrics before full rollout
+
+      **Cold start for new videos:**
+      - Videos <24 hours old have no engagement data
+      - Use **text-only features** (BM25 title/description) + **creator authority** (channel subscribers, historical video quality) + **content quality prediction** (trained model predicts expected engagement from visual + audio features)
+      - After 24h: initial engagement data available; after 7 days: reliable engagement features
+
+      **Handling seasonal patterns:**
+      - Keep 14-day training window (captures recent patterns)
+      - For known seasonal queries ("Super Bowl", "Christmas recipes"), inject historical seasonal data during appropriate periods
+      - **Query-type specific models**: Music queries, tutorial queries, news queries may benefit from different feature weights
+    dialogue:
+      - speaker: interviewer
+        text: "How do you label training data for video search?"
+      - speaker: candidate
+        text: "Graded labels from user behavior: watch fraction and explicit signals like likes determine label quality."
+      - speaker: interviewer
+        text: "How do you handle position bias? It's extreme in video search."
+      - speaker: candidate
+        text: "Three methods: result randomization experiments for ground truth, position as a training feature dropped at inference, and propensity-weighted loss functions."
+      - speaker: interviewer
+        text: "The cold start problem for new videos seems critical."
+    next: deploy_question
+
+  # ============ DEPLOYMENT ============
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Serving Architecture"
+    speaker: interviewer
+    content: |
+      How would you architect the serving system for YouTube video search? 3-5 billion searches per day, <200ms latency, 800M+ videos.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you serve YouTube search at this scale?"
+      - speaker: candidate
+        text: "Multi-stage pipeline with aggressive pruning at each stage. The key is that most of the 800M videos are irrelevant to any given query."
+      - speaker: interviewer
+        text: "How do you handle the freshness requirement?"
+    choices:
+      - label: "Multi-stage cascade with early termination"
+        answer: |
+          I'd use a **multi-stage cascade** where each stage narrows the candidate set while increasing model complexity:
+
+          **Architecture:**
+          ```
+          Query
+            │
+            ▼
+          Stage 0: Query Understanding (~5ms)
+          [spell check, entity detection, intent classification, query expansion]
+            │
+            ▼
+          Stage 1: Candidate Retrieval (~20ms)
+          [Inverted index (BM25) + ANN (dense retrieval) → Top 5000]
+            │
+            ▼
+          Stage 2: Lightweight Scoring (~10ms)
+          [LambdaMART with ~20 features → Top 500]
+            │
+            ▼
+          Stage 3: Full Model Scoring (~15ms)
+          [DCN-V2 with ~50 features → Top 50]
+            │
+            ▼
+          Stage 4: Post-processing (~5ms)
+          [Freshness boost, diversity, business rules → Top 20]
+            │
+            ▼
+          Results returned
+          Total: ~55ms server-side
+          ```
+
+          **Stage 1 details (candidate retrieval):**
+          - **Inverted index**: Sharded across ~5000 machines, queries broadcast to all shards
+          - **Fields indexed**: Title (weight 5x), description (2x), tags (1x), transcript (1x)
+          - **Dense retrieval**: Bi-encoder embeddings (query → 768-dim, video → 768-dim), ANN search with FAISS
+          - **Merge**: RRF fusion of BM25 and dense retrieval results
+
+          **Early termination optimization:**
+          - If Stage 2 has >10 high-confidence results (score > threshold), skip Stage 3 for tail results
+          - For navigational queries ("MrBeast"), direct match to channel/video → skip most of the pipeline
+          - For exact title matches, apply a large boost and reduce later-stage processing
+
+          **Freshness handling:**
+          - **Fresh index shard**: Videos uploaded in last 4 hours stored in a separate, smaller index
+          - Fresh index searched in parallel with main index
+          - For trending queries (detected by QPS spike), fresh index results get a 2x boost
+
+          **Scaling:**
+          - ~50,000 machines for the index and serving infrastructure
+          - Auto-scaling based on QPS (30% headroom for traffic spikes)
+          - Geographic distribution across 10+ data centers worldwide
+        next: deploy_freshness_diversity
+      - label: "Two-tower embedding retrieval with GPU re-ranking"
+        answer: |
+          I'd use a **two-tower embedding model** for retrieval followed by **GPU-accelerated re-ranking**:
+
+          **Architecture:**
+          ```
+          Query
+            │
+            ▼
+          Query Tower (~3ms)
+          [BERT-tiny: query text + user context → 256-dim embedding]
+            │
+            ▼
+          ANN Search (~10ms)
+          [ScaNN over 800M pre-computed video embeddings → Top 1000]
+            │
+            ▼
+          GPU Re-ranking (~20ms)
+          [Cross-encoder on top 200 → Top 50]
+            │
+            ▼
+          Post-processing (~5ms)
+          [Freshness, diversity, business rules → Top 20]
+            │
+            ▼
+          Results
+          Total: ~38ms server-side
+          ```
+
+          **Two-tower retrieval:**
+          - **Query tower**: BERT-tiny (2 layers, 4M params) encodes query + user context → 256-dim
+          - **Video tower**: BERT-tiny encodes video title + description + features → 256-dim (pre-computed)
+          - **Training**: Contrastive learning on (query, clicked_video) pairs with in-batch negatives
+          - **ANN index**: ScaNN with learned quantization, searches 800M vectors in ~10ms
+
+          **GPU re-ranking cluster:**
+          - **Cross-encoder**: Full BERT-base processes (query, video_title + transcript_snippet) pairs
+          - Batch 200 candidates in one GPU forward pass → ~20ms on A100
+          - Scores capture deep query-video interaction that two-tower misses
+          - ~200 A100 GPUs across data centers handle peak load
+
+          **Why this approach?**
+          - **Two-tower retrieval** is simpler than maintaining a massive inverted index
+          - No need for query expansion / synonym handling -- embeddings capture semantics natively
+          - **GPU re-ranking** provides the highest relevance quality for the results users actually see
+          - End-to-end neural system is more amenable to fine-tuning and improvement
+
+          **Trade-off:**
+          - ANN search over 800M vectors is expensive in memory (~200GB for the index)
+          - Two-tower embeddings miss fine-grained lexical matching (exact title matches)
+          - GPU infrastructure for re-ranking adds cost (~$0.002 per query)
+          - Hybrid: Add a lightweight BM25 check in post-processing to boost exact matches
+        next: deploy_freshness_diversity
+
+  - id: deploy_freshness_diversity
+    stage: deployment
+    type: info
+    label: "Freshness & Diversity"
+    speaker: interviewer
+    content: |
+      Two critical post-ranking concerns for YouTube search: **freshness** and **result diversity**.
+
+      **Freshness strategy:**
+
+      **Query-Deserves-Freshness (QDF) detection:**
+      - Monitor query volume in real-time. If a query's volume spikes >3x above its 7-day average, flag as QDF
+      - Examples: "earthquake today", "election results", "new iPhone review"
+      - QDF queries get a **freshness multiplier**: `score *= freshness_boost(video_age)`
+      - Freshness boost decays exponentially: `boost = max(1.0, 3.0 * exp(-age_hours / 24))`
+
+      **Freshness tiers by query type:**
+
+      | Query Type | Freshness Importance | Example |
+      |-----------|---------------------|---------|
+      | Breaking news | Critical (hours matter) | "earthquake today" |
+      | Trending topic | High (days matter) | "new iPhone review" |
+      | Seasonal | Medium (weeks matter) | "Super Bowl highlights" |
+      | Evergreen | Low (quality > freshness) | "how to tie a tie" |
+      | Music | Very low | "Bohemian Rhapsody" |
+
+      **Result diversity:**
+      To avoid showing 10 videos from the same creator or 10 variations of the same content:
+
+      **Diversity constraints:**
+      1. **Creator diversity**: Maximum 2 videos from the same channel in top 10
+      2. **Content diversity**: Cluster results by visual/text similarity; ensure at least 3 distinct clusters in top 10
+      3. **Format diversity**: Mix video lengths (short-form + long-form), styles (tutorial, review, vlog)
+      4. **Perspective diversity**: For opinion/news queries, show multiple viewpoints
+
+      **Implementation: MMR (Maximal Marginal Relevance)**
+      ```
+      MMR(v) = lambda * relevance(q, v) - (1-lambda) * max_sim(v, selected_results)
+      ```
+      Select results iteratively: each new result maximizes relevance while minimizing similarity to already-selected results. lambda=0.7 balances relevance and diversity.
+
+      **Creator fairness:**
+      - Avoid "rich get richer" dynamics where top creators monopolize search
+      - Give emerging creators with quality content a chance to appear in results
+      - Track creator representation metrics across search results
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle freshness for different types of queries?"
+      - speaker: candidate
+        text: "Query-Deserves-Freshness detection: spike analysis on query volume triggers freshness boosts. The boost strength depends on query type -- news queries need minute-level freshness, evergreen queries don't."
+      - speaker: interviewer
+        text: "What about diversity? Users don't want 10 identical results."
+      - speaker: candidate
+        text: "MMR-based diversification: iteratively select results that are relevant but dissimilar to already-selected results. Plus hard constraints on creator diversity."
+    next: mon_question
+
+  # ============ MONITORING ============
+  - id: mon_question
+    stage: monitoring
+    type: question
+    label: "Monitoring & Quality"
+    speaker: interviewer
+    content: |
+      What monitoring would you set up for YouTube's video search system?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you monitor search quality at YouTube's scale?"
+      - speaker: candidate
+        text: "We need real-time system monitoring, quality signal tracking, and content safety monitoring."
+      - speaker: interviewer
+        text: "How do you detect quality regressions early?"
+    choices:
+      - label: "Real-time quality monitoring with automated rollback"
+        answer: |
+          I'd build a **real-time quality monitoring system** with automated guardrails:
+
+          **System health (real-time alerts):**
+
+          | Metric | Alert Threshold | Action |
+          |--------|----------------|--------|
+          | Search latency P99 | >200ms | Auto-scale, page on-call |
+          | Index freshness | >15 min stale for fresh shard | Alert indexing team |
+          | Null result rate | >3% | Check index health |
+          | Model serving errors | >0.01% | Auto-rollback to previous model |
+          | Feature pipeline staleness | Any feature >1h stale | Alert data engineering |
+
+          **Quality monitoring (hourly):**
+          - **Canary queries**: Run ~5000 queries every hour through production, compare results against known-good baseline
+          - **NDCG tracking**: Compute NDCG on canary set. Alert if drops >1% vs. 24h average
+          - **Watch-through rate from search**: Track hourly. Drop indicates ranking is surfacing unsatisfying content
+          - **Satisfaction score** from implicit signals: Moving average, alert on >2% degradation
+
+          **Content safety monitoring:**
+          - Real-time check of top-10 search results against content safety classifiers
+          - Alert if any top-10 result has safety score < threshold
+          - Special monitoring for YMYL queries (health, finance, news) -- higher safety bar
+
+          **Automated rollback triggers:**
+          - NDCG drops >2% on canary set for >30 minutes → automatic rollback
+          - Satisfaction score drops >3% for >1 hour → automatic rollback
+          - Any safety guardrail violation in top-3 results → immediate rollback + page on-call
+
+          **Post-mortem process:**
+          - Every ranking regression incident gets a post-mortem within 48 hours
+          - Root cause analysis: Was it model, data, features, or infrastructure?
+          - Preventive measures added to automated checks
+        next: mon_terminal
+      - label: "A/B testing framework with long-term health metrics"
+        answer: |
+          I'd build a comprehensive **A/B testing framework** focused on both short-term quality and **long-term platform health**:
+
+          **Always-on experimentation:**
+          - Every ranking change goes through A/B testing (no exceptions)
+          - **1% holdout**: Permanently reserve 1% of users for the previous quarter's model. Detects slow degradation
+          - **Control group**: 10% of users always get the current production model (for comparison with experiments)
+          - **Treatment groups**: Remaining ~89% available for experiments (usually 2-3 concurrent)
+
+          **Short-term metrics (measured during experiment, 7-14 days):**
+          - **Primary**: Expected Satisfied Watch Time from search results
+          - **Secondary**: Search CTR, watch-through rate, search session length
+          - **Guardrails**: Latency, null rate, safety, creator diversity
+
+          **Long-term health metrics (measured quarterly):**
+          - **User retention**: Do users who experience the new ranking come back more? Search feature DAU/MAU ratio
+          - **Creator ecosystem health**: Are diverse creators getting traffic from search? Or is it concentrating?
+          - **Content quality trend**: Is the average quality of top-ranked content improving over time?
+          - **Trust indicators**: Decrease in "not interested" clicks, decrease in misleading content reports
+
+          **Why long-term metrics matter:**
+          - Short-term engagement can increase while long-term trust decreases (the sensational content problem)
+          - YouTube learned this the hard way: optimizing for watch time led to conspiracy content surfacing, which drove short-term engagement but damaged user trust and advertiser confidence
+
+          **Statistical rigor:**
+          - **Bayesian analysis**: Compute posterior probability of improvement rather than just p-values
+          - **Sequential testing**: Can make decisions before fixed experiment end date (faster iteration)
+          - **Heterogeneous treatment effects**: Check if the model helps/hurts different user segments differently
+          - **Network effects**: Account for the fact that ranking changes affect creator behavior (content supply)
+
+          **Quality review process:**
+          - **Weekly quality council**: Review all active experiments with senior ML and product leaders
+          - **Side-by-side review**: Human raters compare old vs. new results for sampled queries
+          - **Responsible AI review**: Check for bias in ranking across content categories, creator demographics, user segments
+        next: mon_terminal
+
+  # ============ TERMINAL ============
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Design Complete"
+    speaker: interviewer
+    content: |
+      Outstanding work! You've designed a comprehensive **YouTube Video Search** ranking system.
+
+      **Your design covers:**
+      - **Ranking objective**: User satisfaction (multi-objective) or engagement-weighted relevance
+      - **Metrics**: NDCG + satisfaction surveys or engagement metrics with implicit satisfaction signals
+      - **Data pipeline**: Multimodal content understanding (text, visual, audio, transcript) with rich engagement signals
+      - **Features**: Text + engagement features or full multimodal features
+      - **Model**: DCN-V2 with multi-task learning or LambdaMART + BERT two-stage ranker
+      - **Training**: Graded satisfaction labels from user behavior, position bias correction, cold start handling
+      - **Deployment**: Multi-stage cascade or two-tower + GPU re-ranking
+      - **Freshness**: QDF detection with query-type-adaptive freshness boosting
+      - **Diversity**: MMR-based diversification with creator fairness constraints
+      - **Monitoring**: Real-time quality with automated rollback or A/B testing with long-term health metrics
+
+      **Key design strengths:**
+      - Balance between engagement optimization and user satisfaction (avoiding the "rabbit hole" trap)
+      - Multimodal understanding leverages YouTube's unique data richness
+      - Cold start handling for new videos protects creator experience
+      - Freshness strategy adapts to query type (news vs. evergreen)
+      - Creator ecosystem awareness in ranking decisions
+
+      **Areas for further exploration:**
+      - Short-form video search (YouTube Shorts -- different engagement patterns)
+      - Multimodal queries ("find a video showing how to do this" + image)
+      - Cross-language search (query in English, find Spanish tutorials)
+      - Conversational search follow-ups ("show me something more advanced")
+
+      This demonstrates deep understanding of video search, the engagement-satisfaction trade-off, and responsible ML design for a platform that impacts billions of users. Exceptional design!
+    dialogue:
+      - speaker: interviewer
+        text: "Excellent design. You handled the engagement vs. satisfaction tension really well. Final thoughts?"
+      - speaker: candidate
+        text: "The biggest lesson from YouTube's history is that short-term engagement optimization can damage long-term trust. I'd build in satisfaction guardrails from day one and monitor creator ecosystem health alongside user metrics."
+      - speaker: interviewer
+        text: "That's exactly the right lesson. Well done!"

@@ -1,0 +1,760 @@
+id: ticket-classification
+title: "Jira Bug Ticket Classification"
+description: "Create a system to automatically classify Jira bug tickets to the correct engineering team."
+companies: ["Atlassian", "Google", "Microsoft"]
+domains: ["NLP", "Classification"]
+root: pd_start
+
+nodes:
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design an ML system to **automatically classify Jira bug tickets** and route them to the correct engineering team.
+
+      **Business context:**
+      - A large software company with **15 engineering teams** (frontend, backend, payments, auth, mobile, infra, data, ML, search, notifications, billing, integrations, admin, API, DevOps)
+      - Receives **800-1,200 bug tickets per day** from QA testers, customer support, internal dogfooding, and automated monitoring
+      - Currently, a **triage team of 4 people** manually reads each ticket and assigns it to a team. This takes an average of **45 minutes per ticket** during business hours.
+      - **30% of tickets are misrouted** on first assignment, causing a re-triage that delays resolution by an average of 8 hours
+      - Ticket backlog grows by ~200 tickets/day during high-bug periods (post-release)
+
+      **Goal:** Automatically classify 70-80% of incoming tickets with >85% accuracy, reducing triage time from 45 minutes to <1 minute and cutting misrouting from 30% to <10%.
+
+      **Available data:** 3 years of historical tickets (~500K total) with team assignments, resolution data, and full text (title, description, steps to reproduce, logs, screenshots).
+    dialogue:
+      - speaker: interviewer
+        text: "Today we'll design a system to automatically route Jira bug tickets to the correct engineering team. The company has 15 teams and gets 800-1200 tickets daily."
+      - speaker: candidate
+        text: "What's the current process and what's broken about it?"
+      - speaker: interviewer
+        text: "A triage team of 4 manually reads and assigns each ticket. It takes 45 minutes per ticket, and 30% are misrouted, causing 8-hour delays. The goal is to automate 70-80% of assignments with 85%+ accuracy."
+      - speaker: candidate
+        text: "That's a significant time and accuracy improvement. What data do we have to work with?"
+      - speaker: interviewer
+        text: "3 years of historical tickets -- about 500K total -- with team assignments, resolution data, and full text including titles, descriptions, and logs."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: info
+    label: "Problem Formulation"
+    speaker: candidate
+    content: |
+      Let me frame the ML problem clearly.
+
+      **This is a multi-class text classification problem** with 15 classes (one per engineering team). The input is the ticket text (title + description + metadata), and the output is the predicted team.
+
+      **Important nuances:**
+
+      **Label quality concern:** The "ground truth" team assignment in historical data may not be the correct team. 30% misrouting means many historical labels are wrong. We need to use the **final resolved team** (after re-triage), not the initial assignment, as the label.
+
+      **Class characteristics:**
+      - Some teams are catch-alls: "Backend" and "Infra" receive disproportionate tickets
+      - Some teams are very specific: "Payments" and "Auth" have distinctive vocabulary
+      - Cross-cutting bugs exist: A payment authentication bug could go to Payments, Auth, or Backend
+      - Some tickets genuinely belong to multiple teams (multi-label problem)
+
+      **Input text characteristics:**
+      - **Title**: 5-15 words, often cryptic ("Login fails on prod")
+      - **Description**: 50-500 words, variable quality. May include stack traces, error messages, reproduction steps
+      - **Attachments**: Screenshots, log files (text extractable), video recordings (not processable in V1)
+      - **Metadata**: Reporter, component, priority, labels, affected version, environment
+
+      **System requirements:**
+      - Prediction latency: <5 seconds (to provide instant suggestion as user creates ticket)
+      - Confidence threshold: Only auto-assign when model confidence >0.85. Below that, suggest top-3 with probabilities.
+      - Feedback loop: If engineer re-assigns, that's an implicit label for retraining.
+    dialogue:
+      - speaker: candidate
+        text: "This is multi-class classification with 15 classes. A critical subtlety: we need to use the final resolved team as the label, not the initial assignment, since 30% of initial assignments are wrong."
+      - speaker: interviewer
+        text: "Good catch. What about tickets that span multiple teams?"
+      - speaker: candidate
+        text: "Some tickets are genuinely multi-team -- a payment auth bug could go to Payments, Auth, or Backend. I'd frame this as multi-label for those, or pick the primary team and note secondary teams."
+      - speaker: interviewer
+        text: "How would you handle low-confidence predictions?"
+      - speaker: candidate
+        text: "Only auto-assign above 0.85 confidence. Below that, suggest top-3 teams with probabilities and let the triage team decide."
+    next: met_question
+
+  - id: met_question
+    stage: metrics
+    type: question
+    label: "Evaluation Metrics"
+    speaker: interviewer
+    content: |
+      What metrics would you use to evaluate this classification system?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you measure success for this system? Both ML metrics and business metrics."
+      - speaker: candidate
+        text: "I need to balance classification accuracy with practical impact on the triage workflow."
+      - speaker: interviewer
+        text: "Walk me through your choices."
+    choices:
+      - label: "Top-1 and Top-3 accuracy with coverage"
+        answer: |
+          I'd use a **combined accuracy and coverage metric** that reflects the two-tier system (auto-assign vs suggest).
+
+          **Primary metrics:**
+          - **Top-1 accuracy**: When the model's top prediction is correct. Target: >85%. This measures auto-assignment quality.
+          - **Top-3 accuracy**: When the correct team is in the model's top 3 predictions. Target: >95%. This measures suggestion quality for low-confidence cases.
+          - **Auto-assignment coverage**: Percentage of tickets where model confidence exceeds 0.85 threshold. Target: 70-80%. This measures how much manual triage is eliminated.
+
+          **Combined metric: Effective accuracy** = (coverage x top-1 accuracy) + ((1 - coverage) x top-3 accuracy x human selection accuracy)
+          Example: (0.75 x 0.88) + (0.25 x 0.96 x 0.95) = 0.66 + 0.23 = **0.89 effective accuracy**
+
+          **Per-team breakdown:**
+          - Track accuracy separately for each of the 15 teams
+          - Some teams (Payments, Auth) have distinctive vocabulary and should have >90% accuracy
+          - Some teams (Backend, Infra) are catch-alls and will have lower accuracy (~75%)
+          - Focus improvement efforts on low-accuracy teams
+
+          **Confusion analysis:**
+          - Build a 15x15 confusion matrix to identify which teams are confused with each other
+          - Common confusions: Backend<->API, Payments<->Billing, Auth<->Frontend
+          - These confusions inform feature engineering and potential team taxonomy changes
+
+          **Business metric tie-in:**
+          - Track re-assignment rate (tickets moved after auto-assignment). Target: <10% (currently 30%).
+          - Track mean time from ticket creation to correct team assignment. Target: <5 minutes (currently 45 min + 8 hrs for misroutes).
+        next: met_detail
+      - label: "Macro F1 to handle class imbalance"
+        answer: |
+          I'd use **macro F1 score** as the primary metric to ensure the model performs well across all 15 teams, not just the high-volume ones.
+
+          **Why macro F1?**
+          The ticket distribution is highly skewed. Backend might receive 25% of all tickets while Notifications receives only 3%. Accuracy alone would be misleading -- a model that always predicts "Backend" gets 25% accuracy but is useless. Macro F1 weights all classes equally, forcing the model to learn small teams too.
+
+          **Primary metrics:**
+          - **Macro F1**: Average F1 across all 15 teams (each team weighted equally). Target: >0.80.
+          - **Per-class precision**: For each team, what percentage of tickets classified to that team actually belong there? Low precision = team wastes time on wrong tickets. Target: >0.80 per team.
+          - **Per-class recall**: For each team, what percentage of their tickets are correctly routed to them? Low recall = team's bugs sit in wrong queue. Target: >0.80 per team.
+
+          **Class-specific thresholds:**
+          - Different teams have different cost profiles for misclassification
+          - **Security team**: High recall is critical (missed security bugs = vulnerability risk). Set lower confidence threshold for auto-routing security-related tickets.
+          - **Payments team**: High precision is critical (wrong tickets disrupt payment operations). Set higher confidence threshold.
+          - Tune per-class thresholds to optimize overall business impact
+
+          **Evaluation protocol:**
+          - Train/val/test split: Temporal (train on months 1-30, validate on 31-33, test on 34-36). Never random split -- ticket language evolves.
+          - Cross-validation: 5-fold temporal CV for hyperparameter tuning
+          - Inter-rater baseline: Have 3 triage team members independently classify 200 tickets. Their agreement sets the human ceiling (~85% for this task).
+        next: met_detail
+
+  - id: met_detail
+    stage: metrics
+    type: info
+    label: "Metrics Deep Dive"
+    speaker: interviewer
+    content: |
+      Good metric choices. Let me add practical considerations.
+
+      **The human ceiling is lower than you'd think:**
+      - Even experienced triage team members disagree on ~15% of tickets
+      - Cross-cutting bugs (payment + auth, frontend + mobile) have no single "correct" team
+      - **Practical implication**: 85% model accuracy may match human performance. Don't over-optimize.
+
+      **Calibration matters for thresholding:**
+      - The auto-assign threshold (0.85) only works if probabilities are well-calibrated
+      - A model reporting 0.90 confidence should be correct ~90% of the time
+      - Use **temperature scaling** or **Platt scaling** on the validation set to calibrate
+      - Plot reliability diagrams: predicted confidence vs actual accuracy
+      - If poorly calibrated, the coverage/accuracy trade-off breaks down
+
+      **Online metrics to track:**
+      - **Re-assignment rate**: If an auto-assigned ticket gets moved to a different team. This is the gold-standard online accuracy signal. Target: <10%.
+      - **Time-to-first-response**: From ticket creation to first engineer comment. Should drop from hours to minutes.
+      - **Triage team utilization**: How much time does the triage team spend on tickets? Target: 70% reduction.
+      - **Engineer satisfaction**: Survey: "Are tickets assigned to your team usually correct?" Quarterly.
+
+      Let's discuss the data pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "Even experienced triage people disagree on 15% of tickets. So 85% model accuracy may match human performance."
+      - speaker: candidate
+        text: "Calibration is important -- the auto-assign threshold only works if the model's confidence scores are meaningful."
+      - speaker: interviewer
+        text: "Exactly. Use temperature scaling to calibrate. Also track re-assignment rate as the ground truth online accuracy signal. Let's discuss data."
+    next: data_pipeline
+
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: candidate
+    content: |
+      Let me design the data pipeline for training and serving.
+
+      **Historical data extraction (training):**
+      - Export 500K tickets from Jira via REST API or database export
+      - For each ticket, extract:
+        - **Text**: Title, description (markdown/HTML), comments (first 3 only -- later comments are resolution, not diagnosis)
+        - **Metadata**: Reporter, component, priority, labels, affected version, environment, creation date
+        - **Label**: Final resolved team (not initial assignment!). Use the last team the ticket was assigned to before resolution.
+        - **Resolution**: Was it resolved, won't fix, duplicate, or invalid? Filter out "duplicate" and "invalid" tickets.
+
+      **Data quality issues to address:**
+      - **Label noise**: Even final assignments may be wrong (~5% estimated). Use label smoothing during training.
+      - **Team restructuring**: Teams have been reorganized over 3 years. Map old team names to current structure. Example: "Platform" was split into "Infra" and "DevOps" 18 months ago.
+      - **Class imbalance**: Backend (25%), Frontend (15%), Mobile (12%), ... Notifications (3%), Admin (2%).
+      - **Missing descriptions**: ~8% of tickets have title only, no description. Train model to handle this gracefully.
+      - **PII and secrets**: Tickets may contain API keys, credentials, customer data in logs. Scrub before training.
+
+      **Feature extraction at scale:**
+      - **Text**: Concatenate title + description. Truncate to 512 tokens (95th percentile length).
+      - **Stack traces**: Extract exception types, class names, method names. These are highly predictive of team assignment.
+      - **Components/Labels**: Jira component field (when set) is a strong signal. But only ~60% of tickets have it.
+      - **Log patterns**: Extract error codes, service names, HTTP status codes from logs embedded in descriptions.
+
+      **Serving data pipeline:**
+      - Jira webhook triggers on ticket creation
+      - Extract text and metadata from webhook payload
+      - Send to prediction service via HTTP
+      - Return predicted team with confidence to Jira (update assignee field)
+    dialogue:
+      - speaker: candidate
+        text: "I'd use the final resolved team as the label, not the initial assignment. Also filter out duplicates and invalids. Team restructuring needs historical mapping."
+      - speaker: interviewer
+        text: "How do you handle the 8% of tickets with no description?"
+      - speaker: candidate
+        text: "Train the model to handle title-only inputs. During training, randomly drop descriptions 10% of the time as data augmentation, making the model robust to missing descriptions."
+      - speaker: interviewer
+        text: "Good. Stack traces and error codes are highly predictive features. Let's talk about feature engineering."
+    next: feat_question
+
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Engineering"
+    speaker: interviewer
+    content: |
+      What features would you engineer for this classification problem?
+    dialogue:
+      - speaker: interviewer
+        text: "What features would you extract from bug tickets for classification? Think about what makes a ticket indicative of a specific team."
+      - speaker: candidate
+        text: "Bug tickets have rich structured and unstructured signals. Let me walk through the options."
+      - speaker: interviewer
+        text: "What's most predictive?"
+    choices:
+      - label: "Transformer embeddings of ticket text"
+        answer: |
+          I'd use **transformer embeddings** of the full ticket text (title + description) as the primary feature.
+
+          **Model choice:**
+          - **CodeBERT** (125M params): Pre-trained on code and natural language. Ideal because bug tickets contain a mix of English descriptions and code artifacts (stack traces, error messages, code snippets).
+          - Alternative: **all-MiniLM-L6-v2** (22M params) for a faster, lighter option that still captures semantic meaning.
+
+          **Why transformers for bug tickets?**
+          - Bug descriptions are semi-structured text with domain-specific vocabulary. Transformers capture this better than bag-of-words.
+          - Example: "NullPointerException in PaymentProcessor.chargeCard()" -- the transformer learns that PaymentProcessor signals the Payments team and NullPointerException signals a code bug.
+          - Context matters: "login" in "can't login to admin panel" (Admin team) vs "login fails for customers" (Auth team). Transformers capture this contextual difference.
+
+          **Text preprocessing:**
+          - Concatenate: `[CLS] {title} [SEP] {description_truncated_to_480_tokens}`
+          - Normalize: Lowercase, remove excessive whitespace, but KEEP error codes and class names (they're features!)
+          - Stack trace extraction: Parse Java/Python/JS stack traces and prepend the top-5 class names: `[StackTrace: PaymentProcessor > CardService > HttpClient]`
+
+          **Architecture:**
+          - Input: Tokenized text (max 512 tokens)
+          - Encoder: CodeBERT (frozen or fine-tuned)
+          - Pooling: [CLS] token representation (768 dims)
+          - Classifier: Linear(768, 256) -> ReLU -> Dropout(0.3) -> Linear(256, 15) -> Softmax
+
+          **Inference**: ~5ms per ticket on GPU, ~50ms on CPU. Well within the 5-second latency requirement.
+        next: feat_detail
+      - label: "Hybrid: text embeddings + structured metadata"
+        answer: |
+          I'd use a **hybrid approach** combining text embeddings with structured Jira metadata features.
+
+          **Text features (semantic understanding):**
+          - CodeBERT embedding of title + description (768 dims)
+          - Captures meaning: "payment failed" -> Payments team, "page won't load" -> Frontend team
+
+          **Structured metadata features (strong signals when available):**
+          - **Jira component** (one-hot, 50 dims): When set (~60% of tickets), this is the single strongest predictor. "Authentication" component -> Auth team with 90%+ accuracy.
+          - **Reporter team** (one-hot, 15 dims): Bugs are often reported by the team that encounters them. If a frontend engineer reports a bug, it's more likely frontend-related.
+          - **Priority** (ordinal, 1 dim): P1/critical bugs are more likely infrastructure or payments. P4/minor are more likely frontend polish.
+          - **Labels** (multi-hot, 100 dims): User-applied labels like "security", "performance", "UI" are directional signals.
+          - **Affected version** (categorical): Certain versions changed specific subsystems. Bugs in v3.2 (which revamped payments) are more likely Payments team.
+
+          **Extracted features from text (pattern-based):**
+          - **Service names** (multi-hot): Extract mentions of known service names from the description. "payment-service", "auth-gateway", "notification-worker" are strong routing signals.
+          - **Error codes** (multi-hot): HTTP 401/403 -> Auth, 500 -> Backend, timeout -> Infra
+          - **File paths** (multi-hot): `/src/frontend/` -> Frontend, `/src/api/` -> API, `/infra/terraform/` -> DevOps
+          - **Exception types** (multi-hot): NullPointerException, TimeoutException, AuthenticationException
+
+          **Architecture:**
+          - Concatenate: [768-dim text embedding | 180-dim metadata features | 100-dim extracted features]
+          - MLP: Linear(1048, 512) -> ReLU -> Dropout(0.3) -> Linear(512, 256) -> ReLU -> Linear(256, 15) -> Softmax
+
+          **Ablation study**: In my experience, adding metadata features to text embeddings improves accuracy by 5-8%, primarily because the Jira component field is so predictive.
+        next: feat_detail
+
+  - id: feat_detail
+    stage: features
+    type: info
+    label: "Feature Engineering Details"
+    speaker: interviewer
+    content: |
+      Good feature design. Let me add some important refinements.
+
+      **Handling the Jira component field:**
+      - When present, it's the strongest single predictor (~90% accuracy for well-tagged tickets)
+      - But 40% of tickets lack it, and it's sometimes wrong (user-selected)
+      - **Strategy**: Train two models -- one with component, one without. At inference, use the component-aware model when the field is set, fall back to the text-only model when it's missing.
+      - Or: Include component as a feature but train with it randomly masked 40% of the time (matching the real missing rate).
+
+      **Data augmentation:**
+      - **Missing description augmentation**: Randomly drop the description during training 10% of the time, forcing the model to classify from title alone.
+      - **Synonym replacement**: Replace technical terms with synonyms ("error" -> "exception" -> "fault" -> "bug") to improve robustness.
+      - **Cross-team hard negatives**: For teams that are often confused (Backend vs API), create training pairs that highlight the distinguishing features.
+
+      **Feature importance analysis (from a pilot model):**
+      | Feature | Importance |
+      |---------|-----------|
+      | Text embedding | 45% |
+      | Jira component | 25% |
+      | Service names in text | 12% |
+      | Error codes/exceptions | 8% |
+      | Reporter team | 5% |
+      | Other metadata | 5% |
+
+      The text embedding dominates, but structured features provide meaningful lift, especially for ambiguous tickets.
+
+      Let's discuss model selection.
+    dialogue:
+      - speaker: interviewer
+        text: "The Jira component field is the strongest predictor at 90% accuracy -- but only 60% of tickets have it. Train with it randomly masked to handle both cases."
+      - speaker: candidate
+        text: "Data augmentation is important too -- randomly dropping descriptions and replacing technical synonyms improves robustness."
+      - speaker: interviewer
+        text: "Good. Feature importance shows text embeddings at 45% and Jira component at 25%. Let's discuss model selection."
+    next: mod_question
+
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Model Selection"
+    speaker: interviewer
+    content: |
+      What model would you use for this 15-class classification problem?
+    dialogue:
+      - speaker: interviewer
+        text: "What model architecture would you choose for classifying tickets into 15 teams?"
+      - speaker: candidate
+        text: "I'm weighing fine-tuned transformer classifiers against LLM-based approaches."
+      - speaker: interviewer
+        text: "Describe your preferred approach with rationale."
+    choices:
+      - label: "Fine-tuned CodeBERT classifier"
+        answer: |
+          I'd use a **fine-tuned CodeBERT** model as the primary classifier for this task.
+
+          **Why CodeBERT?**
+          - Pre-trained on both natural language and code (CodeSearchNet dataset). Bug tickets are a mix of both -- descriptions in English with embedded code snippets, stack traces, and error messages.
+          - 125M parameters -- fast inference, easy to deploy, well within our latency requirements.
+          - Fine-tuning on 500K tickets gives it deep domain knowledge of our specific codebase and team structure.
+
+          **Training details:**
+          - **Input**: `[CLS] {title} [SEP] {description}` (max 512 tokens)
+          - **Architecture**: CodeBERT -> [CLS] token -> Dense(768, 15) -> Softmax
+          - **Loss**: Label-smoothed cross-entropy (smoothing=0.1 to handle noisy labels)
+          - **Optimizer**: AdamW, lr=2e-5, linear warmup 10%, cosine decay
+          - **Training**: 5 epochs, batch size 32, early stopping on validation macro F1 (patience=2)
+          - **Hardware**: Single A10G GPU, ~3 hours to train on 400K tickets
+
+          **Expected performance:**
+          - Top-1 accuracy: 85-88% (matching human triage performance)
+          - Top-3 accuracy: 95-97%
+          - Macro F1: 0.82-0.85
+          - Inference: ~5ms per ticket on GPU, ~50ms on CPU
+
+          **Why not an LLM?**
+          - For 15-class classification with plenty of training data (500K examples), a fine-tuned encoder model matches or exceeds LLM few-shot performance.
+          - 100x cheaper inference ($0.001 per ticket vs $0.01-0.05 for LLM).
+          - No external API dependency -- runs entirely on your infrastructure.
+          - Deterministic outputs -- same ticket always gets the same prediction (important for debugging and trust).
+        next: mod_detail
+      - label: "LLM with few-shot + chain-of-thought"
+        answer: |
+          I'd use an **LLM with few-shot prompting and chain-of-thought reasoning** for richer understanding and explainability.
+
+          **Why LLM?**
+          - **Reasoning ability**: The LLM can analyze the ticket, identify key technical signals, and reason about which team owns the relevant code. This handles ambiguous cases better than pattern matching.
+          - **Explainability**: The model can explain its classification: "This ticket mentions the PaymentProcessor class and a ChargeCard method, which are owned by the Payments team." This builds trust with engineers.
+          - **Zero-shot for new teams**: When a new team is created (e.g., "AI/ML" is spun off from "Data"), the LLM can route tickets there immediately with just a description of the team's scope. No retraining needed.
+
+          **Prompt design:**
+          ```
+          You are a bug ticket triage assistant. Classify this Jira ticket
+          to the correct engineering team.
+
+          Teams and their ownership:
+          - Frontend: Web UI, React components, CSS, browser issues
+          - Backend: Server logic, APIs, database queries, business logic
+          - Payments: Payment processing, Stripe integration, invoicing
+          - Auth: Authentication, authorization, SSO, OAuth, sessions
+          [... all 15 teams with descriptions ...]
+
+          Ticket:
+          Title: {title}
+          Description: {description}
+          Component: {component}
+          Reporter: {reporter}
+
+          Analyze the ticket and classify it. Provide:
+          1. Primary team (most likely)
+          2. Secondary team (if applicable)
+          3. Confidence (high/medium/low)
+          4. Reasoning (1-2 sentences)
+          ```
+
+          **Model choice**: GPT-4o-mini ($0.15/M input). Cost per ticket: ~$0.003 (800 token prompt + 50 token response). At 1000 tickets/day = $3/day = $90/month. Very affordable.
+
+          **Advantages**: Handles ambiguous tickets better, provides explanations, adapts to team changes without retraining. **Trade-offs**: External API dependency, non-deterministic, slightly higher latency (~500ms vs 5ms).
+        next: mod_detail
+
+  - id: mod_detail
+    stage: model
+    type: info
+    label: "Model Details"
+    speaker: interviewer
+    content: |
+      Good model choice. Let me add practical architecture details.
+
+      **Confidence calibration and the two-tier system:**
+      ```
+      Model predicts: [Backend: 0.72, API: 0.15, Infra: 0.08, ...]
+
+      If max_prob > 0.85: Auto-assign to Backend (high confidence)
+      If max_prob 0.50-0.85: Suggest top 3 to triage team (medium confidence)
+      If max_prob < 0.50: Flag as "ambiguous" for manual review (low confidence)
+      ```
+      - Calibrate probabilities using temperature scaling on the validation set
+      - Tune the 0.85 threshold to hit the target coverage (70-80%)
+      - Different thresholds per team: Security team gets lower threshold (0.75) for safety
+
+      **Ensemble for robustness (optional):**
+      - Train 3 models: CodeBERT, DistilBERT, LightGBM on TF-IDF features
+      - Ensemble via probability averaging
+      - Ensemble typically improves macro F1 by 2-3% and reduces variance
+      - Trade-off: 3x inference cost (but still <50ms total)
+
+      **Handling the "Other" category:**
+      - Not all tickets fit neatly into 15 teams. Some are feature requests, questions, or cross-team issues.
+      - Add a 16th class: "Needs Manual Triage" for tickets that don't fit any team
+      - Train on tickets that were re-assigned multiple times (these are genuinely ambiguous)
+
+      **Error analysis patterns:**
+      - Most errors are between "similar" teams: Backend<->API (41% of errors), Payments<->Billing (18%), Auth<->Frontend (12%)
+      - Consider merging highly-confused teams in the taxonomy, or adding a second-stage classifier to distinguish between confused pairs
+
+      Let's discuss training strategy.
+    dialogue:
+      - speaker: interviewer
+        text: "Calibrate probabilities with temperature scaling. Different teams can have different confidence thresholds -- lower for security-critical teams."
+      - speaker: candidate
+        text: "An ensemble of CodeBERT + DistilBERT + LightGBM improves F1 by 2-3% with manageable inference cost."
+      - speaker: interviewer
+        text: "Good. Most errors are between similar teams -- Backend vs API accounts for 41% of errors. Consider hierarchical classification. Let's discuss training."
+    next: train_strategy
+
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: candidate
+    content: |
+      Here's my training approach for the ticket classifier.
+
+      **Data preparation:**
+      - Filter 500K tickets: Remove duplicates, invalids, tickets with <10 tokens in description
+      - Clean labels: Use final resolved team, map old team names to current structure
+      - Split temporally: Train on months 1-30 (400K), validate on months 31-33 (50K), test on months 34-36 (50K)
+      - **Label smoothing** (alpha=0.1): Since ~5% of labels are noisy, smooth targets to [0.1/14, 0.1/14, ..., 0.9 + 0.1/14, ...]
+
+      **Handling class imbalance:**
+      - Backend (25%), Frontend (15%), ... Admin (2%), Notifications (3%)
+      - **Weighted sampling**: Oversample minority classes (Admin, Notifications) during training so each class appears equally
+      - **Focal loss** (gamma=2): Down-weights easy examples, focuses learning on hard/minority cases
+      - Track per-class F1 during training to ensure minority classes aren't sacrificed
+
+      **Training procedure:**
+      - Freeze CodeBERT layers for epoch 1, then unfreeze with discriminative learning rates
+      - Lower layers (general language): lr=5e-6
+      - Upper layers (task-specific): lr=2e-5
+      - Classification head: lr=1e-4
+      - Gradient clipping (max_norm=1.0) for stability
+      - Early stopping on validation macro F1 (patience=2 epochs)
+
+      **Hierarchical classification (if performance plateaus):**
+      - Stage 1: Classify into 5 "team groups" (Platform, Product, Data, Security, Operations)
+      - Stage 2: Within the predicted group, classify into specific team
+      - This reduces the 15-class problem into a series of 2-4 class problems
+      - Typically improves accuracy by 2-5% for large class counts
+
+      **Evaluation:**
+      - After each epoch: log macro F1, per-class precision/recall, confusion matrix
+      - After training: evaluate on test set, compute calibration metrics, run error analysis on 100 misclassified tickets
+    dialogue:
+      - speaker: candidate
+        text: "Temporal splits are critical -- train on older data, test on recent. Label smoothing handles the 5% noise rate. Weighted sampling and focal loss handle class imbalance."
+      - speaker: interviewer
+        text: "Tell me about the hierarchical classification approach."
+      - speaker: candidate
+        text: "If single-stage performance plateaus, classify first into 5 team groups, then into specific teams within each group. This typically improves accuracy 2-5% for 15+ classes."
+      - speaker: interviewer
+        text: "Good systematic approach. Let's discuss deployment."
+    next: deploy_question
+
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Deployment Architecture"
+    speaker: interviewer
+    content: |
+      How would you deploy this classifier into the Jira workflow?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you integrate this classifier into the Jira ticket creation workflow?"
+      - speaker: candidate
+        text: "There are two main integration points -- real-time suggestion during ticket creation, or post-creation auto-assignment."
+      - speaker: interviewer
+        text: "Walk me through your preferred approach."
+    choices:
+      - label: "Real-time suggestion during ticket creation"
+        answer: |
+          I'd integrate as a **real-time suggestion during ticket creation**, providing instant feedback as the user types.
+
+          **User experience:**
+          1. User starts creating a Jira ticket, fills in title and description
+          2. After the user stops typing for 2 seconds (debounced), send text to prediction API
+          3. Display: "Suggested team: **Payments** (92% confidence)" with an "Accept" button
+          4. If confidence <0.85: "Suggested teams: Payments (65%), Backend (20%), API (10%)" -- user picks
+          5. User can override any suggestion
+          6. Override data feeds back into training set
+
+          **Architecture:**
+          ```
+          Jira UI (ScriptRunner plugin or Jira App)
+            -> REST API call to Prediction Service
+              -> Text preprocessing (extract stack traces, clean text)
+              -> Feature extraction (CodeBERT embedding + metadata features)
+              -> Model inference
+              -> Calibration (temperature scaling)
+              -> Return: {team: "Payments", confidence: 0.92, top_3: [...]}
+            -> Display suggestion in Jira UI
+          ```
+
+          **Prediction Service (FastAPI on Kubernetes):**
+          - 2 replicas, each with access to CPU or GPU
+          - Model loaded in memory at startup (~500MB)
+          - ONNX Runtime for optimized inference
+          - Health check endpoint for Kubernetes liveness probes
+          - Average latency: <100ms (well within 5-second requirement)
+
+          **Jira integration:**
+          - Use **Atlassian Forge** or **ScriptRunner** to add a custom panel to the ticket creation screen
+          - Webhook on ticket creation for post-creation assignment (backup for users who skip the suggestion)
+
+          **Advantages**: Immediate feedback, user validates prediction, reduces wrong assignments, no workflow disruption.
+        next: deploy_detail
+      - label: "Post-creation auto-assignment via webhook"
+        answer: |
+          I'd integrate as a **post-creation auto-assignment system** that runs after the ticket is created.
+
+          **Workflow:**
+          1. User creates Jira ticket (no changes to their current workflow)
+          2. Jira fires a webhook to the Prediction Service
+          3. Prediction Service classifies the ticket
+          4. If confidence >0.85: Auto-assign to predicted team. Add a comment: "Auto-assigned to **Payments** team by ML classifier (92% confidence). If incorrect, please reassign."
+          5. If confidence 0.50-0.85: Leave unassigned. Add comment with top-3 suggestions. Triage team picks from suggestions.
+          6. If confidence <0.50: Route to manual triage queue.
+
+          **Architecture:**
+          ```
+          Jira Webhook (ticket.created event)
+            -> AWS Lambda / Cloud Function (lightweight)
+              -> Calls Prediction Service API
+              -> Updates Jira ticket via API:
+                - Set assignee/team
+                - Add classification comment
+                - Set custom field: ml_confidence, ml_prediction
+            -> Prediction Service (same as other option)
+          ```
+
+          **Why post-creation?**
+          - **Zero UI changes**: No Jira plugin to build and maintain. Works with any Jira version.
+          - **Batch fallback**: If real-time classification fails, run batch classification every 15 minutes on unassigned tickets.
+          - **Simpler rollout**: Deploy without any change to user behavior. Users notice tickets getting auto-assigned and trust builds organically.
+          - **Gradual confidence**: Start with 0.95 threshold (auto-assign only very confident predictions), gradually lower to 0.85 as trust builds.
+
+          **Feedback loop:**
+          - If engineer re-assigns the ticket, capture (ticket, predicted_team, actual_team) as training data
+          - Jira webhook on ticket.updated event captures reassignments
+          - Re-assignment rate is the key online accuracy metric
+
+          **Cost**: AWS Lambda (~$10/month for 1000 invocations/day) + Prediction Service (~$200/month for 2 CPU instances).
+        next: deploy_detail
+
+  - id: deploy_detail
+    stage: deployment
+    type: info
+    label: "Deployment Details"
+    speaker: interviewer
+    content: |
+      Good architecture. Let me add production hardening details.
+
+      **Model versioning and rollback:**
+      - Use **MLflow** or **Weights & Biases** for experiment tracking and model registry
+      - Each model version is tagged with: training date, dataset version, macro F1, per-class metrics
+      - Keep 3 model versions deployable. If new model performs poorly, rollback within 5 minutes.
+      - Blue-green deployment: New model serves 10% of traffic for 1 week. If re-assignment rate is acceptable, roll to 100%.
+
+      **Handling edge cases:**
+      - **Empty description**: Use title-only model (lower accuracy but functional)
+      - **Non-English tickets**: Detect language. If non-English, either translate (Google Translate API) then classify, or route to manual triage.
+      - **Duplicate tickets**: Before classification, check similarity against recent tickets. If near-duplicate found, link tickets and assign to same team.
+      - **Bulk ticket creation (incidents)**: If >50 similar tickets in 10 minutes, it's likely an incident. Route all to the incident commander, not individual teams.
+
+      **Caching:**
+      - Cache (text_hash -> prediction) for 24 hours
+      - Duplicate tickets (same reporter, similar text) hit cache and get instant classification
+      - Cache hit rate: ~5-10% (some reporters create similar tickets)
+
+      **Monitoring integration:**
+      - Prediction results stored in PostgreSQL for analytics
+      - Grafana dashboard showing: classification volume, confidence distribution, auto-assignment rate, re-assignment rate
+      - Daily report emailed to triage team lead
+
+      Let's discuss monitoring and maintenance.
+    dialogue:
+      - speaker: interviewer
+        text: "Use blue-green deployment -- serve new model on 10% of traffic for 1 week before full rollout. Keep 3 versions for quick rollback."
+      - speaker: candidate
+        text: "Edge cases are important -- empty descriptions, non-English tickets, and bulk ticket creation during incidents all need special handling."
+      - speaker: interviewer
+        text: "Good. The incident detection pattern is valuable -- if 50+ similar tickets appear in 10 minutes, route to incident commander. Let's discuss monitoring."
+    next: mon_question
+
+  - id: mon_question
+    stage: monitoring
+    type: question
+    label: "Monitoring Strategy"
+    speaker: interviewer
+    content: |
+      How would you monitor this classification system in production?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you monitor the classifier to catch issues and drive improvement?"
+      - speaker: candidate
+        text: "The key signals are re-assignment rate, confidence distribution drift, and team-level accuracy trends."
+      - speaker: interviewer
+        text: "Walk me through your monitoring plan."
+    choices:
+      - label: "Re-assignment tracking and accuracy drift"
+        answer: |
+          I'd build monitoring centered on **re-assignment tracking** as the primary quality signal.
+
+          **Re-assignment as ground truth:**
+          - When an engineer moves a ticket from Team A (ML prediction) to Team B, that's a misclassification signal
+          - Track daily re-assignment rate per team: `re_assignments / auto_assignments`
+          - Alert if overall rate exceeds 10% or any team's rate exceeds 20%
+          - Log all re-assignments: (ticket_id, predicted_team, actual_team, confidence) for retraining
+
+          **Confidence distribution monitoring:**
+          - Plot daily histogram of prediction confidence scores
+          - If the distribution shifts leftward (more low-confidence predictions), the model is becoming uncertain
+          - Possible causes: new product area not in training data, team restructuring, new bug patterns
+          - Alert if average confidence drops >5% week-over-week
+
+          **Feature drift detection:**
+          - Monitor the distribution of key features: Jira component values, service names, error codes
+          - If new components or services appear (not in training data), flag for review
+          - Track new vocabulary: unknown tokens in ticket text. Spike = new technology or product area.
+
+          **Per-team accuracy tracking:**
+          - Weekly accuracy report per team (from re-assignment data)
+          - Confusion matrix heatmap: which team pairs are confused?
+          - Team-specific retraining: If Auth accuracy drops, add more Auth-specific training examples
+
+          **Automated retraining trigger:**
+          - If re-assignment rate exceeds 15% for 2 consecutive weeks -> trigger model retraining
+          - Include last 3 months of re-assignment data as corrective examples
+          - Evaluate new model against current model on held-out set before deployment
+        next: mon_terminal
+      - label: "Business impact and triage efficiency"
+        answer: |
+          I'd monitor **business impact metrics** that demonstrate the system's value to stakeholders.
+
+          **Triage team efficiency:**
+          - **Tickets per triage person per day**: Before ML (manual): ~250. After ML (only handle low-confidence): target ~50-75. Track daily.
+          - **Time spent on triage**: Before: 4 people x 8 hours = 32 person-hours/day. After: target 8-12 person-hours/day (75% reduction).
+          - **Triage team redeployment**: Can triage team members be reassigned to higher-value work (QA, documentation, customer research)?
+
+          **Resolution speed impact:**
+          - **Mean time to correct assignment**: Before: 45 min (manual triage) + 8 hours (30% misroute). After: <1 minute + <1 hour (10% misroute). Track weekly.
+          - **Mean time to first engineer response**: How quickly does an engineer start working on the ticket after assignment? Should improve as tickets arrive directly in the right queue.
+          - **Bug resolution time (end-to-end)**: From ticket creation to "Resolved". The ML classifier should reduce this by 20-30%.
+
+          **Engineer satisfaction survey (quarterly):**
+          - "Are tickets assigned to your team usually relevant?" (1-5 scale). Target: 4.0+.
+          - "Do you trust the ML classifier's assignments?" Target: 3.5+ (will improve as accuracy improves).
+          - "Has the classifier improved your workflow?" Target: >70% yes.
+          - Open comments for specific issues (e.g., "It keeps sending Frontend bugs to us [API team]")
+
+          **ROI tracking:**
+          - Triage team cost saved: $X/month in reduced person-hours
+          - Faster resolution value: Estimate cost of each hour of bug delay (based on severity)
+          - ML system cost: Infrastructure + model training + monitoring = $Y/month
+          - Monthly ROI = ($X + bug_delay_savings - $Y) / $Y
+
+          **Weekly review:**
+          - Top 10 misclassified tickets (by impact/severity) -- root cause analysis
+          - New team requests: "We need better routing for X type of bugs"
+          - Model retraining decision: retrain now or wait?
+        next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Ticket Classification Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive Jira ticket classification system.
+
+      **Your architecture summary:**
+      - **Problem**: 15-class multi-label classification of bug tickets
+      - **Features**: Transformer embeddings (CodeBERT) with optional structured metadata
+      - **Model**: Fine-tuned CodeBERT or LLM with few-shot chain-of-thought
+      - **Training**: Temporal splits, label smoothing, focal loss, optional hierarchical classification
+      - **Deployment**: Real-time suggestion during creation or post-creation auto-assignment
+      - **Monitoring**: Re-assignment tracking or business impact metrics
+
+      **Strengths of your design:**
+      - Used final resolved team (not initial assignment) as ground truth label
+      - Two-tier confidence system: auto-assign at high confidence, suggest at medium
+      - Handles real-world issues: missing descriptions, team restructuring, label noise
+      - Practical cost: <$0.01 per ticket (fine-tuned) or ~$0.003 (LLM)
+
+      **Advanced topics to explore:**
+      - **Auto-remediation**: For common, well-understood bugs, generate fix suggestions or automated patches
+      - **Severity prediction**: Predict bug severity (P1-P4) alongside team assignment
+      - **Duplicate detection**: Identify and link duplicate bug reports before team assignment
+      - **Root cause clustering**: Group similar bugs to identify systemic issues
+      - **Sprint planning**: Predict ticket effort/story points to assist capacity planning
+
+      This design demonstrates practical ML engineering for a real-world enterprise problem. The key insights -- using resolved team as labels, handling class imbalance, and building a feedback loop through re-assignments -- show production experience. Great job!
+    dialogue:
+      - speaker: interviewer
+        text: "Excellent work! You've designed a comprehensive Jira ticket classification system."
+      - speaker: candidate
+        text: "Thank you! The key insight was using the final resolved team as ground truth instead of the initial assignment -- that 30% misrouting rate means many initial labels are wrong."
+      - speaker: interviewer
+        text: "That was a critical observation. Your two-tier confidence system and feedback loop through re-assignments show practical engineering experience. Great job!"

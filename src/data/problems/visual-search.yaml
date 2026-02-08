@@ -1,0 +1,832 @@
+id: visual-search
+title: "Visual Search (Pinterest Lens)"
+description: "Design a visual search system that uses images as queries."
+companies: ["Pinterest", "Google", "Amazon"]
+domains: ["Computer Vision", "Ranking/Search"]
+root: pd_start
+
+nodes:
+  # ============ PROBLEM DEFINITION ============
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design a **visual search system** similar to Pinterest Lens, Google Lens, or Amazon's camera search.
+
+      **Business context:**
+      - Pinterest Lens processes **~600M+ visual searches per month** and is one of the fastest-growing search modalities
+      - Users take a photo or upload an image and expect to find **visually similar items**, identify objects, or shop for products
+      - Visual search drives **~20% higher purchase intent** than text search (users know exactly what they want when they photograph it)
+      - Response time must be **<500ms** end-to-end (including image upload and processing)
+
+      **Core problem:** Given an input image (photo of a dress, a piece of furniture, a plant), retrieve the most relevant items from a catalog of **billions of indexed images** ranked by visual similarity, semantic relevance, and user intent.
+
+      **Key use cases:**
+      - **Shop the look**: User photographs a friend's outfit, finds where to buy each item
+      - **Identify & learn**: User photographs a plant or landmark, gets information
+      - **Find similar**: User uploads an image of a sofa they like, finds similar sofas in different styles/prices
+      - **Crop & search**: User draws a bounding box around a specific object in a complex scene
+
+      **Key challenges:**
+      - **Multi-object scenes**: A photo may contain 10+ recognizable objects -- which one does the user care about?
+      - **Scale**: Matching against billions of catalog images requires efficient similarity search
+      - **Cross-domain matching**: User's casual photo vs. professional product photography
+      - **Intent ambiguity**: Does a photo of shoes mean "buy these exact shoes" or "find similar styles"?
+    dialogue:
+      - speaker: interviewer
+        text: "Let's design a visual search system like Pinterest Lens. What are the key technical challenges?"
+      - speaker: candidate
+        text: "The core challenge is bridging the gap between a user's casual photo and the indexed catalog. We need robust visual features that handle variations in lighting, angle, background, and resolution."
+      - speaker: interviewer
+        text: "Good. How does visual search differ from text-based search?"
+      - speaker: candidate
+        text: "There's no inverted index for images. We need to convert images into vector representations and do nearest-neighbor search in embedding space."
+    next: pd_formulation
+
+  - id: pd_formulation
+    stage: problem_definition
+    type: question
+    label: "System Approach"
+    speaker: interviewer
+    content: |
+      How would you architect the overall visual search system? The fundamental decision is how to handle the image query -- do we convert it to a searchable representation, or combine visual and textual understanding?
+    dialogue:
+      - speaker: interviewer
+        text: "What's your high-level approach to visual search?"
+      - speaker: candidate
+        text: "We need to extract visual features from the query image and match them against pre-computed features for all indexed images."
+      - speaker: interviewer
+        text: "Should we only use visual features, or combine with text?"
+    choices:
+      - label: "Pure visual embedding similarity (image-to-image)"
+        answer: |
+          I'd build a **pure visual embedding** system that operates entirely in visual feature space:
+
+          **Architecture:**
+          ```
+          Query Image → CNN/ViT Encoder → Query Embedding (2048-dim)
+                                                   │
+                                                   ▼
+                                          ANN Search (FAISS/ScaNN)
+                                                   │
+                                                   ▼
+                                          Top-K Similar Images
+          ```
+
+          **Why pure visual?**
+          - **End-to-end simplicity**: One model, one embedding space, one similarity search
+          - **No dependency on text metadata**: Works even for images without titles, descriptions, or tags
+          - **Captures visual nuance**: Texture, color, shape, pattern, style are all encoded directly
+          - **Cross-domain matching**: A sketch, a painting, and a photo of the same object can be matched
+
+          **Visual encoder:**
+          - **Architecture**: Vision Transformer (ViT-L/14) or EfficientNet-B7 pre-trained on ImageNet, fine-tuned on visual similarity data
+          - **Output**: 2048-dimensional embedding per image
+          - **Training**: Contrastive learning (triplet loss or InfoNCE) on (anchor, positive, negative) image triplets
+          - **Positive pairs**: Same product from different angles, user-clicked pairs, human-labeled similar items
+          - **Hard negatives**: Same category but different items (red dress vs. blue dress)
+
+          **Indexing pipeline:**
+          - Pre-compute embeddings for all **~10B catalog images** offline
+          - Store in **FAISS** with IVF-PQ (Inverted File with Product Quantization) for memory efficiency
+          - 10B images * 2048 dims * 4 bytes = ~80TB raw, compressed to ~5TB with PQ
+          - Search time: **~10ms** for top-100 with GPU-accelerated FAISS
+
+          **Trade-off:**
+          - Cannot handle queries like "find a red version of this dress" (requires textual understanding)
+          - No concept understanding -- matches visual patterns but may miss semantic meaning
+          - A photo of a book matches other books by cover, not by content/topic
+        next: met_question
+      - label: "Multimodal embedding (CLIP-style vision + language)"
+        answer: |
+          I'd use a **multimodal embedding** approach that combines visual and textual understanding, similar to **CLIP** (Contrastive Language-Image Pre-training):
+
+          **Architecture:**
+          ```
+          Query Image → Image Encoder (ViT) → Image Embedding (512-dim)
+                                                       │
+                                                       ▼
+                                              Shared Embedding Space
+                                                       ▲
+                                                       │
+          Product Title → Text Encoder (Transformer) → Text Embedding (512-dim)
+          ```
+
+          **Why multimodal?**
+          - **Cross-modal search**: User uploads an image, can retrieve results indexed by text descriptions AND images
+          - **Rich understanding**: CLIP-style models understand that a photo of a Golden Retriever relates to "dog", "pet", "golden retriever" -- not just visually similar images
+          - **Hybrid queries**: Enable "image + text" queries like photographing a dress and adding "but in blue" as text refinement
+          - **Better catalog coverage**: Many products have titles/descriptions but poor photos. Text embeddings fill the gap
+
+          **CLIP-based architecture:**
+          - **Image encoder**: ViT-L/14 (307M params), outputs 768-dim embedding
+          - **Text encoder**: Transformer (12 layers, 63M params), outputs 768-dim embedding
+          - **Projection**: Both projected to shared 512-dim space via learned linear projections
+          - **Pre-training**: Contrastive loss on 400M+ image-text pairs (like CLIP's WIT dataset)
+          - **Fine-tuning**: Additional fine-tuning on domain-specific data (Pinterest pins with descriptions, Amazon product image-title pairs)
+
+          **Dual indexing:**
+          - Index catalog items with BOTH image embeddings and text embeddings
+          - Query can match against either (or both) representations
+          - Fusion score: `final_score = alpha * visual_sim + (1-alpha) * text_sim`, alpha tuned per use case
+
+          **Trade-off:**
+          - More complex training (image-text pairs needed, not just image-image)
+          - CLIP embeddings are **less fine-grained** than specialized visual embeddings for exact product matching (CLIP prioritizes concept matching over texture/color details)
+          - Higher compute cost for indexing (two encoders per item)
+          - But enables much richer search experiences and better recall for semantic queries
+        next: met_question
+
+  # ============ METRICS ============
+  - id: met_question
+    stage: metrics
+    type: question
+    label: "Success Metrics"
+    speaker: interviewer
+    content: |
+      How would you measure the success of the visual search system? Visual search has unique evaluation challenges compared to text search.
+    dialogue:
+      - speaker: interviewer
+        text: "What metrics would you use for visual search quality?"
+      - speaker: candidate
+        text: "Visual relevance is subjective. We need both automated metrics and human evaluation."
+      - speaker: interviewer
+        text: "How do you handle the subjectivity of visual similarity?"
+    choices:
+      - label: "Retrieval quality metrics (Recall, mAP, NDCG)"
+        answer: |
+          I'd focus on **retrieval quality metrics** with human-judged relevance:
+
+          **Primary offline metrics:**
+          - **Recall@K** (K=10, 50, 100): What fraction of relevant items appear in the top K results? This is the most critical metric for a retrieval system. Target: **Recall@50 > 80%** for exact product matches
+          - **mAP (Mean Average Precision)**: Measures both recall and precision across the full ranked list. Standard metric for image retrieval -- targets **mAP > 0.30** on challenging benchmarks
+          - **Precision@10**: Of the top 10 results, how many are genuinely relevant? Users see the top results first, so this matters most for UX
+
+          **Visual similarity-specific metrics:**
+          - **Category accuracy**: Does the system return items from the same product category? (e.g., query=shoes → results should be shoes, not bags). Target: **>90%** of top-10 results
+          - **Attribute match rate**: For fashion items, do color, pattern, and style match? Fine-grained evaluation beyond category
+          - **Exact product identification rate**: For "buy this exact item" queries, how often is the exact product in top-10?
+
+          **Human evaluation:**
+          - **Side-by-side comparison**: Show results from two models to raters, ask "which set is more relevant?"
+          - **5-point relevance scale**: Perfect match (5) → Exact product, Same item different color (4), Similar style (3), Same category (2), Irrelevant (1)
+          - Weekly evaluation on 2000 query images across categories
+
+          **Why retrieval-centric?** Visual search must first solve the **information retrieval** problem well. If we can't retrieve relevant items, engagement and conversion won't follow. Precision@10 directly maps to user experience -- the top results are all the user sees.
+        next: data_pipeline
+      - label: "Business metrics (CTR, conversion, engagement)"
+        answer: |
+          I'd optimize for **business impact metrics** that directly measure value:
+
+          **Primary online metrics:**
+          - **Visual Search CTR**: Fraction of visual search sessions where the user clicks a result. Target: **>30%** (lower than text search CTR because visual search is more exploratory)
+          - **Search-to-Save/Pin Rate**: For Pinterest -- do users save results to their boards? This indicates discovery of relevant items
+          - **Search-to-Purchase Conversion**: For e-commerce -- do visual search results lead to purchases? Visual search typically drives **2-3x higher conversion** than text search
+          - **Re-engagement rate**: Do users come back and use visual search again? Retention indicates trust in the feature
+
+          **Session-level metrics:**
+          - **Exploration depth**: How many results does the user scroll through? Deeper engagement suggests relevant results
+          - **Refinement rate**: Does the user crop and re-search? High refinement rate suggests initial results weren't targeted enough
+          - **Cross-modal follow-up**: Does the user follow up with a text search after visual search? Could indicate visual search didn't satisfy the need
+
+          **Quality guardrails:**
+          - **Null result rate**: Visual searches returning zero results. Target: **<5%**
+          - **Same-category rate**: >85% of results should be in the same product category as the query image
+          - **Latency P95**: <500ms end-to-end (including image upload)
+          - **Offensive content rate**: Results must not surface inappropriate content. <0.01%
+
+          **Why business metrics?** Pinterest/Amazon invest in visual search because it drives **revenue and engagement**. A system with perfect mAP but poor CTR is a failure. Business metrics also capture aspects that retrieval metrics miss -- like result presentation, thumbnail quality, and price relevance.
+
+          **A/B testing approach:** Feature-level A/B tests (new model vs. old) with primary metric = visual search CTR and guardrails = latency, null rate, category accuracy.
+        next: data_pipeline
+
+  # ============ DATA ============
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      Let's design the data pipeline. Visual search has unique data challenges compared to text search.
+
+      **Data sources:**
+
+      | Source | Data | Volume | Use |
+      |--------|------|--------|-----|
+      | **Product catalog images** | Professional product photos, multiple angles | ~2B images (Amazon), ~300B pins (Pinterest) | Index corpus |
+      | **User-generated queries** | Camera photos, screenshots, uploads | ~20M visual queries/day | Training signal |
+      | **Click/engagement logs** | (query_image, clicked_result_image, dwell_time) | ~10M clicks/day | Relevance labels |
+      | **Product metadata** | Titles, descriptions, categories, prices, brands | Per product | Multimodal features |
+      | **Human annotations** | Visual similarity judgments, object bounding boxes | ~100K/month | Evaluation + training |
+
+      **Image processing pipeline:**
+      1. **Ingestion**: New catalog images arrive via product feed. Resize to standard dimensions (224x224 for ViT, 256x256 for CNN backup)
+      2. **Quality filtering**: Reject blurry, corrupted, or placeholder images. Detect and remove watermarked/logo-heavy images
+      3. **Object detection**: Run YOLO/Faster R-CNN to detect and crop individual objects from multi-object images. Store both full image and per-object crops
+      4. **Feature extraction**: Pass through visual encoder to compute embeddings (2048-dim). Store in vector database
+      5. **Metadata enrichment**: Attach product category, brand, color, price from catalog metadata
+
+      **Training data construction:**
+      - **Positive pairs**: (query_image, clicked_result) from user logs
+      - **Strong positives**: Same product, different angle/context (from multi-image product listings)
+      - **Weak positives**: Same category, similar style (from user engagement data)
+      - **Hard negatives**: Same category but visually different items (the blue dress that isn't the red dress)
+      - **Random negatives**: Randomly sampled images (easy negatives for initial training)
+
+      **Data augmentation for query robustness:**
+      - Simulate user photo conditions: random crops, rotation (+-15 degrees), brightness/contrast variation, partial occlusion, phone camera noise
+      - This bridges the domain gap between professional product photos and user-taken photos
+
+      **Scale consideration:** Pinterest has **300B+ pins** to index. Even with efficient embeddings (512-dim float16), that's ~300TB of vector storage. Requires distributed vector search infrastructure.
+    dialogue:
+      - speaker: interviewer
+        text: "What data do you need for visual search?"
+      - speaker: candidate
+        text: "Three types: catalog images for the index, user query images with click signals for training, and human annotations for evaluation."
+      - speaker: interviewer
+        text: "How do you handle the domain gap between product photos and user photos?"
+      - speaker: candidate
+        text: "Data augmentation that simulates real-world conditions: random crops, lighting changes, background clutter, and phone camera artifacts."
+      - speaker: interviewer
+        text: "Good point. The domain gap is often the biggest practical challenge."
+    next: feat_question
+
+  # ============ FEATURES ============
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Extraction"
+    speaker: interviewer
+    content: |
+      How would you extract and represent visual features? The embedding quality is the single most important factor in visual search performance.
+    dialogue:
+      - speaker: interviewer
+        text: "What visual features would you extract from images?"
+      - speaker: candidate
+        text: "We need a balance between global image understanding and fine-grained local features."
+      - speaker: interviewer
+        text: "Should you use a single global embedding or multiple local features?"
+    choices:
+      - label: "Global embedding from fine-tuned ViT/CNN"
+        answer: |
+          I'd extract a single **global embedding** per image using a fine-tuned Vision Transformer:
+
+          **Encoder architecture:**
+          - **Model**: ViT-L/14 (Vision Transformer Large, patch size 14)
+          - **Input**: 224x224 RGB image, split into 196 patches (16x16 each)
+          - **Output**: 2048-dim global embedding from [CLS] token
+          - **Pre-training**: ImageNet-21K (14M images, 21K classes) → provides strong visual features
+          - **Fine-tuning**: Contrastive learning on domain-specific similarity data
+
+          **Contrastive fine-tuning:**
+          ```
+          Anchor (query image) ──→ Encoder ──→ emb_anchor
+          Positive (same product) ──→ Encoder ──→ emb_positive
+          Negative (different product) ──→ Encoder ──→ emb_negative
+
+          Loss = max(0, ||emb_anchor - emb_positive|| - ||emb_anchor - emb_negative|| + margin)
+          ```
+
+          **Embedding design choices:**
+          - **Dimensionality**: 2048 → project to 256 or 512 for storage efficiency (linear projection trained end-to-end)
+          - **Normalization**: L2-normalize embeddings so cosine similarity = dot product (faster computation)
+          - **Pooling**: [CLS] token for ViT, or GeM (Generalized Mean) pooling for CNNs -- better than average pooling for retrieval
+
+          **Why global embedding?**
+          - **Simple and fast**: One forward pass → one vector per image
+          - **Storage efficient**: 512 floats per image vs. thousands for local features
+          - **Fast search**: Dot product over normalized vectors, compatible with all ANN libraries
+          - **Good enough for 80%+ of queries**: Global features capture category, style, color, and general appearance
+
+          **Feature benchmarks:**
+
+          | Encoder | Recall@10 (fashion) | Embedding Dim | Inference Time |
+          |---------|--------------------|--------------|--------------|
+          | ResNet-50 | 65% | 2048 | 5ms |
+          | EfficientNet-B7 | 72% | 2560 | 15ms |
+          | **ViT-L/14** | **78%** | **2048** | **12ms** |
+          | ViT-G/14 | 81% | 2048 | 40ms |
+
+          **Limitation:** Global embeddings lose spatial information. A photo with a watch AND a bag results in one embedding that's an average of both. For multi-object scenes, we need object detection first.
+        next: mod_question
+      - label: "Multi-scale features with region attention"
+        answer: |
+          I'd extract **multi-scale features** that capture both global context and fine-grained local details:
+
+          **Architecture:**
+          ```
+          Input Image (224x224)
+                │
+                ▼
+          Backbone (ViT-L/14 or Swin Transformer)
+                │
+          ┌─────┼─────────────┐
+          │     │             │
+          Global        Region        Local
+          (CLS token)   (ROI features)  (Patch tokens)
+          2048-dim      K x 512-dim    196 x 768-dim
+                │     │             │
+                └─────┼─────────────┘
+                      │
+                Attention-weighted fusion
+                      │
+                Multi-scale embedding (1024-dim)
+          ```
+
+          **Three-level feature hierarchy:**
+
+          **Level 1 -- Global features (2048-dim):**
+          - [CLS] token from ViT captures holistic scene understanding
+          - Captures: overall composition, dominant colors, scene type (indoor/outdoor), style
+
+          **Level 2 -- Region features (K x 512-dim):**
+          - Run object detection (YOLO-v8) to identify K regions of interest
+          - Extract ROI-aligned features for each detected object
+          - Captures: individual objects, their attributes, spatial relationships
+          - Enables "click on the bag in the photo" interaction
+
+          **Level 3 -- Local features (patch-level):**
+          - Use ViT patch tokens (196 patches for ViT with patch size 16)
+          - Apply spatial attention: query patches attend to database image patches
+          - Captures: fine-grained texture, pattern details, logos, text on products
+
+          **Attention-based fusion:**
+          - Learn which scale matters for the query: product photos → global features, detailed texture → local features
+          - Self-attention across all three scales → fused 1024-dim embedding
+          - The attention weights adapt per query image
+
+          **Why multi-scale?**
+          - **Fine-grained distinction**: Global features can't tell two similar dresses apart by their button pattern. Local features can
+          - **Multi-object handling**: Region features let users search for specific objects in a scene
+          - **Robustness**: Global features are noisy for cluttered scenes; local features are robust to occlusion and background
+
+          **Trade-off:** More complex pipeline. Object detection adds ~15ms. Multi-scale fusion adds ~5ms. Total: ~35ms per query image vs. ~12ms for global-only. But improves **Recall@10 by 8-12%** on challenging multi-object benchmarks.
+
+          **Storage impact:** If we index region features, storage increases ~5x. Practical compromise: store only global embedding for ANN search, compute region features on-the-fly for re-ranking top 100 candidates.
+        next: mod_question
+
+  # ============ MODEL ============
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Retrieval & Ranking Model"
+    speaker: interviewer
+    content: |
+      How would you structure the retrieval and ranking pipeline? Remember we have billions of indexed images and need <500ms end-to-end latency.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you search over billions of images efficiently?"
+      - speaker: candidate
+        text: "We need approximate nearest neighbor search for fast retrieval, then a re-ranking stage for quality."
+      - speaker: interviewer
+        text: "What ANN algorithm would you choose and why?"
+    choices:
+      - label: "Single-stage ANN retrieval (FAISS HNSW)"
+        answer: |
+          I'd use **single-stage ANN retrieval** with FAISS for simplicity and speed:
+
+          **ANN algorithm: HNSW (Hierarchical Navigable Small World)**
+          - **How it works**: Builds a multi-layer graph over embedding vectors. Search navigates from coarse (top layer) to fine (bottom layer), following edges to nearest neighbors
+          - **Recall@100**: ~95%+ with proper tuning (ef_search=128)
+          - **Search time**: **~5ms** per query for 1B vectors on GPU, ~20ms on CPU
+          - **Memory**: Full vectors in memory. 1B images * 512 dims * 4 bytes = ~2TB. Requires distributed HNSW across ~50 machines
+
+          **Why HNSW over other ANN methods?**
+
+          | Method | Recall@100 | Search Time | Memory | Index Build |
+          |--------|-----------|-------------|--------|-------------|
+          | Brute force | 100% | ~1000ms | 2TB | None |
+          | IVF-PQ | 85% | ~3ms | 200GB | 4 hours |
+          | **HNSW** | **95%+** | **~5ms** | **2TB** | **8 hours** |
+          | ScaNN | 93% | ~3ms | 500GB | 2 hours |
+
+          **HNSW wins** on recall-latency trade-off. IVF-PQ saves memory but loses recall. ScaNN is competitive but HNSW is better-studied and widely deployed.
+
+          **Scaling to billions:**
+          - **Sharding**: Partition index by category (fashion, home, electronics) → query only relevant shards
+          - **GPU acceleration**: FAISS GPU HNSW indexes fit 200M vectors per GPU. 5 GPUs = 1B vectors
+          - **Filtering**: Pre-filter by category/metadata before ANN search to reduce candidate space
+
+          **Post-retrieval ranking:**
+          - ANN returns top 100 candidates with similarity scores
+          - Apply lightweight re-ranking with metadata features: price relevance, availability, recency, user preferences
+          - **No heavy neural re-ranker** -- the embedding quality is good enough for visual search, and metadata re-ranking handles business logic
+
+          **Trade-off:** No deep cross-attention between query and candidate at retrieval time. Two dresses that are identical except for a small logo difference may have similar embeddings. For exact product matching, this might miss fine details.
+        next: train_strategy
+      - label: "Two-stage: ANN retrieval + cross-attention re-ranking"
+        answer: |
+          I'd use a **two-stage pipeline**: fast ANN retrieval followed by a cross-attention re-ranker:
+
+          **Stage 1 -- ANN Retrieval (top 500, ~10ms):**
+          - Use **ScaNN** (Scalable Nearest Neighbors by Google) for retrieval
+          - ScaNN's learned quantization achieves **93% recall@100** with **3ms search** at billion scale
+          - Retrieve top 500 candidates based on embedding cosine similarity
+
+          **Stage 2 -- Cross-Attention Re-ranking (top 500 → top 50, ~50ms):**
+          ```
+          Query Image Patches     Candidate Image Patches
+          (196 patches, 768-dim)  (196 patches, 768-dim)
+                   │                         │
+                   └────── Cross-Attention ──┘
+                              │
+                        Similarity Score
+          ```
+
+          - **Cross-attention model**: Query patches attend to candidate patches (like a lightweight cross-encoder for images)
+          - Captures **fine-grained matching**: specific patterns, textures, logos, design details
+          - Batch process: score 500 candidates in one GPU forward pass (~50ms with batching)
+          - Output: refined similarity scores that account for spatial details
+
+          **Why two-stage?**
+          - Stage 1 (ANN) handles **scale** -- quickly narrows billions to 500 candidates
+          - Stage 2 (cross-attention) handles **precision** -- distinguishes near-duplicates and fine-grained matches
+          - Combined: **8-15% improvement in Precision@10** over single-stage ANN
+
+          **Cross-attention model details:**
+          - Based on **SuperGlue/LoFTR** architecture adapted for retrieval
+          - Input: Pre-computed patch features for both query and candidate (no need to re-run backbone)
+          - Multi-head attention (8 heads) between query and candidate patches
+          - Score: Sum of top-k matched patch similarities (weighted)
+          - Model size: ~15M params → fast inference
+
+          **Metadata re-ranking (stage 3, lightweight):**
+          After cross-attention, apply business rules:
+          - Category match bonus
+          - Price range relevance (if user has purchase history)
+          - Availability and freshness
+          - Diversity (don't show 10 identical products from different sellers)
+
+          **Trade-off:** More complex, requires GPU infrastructure for the re-ranking stage. Adds ~50ms latency. But for e-commerce visual search where purchase intent is high, the precision improvement directly translates to revenue.
+        next: train_strategy
+
+  # ============ TRAINING ============
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Pipeline"
+    speaker: interviewer
+    content: |
+      Let's design the training pipeline for the visual search model.
+
+      **Training the visual encoder:**
+
+      **Phase 1 -- Pre-training (self-supervised, ~1 week on 64 GPUs):**
+      - **Method**: DINO v2 (self-distillation with no labels) or MAE (Masked Autoencoder)
+      - **Data**: ~100M diverse images (ImageNet-21K + web-scraped images)
+      - **Purpose**: Learn general visual features (edges, textures, shapes, objects, scenes)
+      - **Output**: Strong visual backbone that transfers to any domain
+
+      **Phase 2 -- Contrastive fine-tuning (supervised, ~2 days on 16 GPUs):**
+      - **Method**: InfoNCE contrastive loss with temperature scaling
+      - **Loss**: `L = -log(exp(sim(q, p+) / tau) / SUM_i exp(sim(q, pi) / tau))`
+      - **Temperature**: tau = 0.07 (standard for contrastive learning)
+      - **Batch size**: 4096 (large batch provides more in-batch negatives)
+      - **Positives**: Same product from different angles, user-clicked pairs
+      - **Hard negatives**: Mining from ANN index -- visually similar but different products
+
+      **Hard negative mining strategy:**
+      1. Compute embeddings for all training images using current model
+      2. For each anchor, find top-50 nearest neighbors
+      3. Filter out true positives → remaining neighbors are hard negatives
+      4. Train with these hard negatives for 1 epoch
+      5. Repeat (re-mine negatives every 2 epochs as model improves)
+
+      **Data augmentation (critical for domain gap):**
+      - **Geometric**: Random crop (0.4-1.0 scale), horizontal flip, rotation (+-15 degrees)
+      - **Photometric**: Color jitter (brightness, contrast, saturation, hue), random grayscale (10%)
+      - **Domain simulation**: Gaussian noise (simulating phone cameras), JPEG compression artifacts, background replacement
+      - **Cutout/Random erasing**: Simulate partial occlusion (20% of image randomly masked)
+
+      **Training hyperparameters:**
+      - Optimizer: AdamW (lr=1e-4, weight_decay=0.05)
+      - Schedule: Cosine annealing with 5% linear warmup
+      - Gradient clipping: max_norm=1.0
+      - Mixed precision (FP16) for 2x speedup
+
+      **Evaluation during training:**
+      - Recall@1, @10, @50 on held-out retrieval benchmarks (Stanford Online Products, In-Shop Clothes)
+      - Monitor embedding space quality: t-SNE visualization, cluster purity
+    dialogue:
+      - speaker: interviewer
+        text: "How would you train the visual encoder?"
+      - speaker: candidate
+        text: "Two phases: self-supervised pre-training for general features, then contrastive fine-tuning with hard negative mining for retrieval quality."
+      - speaker: interviewer
+        text: "Hard negative mining is important. How do you implement it at scale?"
+      - speaker: candidate
+        text: "Use the current model to find nearest neighbors for each anchor. The neighbors that aren't true positives become hard negatives. Re-mine every few epochs as the model improves."
+      - speaker: interviewer
+        text: "Good. What about the domain gap between product photos and user photos?"
+    next: deploy_question
+
+  # ============ DEPLOYMENT ============
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Serving Architecture"
+    speaker: interviewer
+    content: |
+      How would you architect the serving system for visual search? Remember: <500ms end-to-end including image upload, processing, retrieval, and ranking.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you serve visual search at scale?"
+      - speaker: candidate
+        text: "The latency budget is tight when you include image upload. We need to parallelize and optimize every stage."
+      - speaker: interviewer
+        text: "Where does most of the latency go?"
+    choices:
+      - label: "Edge-optimized with on-device feature extraction"
+        answer: |
+          I'd push feature extraction to the **edge/device** to save network latency:
+
+          **Architecture:**
+          ```
+          User's Phone:
+          ┌─────────────────────────┐
+          │ Camera → Preprocessing  │
+          │      → On-device model  │  (~50ms)
+          │      → 512-dim embedding│
+          └─────────┬───────────────┘
+                    │ (send 2KB embedding, NOT 500KB image)
+                    ▼
+          Cloud Backend:
+          ┌─────────────────────────┐
+          │ ANN Search (FAISS)      │  (~10ms)
+          │ → Re-ranking            │  (~5ms)
+          │ → Result metadata fetch │  (~10ms)
+          └─────────┬───────────────┘
+                    │
+                    ▼
+          Results displayed (~25ms network)
+          Total: ~100ms end-to-end
+          ```
+
+          **On-device model:**
+          - **Architecture**: MobileNetV3-Large or EfficientNet-B0 (5.3M params) -- designed for mobile
+          - **Distilled** from the full ViT-L server model to maintain quality
+          - **Quantized**: INT8 quantization → 4x smaller model, 2x faster inference
+          - **Size**: ~20MB model file (acceptable for app download)
+          - **Inference**: ~50ms on modern phones (iPhone 14+ / Pixel 7+) using Core ML / TensorFlow Lite
+
+          **Why on-device?**
+          - **Eliminates image upload latency**: Uploading a 500KB photo takes 200-500ms on mobile networks. Sending a 2KB embedding takes <10ms
+          - **Privacy**: Raw images never leave the device
+          - **Offline capability**: Can compute embeddings even without internet (cache results for when connected)
+          - **Bandwidth savings**: Critical for users on limited data plans
+
+          **Quality consideration:**
+          - MobileNet-distilled embeddings achieve **~85% of ViT-L quality** (measured by Recall@10)
+          - For the remaining 15% quality gap: option to upload the full image for server-side processing when WiFi is available
+          - **Hybrid mode**: Use on-device embedding for instant results, refine with server-side model in background
+
+          **Model update strategy:**
+          - Ship new models via app updates or ML model download
+          - A/B test on-device vs. server-side to measure quality trade-off
+          - Update cycle: quarterly (model changes are less frequent than ranking changes)
+        next: deploy_object_detection
+      - label: "Cloud-based with optimized inference pipeline"
+        answer: |
+          I'd keep all processing **server-side** for maximum quality and flexibility:
+
+          **Architecture:**
+          ```
+          User's Phone:
+          ┌─────────────────────────┐
+          │ Camera → JPEG compress  │
+          │ → Upload via CDN        │  (~100-200ms)
+          └─────────┬───────────────┘
+                    │
+                    ▼
+          Edge CDN (pre-processing):
+          ┌─────────────────────────┐
+          │ Image resize (224x224)  │  (~5ms)
+          │ → Quality check         │
+          └─────────┬───────────────┘
+                    │
+                    ▼
+          GPU Inference Cluster:
+          ┌─────────────────────────┐
+          │ Object detection (YOLO) │  (~15ms)
+          │ → Feature extraction    │  (~12ms)
+          │   (ViT-L, full quality) │
+          │ → ANN search (FAISS)    │  (~10ms)
+          │ → Re-ranking            │  (~20ms)
+          │ → Result assembly       │  (~5ms)
+          └─────────┬───────────────┘
+                    │
+                    ▼
+          Results returned (~30ms network)
+          Total: ~250-350ms end-to-end
+          ```
+
+          **GPU inference optimization:**
+          - **TensorRT** optimization of ViT model → 2-3x speedup over PyTorch
+          - **Batch processing**: Accumulate requests over 10ms windows, batch inference (up to 32 images)
+          - **Model parallelism**: Object detection and feature extraction run in parallel pipelines
+          - **ONNX Runtime**: Alternative to TensorRT for broader hardware support
+
+          **Why server-side?**
+          - **Full model quality**: ViT-L with 307M params, no distillation compromise
+          - **Object detection**: Server can run YOLO for multi-object detection, enabling "search within image" features
+          - **Flexible pipeline**: Easy to update models, add new features, A/B test changes without app updates
+          - **Cross-attention re-ranking**: Can run expensive re-rankers that mobile devices can't handle
+          - **No device fragmentation**: Works the same on all phones, regardless of CPU/GPU capability
+
+          **Upload optimization:**
+          - **Progressive JPEG**: Start showing results based on low-resolution preview while full image uploads
+          - **Image compression**: Client-side JPEG compression to 100KB target size
+          - **CDN routing**: Upload to nearest CDN edge node, process there or route to nearest GPU cluster
+          - **HTTP/3 + QUIC**: Faster connection setup and upload over mobile networks
+
+          **Scaling:**
+          - GPU cluster: ~100 NVIDIA A100 GPUs handles ~10K visual searches/second
+          - Auto-scale based on QPS with 3-minute warm-up for new GPU instances
+          - Spot/preemptible instances for cost optimization (with graceful degradation)
+        next: deploy_object_detection
+
+  - id: deploy_object_detection
+    stage: deployment
+    type: info
+    label: "Object Detection & ROI Handling"
+    speaker: interviewer
+    content: |
+      A key UX challenge in visual search: when a user photographs a complex scene, **which object should we search for?**
+
+      **Multi-object handling strategy:**
+
+      **Step 1 -- Object detection:**
+      - Run **YOLO-v8** or **Faster R-CNN** on the input image
+      - Detect all recognizable objects with bounding boxes and confidence scores
+      - Typically 5-15 objects detected in a scene photo (furniture, clothing, electronics, plants, etc.)
+
+      **Step 2 -- User interaction:**
+      - **Automatic focus**: Highlight the most prominent/central object as the default search target
+      - **Tap to select**: User can tap on any detected object to search for that specific item
+      - **Crop & search**: User can freely draw a bounding box for custom region selection
+      - Pinterest's "Shop the Look" lets users tap on individual items in an outfit photo
+
+      **Step 3 -- Per-object search:**
+      - Extract embedding for the selected object region (crop + encode)
+      - Run ANN search specifically for that object type
+      - Apply category-filtered search (if we detected "dress", search only in fashion category)
+
+      **Object saliency ranking:**
+      When the user doesn't explicitly select an object, rank detected objects by:
+      1. **Size** in image (larger objects are more likely the subject)
+      2. **Centrality** (objects near center are more likely intended)
+      3. **Category commercial value** (fashion items > background furniture in a selfie)
+      4. **Detection confidence** (higher confidence = more recognizable object)
+
+      **Implementation detail:**
+      - Object detection runs in parallel with global feature extraction
+      - Pre-compute category-specific ANN indexes for faster filtered search
+      - Cache object detection results for the session (user might tap different objects)
+
+      **UX best practice:** Always show the detected objects with subtle bounding boxes, letting the user confirm or change the search target. This reduces "why am I seeing these results?" confusion.
+    dialogue:
+      - speaker: interviewer
+        text: "What happens when a user photographs a complex scene with multiple objects?"
+      - speaker: candidate
+        text: "We run object detection, highlight the most prominent object, and let the user tap to select which item to search for."
+      - speaker: interviewer
+        text: "How do you decide which object is most prominent?"
+      - speaker: candidate
+        text: "A combination of size in the image, centrality, detection confidence, and commercial relevance. The largest, most central object with high detection confidence is usually the right default."
+    next: mon_question
+
+  # ============ MONITORING ============
+  - id: mon_question
+    stage: monitoring
+    type: question
+    label: "Monitoring Strategy"
+    speaker: interviewer
+    content: |
+      What monitoring would you set up for the visual search system in production?
+    dialogue:
+      - speaker: interviewer
+        text: "How do you monitor visual search quality?"
+      - speaker: candidate
+        text: "Visual search is harder to monitor than text search because relevance is more subjective."
+      - speaker: interviewer
+        text: "How do you detect quality regressions automatically?"
+    choices:
+      - label: "Embedding quality monitoring + automated evaluation"
+        answer: |
+          I'd focus on **embedding quality monitoring** with automated retrieval evaluation:
+
+          **Embedding health monitoring (continuous):**
+          - **Embedding drift**: Track mean and variance of embedding dimensions over time. If the distribution shifts (e.g., after a model update), alert. Use KL-divergence between weekly embedding distributions
+          - **Cluster quality**: Measure silhouette score of category clusters in embedding space. Degradation means the model is losing category separation
+          - **ANN recall verification**: Periodically run brute-force search on a sample and compare to ANN results. If ANN recall drops below 90%, investigate index quality
+
+          **Automated retrieval evaluation (daily):**
+          - Maintain a **golden set** of ~5000 (query_image, relevant_results) pairs, human-annotated
+          - Run daily evaluation: compute Recall@10, mAP, Precision@10 on golden set
+          - Alert if any metric drops >2% vs. rolling 7-day average
+          - Break down by category: fashion, home, electronics, food, nature
+
+          **System performance monitoring:**
+
+          | Metric | Alert Threshold | Action |
+          |--------|----------------|--------|
+          | End-to-end P95 latency | >500ms | Scale GPU cluster |
+          | Feature extraction time | >50ms | Investigate model serving |
+          | ANN search time | >20ms | Check index shard health |
+          | Object detection accuracy | <80% mAP | Retrain detector |
+          | Null result rate | >5% | Check index coverage |
+
+          **User behavior anomaly detection:**
+          - Track category distribution of visual search queries. Sudden shifts may indicate a viral trend or a system issue
+          - Monitor "re-search" rate (user tries same image again). Spike indicates unsatisfying results
+          - Track embedding diversity of returned results. If all results cluster too tightly, we may be missing diverse relevant items
+
+          **Model versioning:** Track all metrics per model version. Enable instant rollback to previous model if new version shows regression on any metric.
+        next: mon_terminal
+      - label: "User engagement monitoring with feedback loops"
+        answer: |
+          I'd center monitoring around **user engagement signals** with feedback loops for continuous improvement:
+
+          **Core engagement metrics (real-time):**
+          - **Visual search session CTR**: Track hourly. Drop >3% vs. weekly average triggers investigation
+          - **Result scroll depth**: How far users scroll through results. Deeper scrolling may indicate poor early results
+          - **Save/pin rate**: For Pinterest -- are users finding items worth saving? Key quality indicator
+          - **Cross-search rate**: Does the user switch to text search after visual search? Indicates visual search didn't satisfy
+
+          **User feedback integration:**
+          - **Implicit feedback loop**: Clicked results → positive training signal for next model iteration
+          - **Explicit feedback**: "Is this what you were looking for?" prompt for 2% of searches. Simple thumbs up/down
+          - **Report mechanism**: Users can flag irrelevant or offensive results. Feed into quality pipeline
+
+          **A/B testing framework:**
+          - Always run at least one A/B test comparing current model vs. candidate model
+          - Primary metric: CTR or save rate (depends on platform)
+          - Minimum experiment duration: 7 days (capture weekly patterns)
+          - Minimum sample size: 50K visual search sessions per variant
+          - Guard rails: latency P95, null result rate, category accuracy rate
+
+          **Continuous learning pipeline:**
+          ```
+          Week 1: Model A serves traffic, collects click data
+                    │
+                    ▼
+          Week 2: Train Model B on Model A's click data + hard negatives
+                    │
+                    ▼
+          Week 3: A/B test Model A vs B
+                    │
+                    ▼
+          Week 4: If B wins → promote to production
+                    │
+                    ▼
+          Repeat: B collects data, train C, test B vs C...
+          ```
+
+          **Category-level quality reviews:**
+          - Monthly review of quality per category with category experts
+          - Focus on high-revenue categories (fashion, electronics, home decor)
+          - Identify systematic failures: "the system never returns good results for furniture legs" → targeted data collection
+        next: mon_terminal
+
+  # ============ TERMINAL ============
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Design Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive **Visual Search** system.
+
+      **Your design covers:**
+      - **Problem framing**: Pure visual embedding search or multimodal (CLIP-style) vision + language
+      - **Metrics**: Retrieval quality (Recall, mAP) or business metrics (CTR, conversion)
+      - **Data pipeline**: Image processing, augmentation for domain gap, training data construction
+      - **Features**: Global ViT embeddings or multi-scale features with region attention
+      - **Model**: Single-stage ANN retrieval (HNSW) or two-stage with cross-attention re-ranking
+      - **Training**: Self-supervised pre-training, contrastive fine-tuning, hard negative mining
+      - **Deployment**: Edge-optimized (on-device) or cloud-based (full quality) inference
+      - **Object detection**: Multi-object scene handling with user selection
+      - **Monitoring**: Embedding quality tracking or engagement-based feedback loops
+
+      **Key design strengths:**
+      - Multi-stage pipeline balances retrieval speed with ranking precision
+      - Domain gap handling through augmentation and contrastive learning
+      - Object detection enables rich multi-item search from complex scenes
+      - Practical consideration of on-device vs. cloud trade-offs
+
+      **Areas for further exploration:**
+      - 3D object understanding for furniture/interior design search
+      - Compositional visual search ("find a room like this but with blue walls")
+      - Video-based visual search (search using video frames)
+      - AR integration (point camera at an object, see search results overlaid)
+
+      This demonstrates deep understanding of computer vision, retrieval systems, and the practical challenges of building visual search at scale. Outstanding design!
+    dialogue:
+      - speaker: interviewer
+        text: "Great design. You covered the visual encoder, retrieval at scale, and the domain gap challenge. Any final thoughts?"
+      - speaker: candidate
+        text: "I'd start with a global ViT embedding and HNSW retrieval for v1, then add cross-attention re-ranking and on-device processing as v2 improvements."
+      - speaker: interviewer
+        text: "Pragmatic iterative approach. Well done!"

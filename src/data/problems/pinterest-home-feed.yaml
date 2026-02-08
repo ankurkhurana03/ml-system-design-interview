@@ -1,0 +1,603 @@
+id: pinterest-home-feed
+title: "Pinterest Home Feed Ranker"
+description: "Build a real-time home feed ranker for a content platform like Pinterest."
+companies: ["Pinterest", "Instagram", "TikTok"]
+domains: ["Ranking/Search", "Recommendation"]
+root: pd_start
+
+nodes:
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we will design a **real-time home feed ranker** for a visual discovery platform like Pinterest.
+
+      Pinterest has **~480 million monthly active users** and hosts over **300 billion saved Pins** (images and videos with links). The home feed is the primary surface, showing a **masonry-grid layout** of Pins personalized for each user. Unlike social media feeds (Twitter, Instagram), Pinterest is a **discovery and inspiration platform** - users come to find ideas for projects, recipes, outfits, home decor, and more.
+
+      **Key differences from other feeds:**
+      - Content is **evergreen**: A recipe Pin from 3 years ago is just as relevant as one from yesterday. No time-decay problem.
+      - Users have **intent**: They come to Pinterest looking for specific types of inspiration, not to catch up on friends' posts.
+      - Content is **visual-first**: The image quality and visual appeal of a Pin is a primary engagement driver.
+      - **High commercial intent**: ~85% of weekly Pinterest users have made a purchase based on Pins they saw. This makes Pinterest's ad business highly efficient.
+
+      **Scale:**
+      - Home feed serves **~15K QPS** at peak
+      - Catalog: **300B+ Pins**, of which ~5B are "active" (receiving recent engagement)
+      - Each feed page shows **25-50 Pins** in a masonry grid
+      - The feed must feel "infinite" - users scroll for minutes, and new Pins must continuously appear
+
+      Let's scope the problem.
+    dialogue:
+      - speaker: interviewer
+        text: "We're designing Pinterest's home feed ranker. Unlike social media feeds, Pinterest content is evergreen - a 3-year-old recipe is just as relevant as a new one."
+      - speaker: candidate
+        text: "That changes the ranking problem significantly. No time-decay means the candidate pool is enormous - billions of Pins."
+      - speaker: interviewer
+        text: "Exactly. The active catalog is about 5 billion Pins. Users have high intent - they come to find ideas, not to socialize. And 85% of weekly users make purchases based on Pins."
+      - speaker: candidate
+        text: "So commercial intent is a major factor. The feed directly drives revenue."
+      - speaker: interviewer
+        text: "Right. Let's scope the system."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: info
+    label: "Problem Scope"
+    speaker: interviewer
+    content: |
+      Let's scope the Pinterest home feed ranking system.
+
+      **Feed composition:**
+      - **Organic Pins** (~70-80% of feed): Recommended Pins based on user interests
+      - **Followed content** (~10-15%): Pins from boards and users the person follows
+      - **Promoted Pins / Ads** (~10-15%): Paid placements by advertisers
+      - We will focus on the **organic Pin ranking** for the majority of the feed.
+
+      **Ranking pipeline (Pinterest's published architecture):**
+      1. **Candidate generation** (300B Pins -> ~10,000 candidates):
+         - **Interests-based**: Pins matching user's interest taxonomy (Pinterest has a hierarchical interest graph with ~10,000 nodes)
+         - **Collaborative filtering**: Pins saved by similar users
+         - **Visual similarity**: Pins visually similar to user's recent saves
+         - **Board-based**: Pins from boards similar to user's boards
+      2. **Lightweight ranker** (10,000 -> ~1,000): Fast model filters obvious mismatches
+      3. **Heavy ranker** (1,000 -> ~200): Accurate model with full features
+      4. **Blending & diversity** (200 -> 25-50 shown per page): Mix content types, ensure visual variety, insert ads
+
+      **Key constraint - the "infinite scroll" problem:**
+      Users can scroll for 10+ minutes. We need to generate not just the first page, but a **continuous stream** of high-quality Pins. The 100th Pin must be nearly as relevant as the 1st. This requires maintaining context across page loads and avoiding repetition.
+
+      **Latency budget**: ~200ms for the full pipeline per page load. Heavy ranker gets ~50ms.
+
+      What should we optimize for?
+    dialogue:
+      - speaker: interviewer
+        text: "The pipeline goes from 300 billion Pins to 10,000 candidates, then to 1,000 via a lightweight ranker, then to 200 via a heavy ranker, and finally 25-50 shown per page."
+      - speaker: candidate
+        text: "The infinite scroll challenge is unique - the 100th Pin needs to be nearly as good as the 1st."
+      - speaker: interviewer
+        text: "Exactly. Users scroll for 10+ minutes. We need to maintain quality deep into the session without repetition. What should we optimize for?"
+    next: met_question
+
+  - id: met_question
+    stage: metrics
+    type: question
+    label: "Optimization Objective"
+    speaker: interviewer
+    content: |
+      What should the Pinterest home feed ranker optimize for?
+    dialogue:
+      - speaker: interviewer
+        text: "What should the ranking model optimize for? Pinterest's engagement patterns are quite different from other platforms."
+      - speaker: candidate
+        text: "Pinterest engagement is unique because the primary action is saving Pins to boards, not just liking. Saves indicate genuine intent to use the idea later."
+      - speaker: interviewer
+        text: "Exactly. Walk me through the approaches you'd consider."
+    choices:
+      - label: "Save-centric engagement (saves, closeups, clicks)"
+        answer: |
+          I would optimize for a **save-centric engagement model** since saves are Pinterest's core value proposition.
+
+          **Why saves?** On Pinterest, saving a Pin to a board means "I want to remember this idea for later." It is a much stronger signal than a like or view. Saves drive Pinterest's entire value loop: User saves Pin -> User returns to act on saved Pins -> User makes purchases. Saves also improve future recommendations (board composition reveals interests).
+
+          **Value model:**
+          ```
+          Score = 1.0*P(save) + 0.5*P(closeup) + 0.3*P(outbound_click) + 0.1*E[dwell_time_normalized]
+          ```
+
+          Where:
+          - **P(save)**: Primary signal. Save rate on Pinterest is ~2-4% (much higher than Instagram's save rate of ~1%)
+          - **P(closeup)**: User taps to see the Pin in detail. Indicates interest even if no save. Rate: ~10-15%.
+          - **P(outbound_click)**: User clicks through to the linked website. Critical for Pinterest's advertising business model. Rate: ~1-2%.
+          - **E[dwell_time]**: How long the user looks at the Pin in the grid before scrolling past. Normalized to 0-1 scale.
+
+          **Key benefit**: Save rate is directly correlated with Pinterest's revenue metrics. Users who save more are more likely to click outbound links and make purchases. Advertisers pay for clicks and conversions, so save optimization indirectly optimizes revenue.
+
+          **Key risk**: Save optimization can lead to **"save-bait"** - Pins with misleading images that get saved but disappoint when clicked. Mitigation: track "unsave" rate (user saves then later removes) and penalize Pins with high unsave rates.
+        next: met_saves
+      - label: "Session-level inspiration score (depth + diversity)"
+        answer: |
+          I would optimize for a **session-level inspiration score** that captures whether the user had a fulfilling browsing experience.
+
+          **Why session-level?** Pinterest users come for **inspiration sessions** - they want to explore and discover, not just find one thing. A great session is long, diverse, and leads to actions (saves, clicks, board creation). Optimizing per-Pin engagement misses this session-level dynamic.
+
+          **Inspiration score components:**
+          - **Session depth**: Total number of Pins viewed in the session. Deeper sessions indicate the user is finding the feed valuable. Average session: ~60-80 Pins viewed.
+          - **Session diversity**: Number of distinct interest categories represented in Pins the user engaged with. A session exploring "kitchen renovation" + "Mediterranean recipes" + "living room decor" is richer than all kitchen Pins.
+          - **Action density**: Number of meaningful actions (saves, clicks, board creations) per 10 Pins viewed. Target: >0.5 actions per 10 Pins.
+          - **Return probability**: P(user returns within 48 hours). The best measure of whether the session was satisfying.
+
+          **Scoring function:**
+          ```
+          InspirationScore = w1*E[session_depth] + w2*E[category_diversity] + w3*E[action_density] + w4*P(return_48h)
+          ```
+
+          **Key benefit**: This aligns with Pinterest's unique value proposition - it's not a social network, it's an inspiration engine. Optimizing for session-level inspiration naturally produces diverse, engaging feeds that keep users coming back.
+
+          **Key risk**: Session-level labels are delayed and sparse (one label per session). Need to decompose into per-Pin predictions that, when combined, optimize the session score. Practically, train per-Pin engagement models but tune the value model weights to maximize session-level metrics in A/B tests.
+        next: met_session
+
+  - id: met_saves
+    stage: metrics
+    type: info
+    label: "Save-Centric Metrics"
+    speaker: interviewer
+    content: |
+      Good choice. Let's define the metrics framework.
+
+      **Offline metrics:**
+      - **Primary**: AUC for P(save). Target: > 0.78. Saves are ~2-4% rate, so the positive class is reasonably represented.
+      - **Secondary**: AUC for P(closeup) > 0.75, AUC for P(outbound_click) > 0.72.
+      - **Ranking quality**: NDCG@50 using weighted engagement score as relevance. Target: > 0.55.
+      - **Calibration**: ECE < 0.02 for P(save). Critical because the value model combines calibrated probabilities.
+
+      **Online A/B test metrics:**
+      - **Primary**: Saves per user per session. Baseline: ~3-5 saves per session.
+      - **Secondary**: Closeup rate, outbound click rate, session duration
+      - **Guardrails**: Session abandonment rate (must not increase), "Hide Pin" rate (must not increase), content diversity (must maintain)
+      - **Revenue metrics**: Outbound click rate on organic Pins (drives future ad conversions), ad click-through rate (indirectly affected by feed quality)
+
+      **Pinterest-specific metrics:**
+      - **Board creation rate**: Are users creating new boards? This indicates deep engagement with the platform.
+      - **Related Pin engagement**: After a closeup, do users engage with related Pins? This validates content understanding quality.
+      - **Long-term value**: Does the user return and make purchases based on saved Pins? Track 30-day conversion from saved Pins to outbound clicks.
+      - **Visual diversity**: Ensure the feed is not visually monotonous. Measure color diversity, aspect ratio mix, and content type variety in each page.
+
+      Let's discuss data.
+    dialogue:
+      - speaker: interviewer
+        text: "Key offline metric is AUC for P(save) targeting above 0.78. Online, we track saves per user per session, with a baseline of 3-5 saves."
+      - speaker: candidate
+        text: "The visual diversity metric is Pinterest-specific - the masonry grid needs to look visually appealing, not just relevant."
+      - speaker: interviewer
+        text: "Exactly. A page of 50 blue Pins would look terrible even if each one is individually relevant. The blending layer handles this, but the ranker should consider it too."
+      - speaker: candidate
+        text: "The 30-day conversion tracking from saves to purchases ties directly to Pinterest's business model."
+      - speaker: interviewer
+        text: "It does. Pinterest is one of the few platforms where organic content directly drives measurable e-commerce conversions. Let's discuss data."
+    next: data_pipeline
+
+  - id: met_session
+    stage: metrics
+    type: info
+    label: "Session Metrics"
+    speaker: interviewer
+    content: |
+      Excellent thinking. Let's define the session-level metrics framework.
+
+      **Offline metrics:**
+      - **Per-Pin AUC**: Still evaluate individual predictions - AUC for P(save) > 0.78, P(closeup) > 0.75
+      - **Session prediction**: Predict session depth from the first 10 Pins shown. Spearman correlation > 0.45 with actual session depth.
+      - **Diversity metric**: Intra-list diversity (ILD) of each page's Pins in embedding space. Target: ILD in 0.4-0.6 range.
+
+      **Online A/B test metrics:**
+      - **Primary**: Session depth (Pins viewed per session). Baseline: ~60-80 Pins per active session.
+      - **Secondary**: Session diversity (unique categories engaged with), action density, return rate within 48 hours
+      - **Guardrails**: Save rate must not drop more than 3%, outbound click rate must not decrease, ad performance must not regress
+      - **North star**: Weekly active Pinners (users who save at least 1 Pin per week) - target growth
+
+      **The decomposition challenge:**
+      We cannot directly train a model on "session depth" because it's a session-level label. Instead:
+      1. Train per-Pin engagement models (save, closeup, click, dwell) with abundant labels
+      2. Use a **session-level reward model** to learn the relationship between per-Pin scores and session outcomes
+      3. Tune value model weights to maximize session metrics via **Bayesian optimization** over A/B test results
+
+      This three-layer approach (per-Pin prediction -> value model -> session optimization) is how most production recommendation systems work. The per-Pin models are ML; the value model weights are tuned by human judgment + A/B testing.
+
+      Let's discuss data.
+    dialogue:
+      - speaker: interviewer
+        text: "Session-level optimization requires a three-layer approach: per-Pin prediction, value model combination, and session-level tuning via A/B tests."
+      - speaker: candidate
+        text: "That decomposition makes sense. We can't train directly on session depth but we can tune the value model weights."
+      - speaker: interviewer
+        text: "Right. Bayesian optimization over A/B test results can efficiently search the weight space. Each A/B test explores a different weight combination and measures session-level outcomes."
+      - speaker: candidate
+        text: "How many A/B test iterations does it typically take?"
+      - speaker: interviewer
+        text: "Usually 5-10 rounds to converge on good weights. Each round runs for 1-2 weeks. So about 2-3 months of experimentation. Let's discuss data."
+    next: data_pipeline
+
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      Pinterest has uniquely rich visual and interest data. Let's inventory it.
+
+      **Engagement data:**
+      - **Pin impressions**: Every Pin shown in the feed with position, viewport time (how long visible), and engagement outcome. ~100 billion impressions per day.
+      - **Engagement events**: Saves, closeups, outbound clicks, hides, reports. Each with timestamp and context.
+      - **Board activity**: Board creation, Pin organization, board follows. Boards are Pinterest's unique organizational structure.
+      - **Search queries**: What users search for on Pinterest. Reveals explicit intent.
+
+      **Content data:**
+      - **Visual embeddings**: Pinterest uses **PinSage** (a graph neural network) and more recently **visual transformers** to generate 256-dim visual embeddings for each Pin. These capture visual style, color, composition, and semantic content.
+      - **Image understanding**: Object detection, scene classification, color palette extraction, text-on-image OCR. Pinterest's visual search team has built state-of-the-art visual understanding models.
+      - **Pin metadata**: Title, description, link URL, source domain, board it was saved to, creation date
+      - **Product data**: For "shoppable" Pins, product name, price, availability, merchant info
+
+      **User interest data:**
+      - **Interest taxonomy**: Pinterest maintains a hierarchical interest graph with ~10,000 nodes (e.g., Home Decor > Kitchen > Kitchen Islands > Farmhouse Kitchen Islands). Each user has an affinity score for each interest node.
+      - **Board-derived interests**: A user's boards directly reveal their interests. A "Summer Recipes" board signals food interest; a "Living Room Ideas" board signals home decor.
+      - **Taste graph**: Graph connecting users, Pins, boards, and interests. ~1 trillion edges.
+
+      **Data quality challenges:**
+      - **Implicit feedback only**: No explicit ratings. Must infer quality from saves, clicks, and hides.
+      - **Position and visual bias**: In the masonry grid, Pins at the top and center get more attention. Taller images get more visibility. Must correct for these in training.
+      - **Spam and low-quality content**: ~5-10% of new Pins are spam, clickbait, or low quality. Content quality models filter the worst, but borderline content persists.
+
+      Let's discuss feature engineering.
+    dialogue:
+      - speaker: interviewer
+        text: "Pinterest has rich visual data - PinSage embeddings, visual transformers, object detection. Plus a hierarchical interest graph with 10,000 nodes."
+      - speaker: candidate
+        text: "PinSage is interesting - it's a GNN that generates Pin embeddings from the Pin-board-user graph. That captures both visual and collaborative signals."
+      - speaker: interviewer
+        text: "Exactly. It was published in KDD 2018 and remains one of the most cited industry recommendation papers. The taste graph has about 1 trillion edges."
+      - speaker: candidate
+        text: "The masonry grid layout creates unique position bias - taller images get more visibility."
+      - speaker: interviewer
+        text: "Right, that's a Pinterest-specific bias we need to correct for. Let's discuss features."
+    next: feat_question
+
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Engineering"
+    speaker: interviewer
+    content: |
+      How would you engineer features for the Pinterest home feed ranker?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you approach feature engineering? Pinterest's visual nature makes it different from text-centric platforms."
+      - speaker: candidate
+        text: "I see two approaches - leaning heavily into visual embeddings and the interest graph, or building rich hand-crafted cross features."
+      - speaker: interviewer
+        text: "Walk me through your preferred approach."
+    choices:
+      - label: "PinSage embeddings + interest graph features"
+        answer: |
+          I would build features primarily from **PinSage/visual embeddings** and Pinterest's **interest taxonomy**.
+
+          **Embedding-based features:**
+          - **Pin embedding** (256 dims): PinSage embedding that captures both visual content and graph context (what boards the Pin appears on, what other Pins it co-occurs with). Pre-computed for all active Pins.
+          - **User taste embedding** (256 dims): Weighted average of embeddings of user's recently saved Pins (last 100 saves, exponential decay weighting with half-life 14 days).
+          - **User-Pin cosine similarity**: The primary relevance signal. How close is this Pin to the user's taste center?
+          - **Board-Pin similarity**: For each of the user's active boards, compute similarity between the board's centroid embedding and the candidate Pin. Take max similarity. This captures "would this Pin fit on any of the user's boards?"
+
+          **Interest graph features:**
+          - **Interest match score**: For the Pin's top-3 interest categories, what are the user's affinity scores for those categories? Sum of matched affinities.
+          - **Interest specificity**: Is the Pin in a broad interest (e.g., "food") or a specific one (e.g., "keto breakfast recipes")? Specific interest matches are more valuable.
+          - **Interest freshness**: When did the user last engage with this interest category? Recent = stronger signal.
+          - **Interest diversity signal**: How much of this interest is already represented in the current session? If the user has seen 20 recipe Pins, reduce score for the 21st.
+
+          **Minimal hand-crafted features:**
+          - Pin age (days since creation - less important on Pinterest but still a signal)
+          - Pin engagement rate (save rate, closeup rate - smoothed with Bayesian priors)
+          - Pin source quality (domain reputation for linked content)
+          - Visual quality score (resolution, aesthetic model score)
+
+          **Why embedding-centric?** Pinterest's PinSage embeddings are among the best in the industry. They encode visual similarity, collaborative signals, and semantic understanding in a single vector. Leveraging these avoids reinventing the wheel with manual features.
+        next: mod_question
+      - label: "Multi-signal cross features + visual attributes"
+        answer: |
+          I would build **rich cross features** combining user interests, Pin attributes, and visual properties for maximum interpretability and debuggability.
+
+          **User-Pin interest cross features (~40 features):**
+          - **Category affinity scores**: For each of the Pin's interest categories, the user's historical engagement rate. E.g., if the Pin is "modern kitchen," the user's engagement rates with "kitchen," "modern design," and "home improvement."
+          - **Board compatibility**: Does the user have a board that matches the Pin's category? Which board? How active is that board (Pins saved in last 30 days)?
+          - **Engagement recency**: Days since the user last saved a Pin in this category. Recent = higher relevance.
+          - **Exploration flag**: Is this Pin in a category the user has never engaged with but is adjacent to their interests? Flag for exploration.
+
+          **Visual attribute features (~30 features):**
+          - **Color palette match**: Does the Pin's dominant color palette align with the user's preferred colors? Pinterest found that users have consistent color preferences in their saves.
+          - **Aspect ratio**: Tall Pins (2:3) perform better in the masonry grid than wide Pins. Include aspect ratio as a feature.
+          - **Visual complexity**: Simple vs busy images. Some users prefer clean minimalist Pins; others prefer information-dense Pins.
+          - **Text overlay**: Does the Pin have text on the image? Recipe Pins with ingredient lists perform differently than aesthetic food photography.
+          - **Object detection features**: What objects are detected in the image? "Kitchen island," "marble countertop," "pendant lights" - these enable precise matching with user interests.
+          - **Style classification**: Modern, farmhouse, minimalist, bohemian - style labels from a fine-tuned image classifier.
+
+          **Engagement prediction features (~20 features):**
+          - **Pin historical save rate** (Bayesian-smoothed): Overall save rate with prior to handle new Pins
+          - **Pin category save rate**: Save rate within this interest category
+          - **Source domain CTR**: Click-through rate for Pins from this website domain
+          - **Creator track record**: Average save rate of this creator's other Pins
+
+          **Why hand-crafted?** Pinterest's visual platform creates feature engineering opportunities unique to images. Color preferences, visual styles, and object-level matching are not easily captured by generic embeddings. These features are also **interpretable** - when a Pin underperforms, we can diagnose "low color match" or "wrong style for this user."
+        next: mod_question
+
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Model Architecture"
+    speaker: interviewer
+    content: |
+      What model architecture would you use for the heavy ranker?
+    dialogue:
+      - speaker: interviewer
+        text: "What model would you use for the heavy ranking stage? It scores about 1,000 candidates in 50ms."
+      - speaker: candidate
+        text: "Given Pinterest's visual nature and the feature types we discussed, I'd consider either a deep learning model or a gradient boosting approach."
+      - speaker: interviewer
+        text: "Walk me through your recommendation."
+    choices:
+      - label: "Multi-task DCN with visual attention"
+        answer: |
+          I would use a **Deep & Cross Network (DCN-v2) with a visual attention module** and multi-task prediction heads.
+
+          **Architecture:**
+          - **Feature input**: Concatenate all features. Embedding lookup for categorical features (interest categories, source domain). Pass visual embeddings through a dedicated **visual attention layer** that learns which visual features matter most for each user.
+          - **Visual attention module**: Takes the 256-dim Pin embedding and the 256-dim user taste embedding. Computes attention weights over visual feature dimensions:
+            ```
+            attention = softmax(W * concat(pin_emb, user_emb))
+            attended_visual = attention ⊙ pin_emb
+            ```
+            This lets the model focus on different visual aspects per user - color for some users, style for others.
+          - **Cross network** (3 layers): Models explicit feature interactions between user interests, Pin attributes, and visual features.
+          - **Deep network** (4 FC layers, 512-256-128-64): Captures non-linear patterns.
+          - **Multi-task heads**: P(save), P(closeup), P(outbound_click), E[dwell_time]. Each head: 2-layer MLP (128-64-1).
+
+          **Why DCN + visual attention?** Pinterest is unique in that visual features are a primary driver of engagement. The attention module allows the model to learn **user-specific visual preferences** (one user cares about color palette, another about layout style). The cross network captures interactions like "user interested in farmhouse kitchens" x "Pin contains wooden countertop" x "Pin from trusted home decor domain."
+
+          **Model size**: ~8M parameters. Inference: ~5ms per candidate. For 1,000 candidates with batching: ~15ms on GPU. Well within the 50ms budget.
+
+          **Training**: Multi-task loss with uncertainty weighting. Saves weighted 2x closeups in the loss. Outbound clicks get additional weight since they directly drive revenue.
+        next: train_strategy
+      - label: "Gradient boosted trees (LightGBM) with embedding features"
+        answer: |
+          I would use **LightGBM** (gradient boosted decision trees) with pre-computed embedding features as inputs.
+
+          **Why trees for Pinterest?** Pinterest's feature set is a mix of numerical (engagement rates, similarity scores), categorical (interest categories, source domain), and pre-computed embedding distances. Gradient boosted trees handle this heterogeneous feature set naturally without the feature preprocessing that neural networks require.
+
+          **Feature engineering for LightGBM:**
+          - All hand-crafted features (interest matches, visual attributes, engagement rates) directly as inputs
+          - **Embedding-derived features**: Instead of raw 256-dim embeddings, compute interpretable derived features:
+            - User-Pin cosine similarity (1 feature)
+            - User-Pin distance in each of 10 principal components (10 features)
+            - Cluster membership agreement (is the Pin in the same embedding cluster as user's saves?)
+            - Nearest-board similarity (best match to user's boards)
+          - Total: ~120 features
+
+          **Multi-objective training:**
+          - Train separate LightGBM models for P(save), P(closeup), P(outbound_click)
+          - Combine predictions using the value model weights at inference time
+          - Each model: 800 trees, max depth 7, learning rate 0.05, feature fraction 0.7
+
+          **Advantages:**
+          - **Speed**: LightGBM scores 1,000 candidates in **<10ms on CPU**. No GPU needed. This dramatically reduces serving cost.
+          - **Interpretability**: SHAP values explain every prediction. "This Pin ranked high because interest match = 0.92, save rate = 8.3% (2x average), and the visual style matches the user's aesthetic." Invaluable for debugging.
+          - **Robustness**: Trees handle missing features, outliers, and feature distribution shifts gracefully. Production systems love this stability.
+          - **Fast iteration**: Training takes minutes, not hours. Feature engineers can test new features in a single afternoon.
+
+          **Trade-off**: Trees cannot jointly learn from raw embeddings as effectively as neural networks. The feature engineering step (extracting meaningful features from embeddings) requires manual effort and may miss subtle patterns.
+
+          **Pinterest's actual approach**: Pinterest has published that they use a hybrid - LightGBM for the lightweight ranker (10K to 1K) and a neural model for the heavy ranker (1K to 200). Using LightGBM for the heavy ranker is viable but may sacrifice ~1-2% NDCG compared to a neural model.
+        next: train_strategy
+
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: interviewer
+    content: |
+      Excellent model choice. Let's discuss training strategy.
+
+      **Training data:**
+      - Source: **Last 14 days** of home feed impressions (longer than Twitter/Instagram because Pinterest content is evergreen)
+      - Each example: (user features, Pin features, cross features, position in grid, engagement labels)
+      - Volume: ~100 billion impressions per 14 days. Sample to ~2 billion for training.
+      - **Positive labels**: Save (~2-4% rate), closeup (~10-15% rate), outbound click (~1-2% rate)
+      - **Negative labels**: Impressed in viewport for >1 second but no engagement
+
+      **Pinterest-specific biases to correct:**
+      - **Position bias in masonry grid**: Unlike a linear feed, the masonry grid has complex position effects. Pins at the top get more views. Pins in the center column get slightly more attention. Taller Pins are more visible.
+        - Solution: Include **(x_position, y_position, height, width)** as training features. At inference, set to neutral values (center position, standard height).
+      - **Image quality bias**: Higher-resolution, professionally shot Pins get more engagement regardless of relevance.
+        - Solution: Include **image quality score** as a feature to deconfound quality from relevance.
+      - **Popularity bias**: Viral Pins with millions of saves dominate positive examples.
+        - Solution: Cap max examples per Pin at 10,000. Use **popularity-stratified sampling**.
+
+      **Multi-task training:**
+      - Save prediction: Binary cross-entropy, primary task (highest weight in loss)
+      - Closeup prediction: Binary cross-entropy, secondary task
+      - Outbound click prediction: Binary cross-entropy with class weight (very sparse positive class ~1%)
+      - Dwell time prediction: MSE regression on log-transformed dwell time
+      - Joint loss: `L = 1.0*L_save + 0.5*L_closeup + 0.8*L_click + 0.2*L_dwell`
+
+      **Retraining cadence:**
+      - Full retrain: **Every 3 days** (slower than Twitter because content is evergreen)
+      - Embedding refresh: **Weekly** (PinSage retraining on updated graph)
+      - Interest affinity update: **Daily** (lightweight update of user interest scores from recent engagement)
+
+      **Cold-start for new Pins:**
+      - New Pins get visual embedding immediately (from image) but no engagement features
+      - Apply an **exploration bonus** for the first 48 hours: boost score by a decaying factor
+      - Use **visual similarity** to established Pins as a proxy for expected engagement
+      - Rapidly update engagement features once initial impressions generate data
+
+      Let's discuss deployment.
+    dialogue:
+      - speaker: interviewer
+        text: "Training uses 14 days of data - longer than Twitter because content is evergreen. Key biases: position in masonry grid, image quality, and popularity."
+      - speaker: candidate
+        text: "The masonry grid position bias is unique - it's 2D, not linear like most feeds."
+      - speaker: interviewer
+        text: "Right. We need x-position, y-position, height, and width as features during training, set to neutral at inference. Taller images are more visible, which biases engagement data."
+      - speaker: candidate
+        text: "The 3-day retraining cadence makes sense given evergreen content. Twitter retrains daily but Pinterest content changes more slowly."
+      - speaker: interviewer
+        text: "Exactly. Now let's discuss deployment."
+    next: deploy_question
+
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Serving Architecture"
+    speaker: interviewer
+    content: |
+      How would you deploy the Pinterest home feed ranking system?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you serve the home feed? Consider the infinite scroll requirement and 15K QPS."
+      - speaker: candidate
+        text: "The infinite scroll means we need to generate multiple pages efficiently. Let me discuss two approaches."
+      - speaker: interviewer
+        text: "Go ahead."
+    choices:
+      - label: "Request-time ranking with session state"
+        answer: |
+          I would serve rankings in **real time at each page request**, maintaining session state to ensure quality across the scroll session.
+
+          **Per-page request flow (target: <200ms):**
+          1. **Session state check** (~5ms): Retrieve the user's current session state from an in-memory store (Redis). Session state tracks: Pins already shown, interest categories already covered, visual themes already displayed.
+          2. **Candidate fetch** (~50ms): Fetch pre-computed candidate pool from a candidate index. For the first page, fetch 1,000 candidates. For subsequent pages, fetch 500 new candidates (the pool is continuously replenished by a background candidate generation job).
+          3. **Feature assembly** (~30ms): Assemble user + Pin features. Most features are pre-computed in feature stores. Session-level features (repetition signals, fatigue) computed from session state.
+          4. **Heavy ranker** (~40ms): Score candidates with the full model. Apply session-aware deduplication penalty (downweight Pins similar to already-shown Pins).
+          5. **Blending** (~30ms): Select 25-50 Pins with diversity constraints. Ensure visual variety (no adjacent Pins with same dominant color). Insert ad slots. Apply masonry layout optimization.
+          6. **Update session state** (~5ms): Record shown Pins, update interest coverage.
+          7. **Response** (~40ms): Serialize and return.
+
+          **Session state management:**
+          The key innovation is maintaining **session state** in Redis with a TTL of 30 minutes. This enables:
+          - **No-repeat guarantee**: Never show the same Pin twice in a session
+          - **Diversity tracking**: Track interest category coverage; boost underrepresented categories for later pages
+          - **Fatigue modeling**: If user has seen 30 recipe Pins, reduce recipe Pin scores
+          - **Quality maintenance**: The 10th page should feel as curated as the 1st
+
+          **Background candidate replenishment:**
+          A separate service continuously generates new candidates for active users (every 5 minutes). This ensures the candidate pool never runs dry during long scroll sessions.
+
+          **Scaling**: 15K QPS x 200ms = need ~3,000 concurrent requests. With 20ms GPU inference per batch of 50, each GPU handles ~2,500 Pins/sec = ~50 QPS. Need ~300 GPUs + CPU instances for the rest. Cost: ~$300K/month.
+        next: mon_setup
+      - label: "Pre-ranked feed with lazy loading"
+        answer: |
+          I would **pre-rank a deep feed** (200-500 Pins) per user and serve pages from it via lazy loading.
+
+          **Pre-ranking pipeline (runs every 30-60 minutes for active users):**
+          1. Generate 5,000 candidates for the user
+          2. Score all candidates with the heavy ranker
+          3. Apply diversity constraints and select top 500 Pins
+          4. Arrange into a **pre-computed feed** with masonry layout, ad slot positions, and diversity properties
+          5. Store the feed in a key-value store (DynamoDB or Redis), keyed by user ID
+
+          **Serving (ultra-low latency):**
+          - When user opens the app: Fetch pre-computed feed. Return first 50 Pins. Latency: **<30ms** (just a cache read).
+          - On scroll: Return next 50 Pins from the pre-computed feed. Latency: **<10ms**.
+          - When feed exhausts (user viewed all 500): Trigger a **real-time top-up** - generate 200 more Pins using a fast pipeline. While generating, show a "loading more ideas" shimmer animation.
+
+          **Advantages:**
+          - **Ultra-low serving latency**: Essentially zero ML computation at request time. The ranker already ran.
+          - **Consistent quality**: The entire 500-Pin feed is ranked holistically. The model can optimize diversity and progression across the full feed, not just per-page.
+          - **Simple serving**: No GPU infrastructure at serving time. Just a cache layer. Dramatically reduces operational complexity.
+          - **Cost**: Pre-rank 200M daily active users x 500 Pins = 100B Pin scores per day. But this runs in batch on a GPU cluster. Much cheaper than real-time GPU serving.
+
+          **Pre-ranking schedule:**
+          - Active users (opened app in last 2 hours): Re-rank every 30 minutes
+          - Regular users (daily active): Re-rank every 2 hours
+          - Inactive users: Re-rank on app open (small delay on first load)
+
+          **Trade-off**: Feeds can be up to 30-60 minutes stale. For Pinterest, this is acceptable since content is evergreen. But if a user saves several Pins from one topic, the next page should ideally adjust - pre-ranked feeds cannot do this mid-session. Mitigation: use a lightweight **session-aware re-scorer** at page load time that adjusts scores based on session actions. This is a simple rule-based system (not a full ML model) that runs in <5ms.
+        next: mon_setup
+
+  - id: mon_setup
+    stage: monitoring
+    type: info
+    label: "Monitoring & Evaluation"
+    speaker: interviewer
+    content: |
+      Let's discuss monitoring for the Pinterest home feed system.
+
+      **Real-time dashboards:**
+      - **Engagement**: Save rate, closeup rate, outbound click rate - tracked hourly with 7-day comparisons
+      - **Session quality**: Session depth (Pins viewed), session duration, pages per session, action density
+      - **Content diversity**: Genre entropy per page, unique interest categories per session, color diversity in the grid
+      - **Infrastructure**: Feed load time p50/p95/p99, candidate generation latency, model inference latency
+
+      **Automated alerts:**
+      - Save rate drop >3% vs trailing 7-day average -> alert on-call
+      - Session depth decrease >10% -> investigate (users leaving sooner)
+      - Feed load time p95 >400ms -> page infrastructure team
+      - Any single Pin appearing in >5% of all feeds -> model collapse alert
+      - Outbound click rate drop >5% -> alert revenue team (affects ad business)
+
+      **A/B testing framework:**
+      - Every ranking change tested for **2-3 weeks** minimum
+      - Primary metric: Saves per user per week (weekly because sessions vary daily)
+      - Secondary: Session depth, outbound clicks, return rate
+      - Guardrails: Ad performance, content creator impression fairness, visual quality of feed
+      - **Interleaving**: For ranking experiments, use interleaved comparison in the masonry grid. Alternate Pins from two models in the grid for faster convergence.
+
+      **Pinterest-specific monitoring:**
+      - **Shopping funnel**: Track the full funnel from Pin impression -> closeup -> outbound click -> purchase. Any stage dropping warrants investigation.
+      - **Creator health**: Monitor impression distribution across content creators. Ensure new creators get minimum visibility.
+      - **Seasonal adjustment**: Pinterest engagement is highly seasonal (wedding season, back-to-school, holiday shopping). Adjust baselines and alert thresholds seasonally.
+      - **Visual quality audit**: Weekly sample 1,000 feeds and have quality reviewers assess visual appeal, diversity, and coherence. Score on a 1-5 scale.
+
+      Let's wrap up.
+    dialogue:
+      - speaker: interviewer
+        text: "Monitoring includes engagement metrics, session quality, and Pinterest-specific signals like the shopping funnel and seasonal patterns."
+      - speaker: candidate
+        text: "The seasonal adjustment for baselines is important - Pinterest engagement patterns change dramatically around holidays."
+      - speaker: interviewer
+        text: "Right. Save rates spike 50% during holiday shopping season. Without seasonal baseline adjustment, our alerts would either fire constantly in peak season or miss problems in slow seasons."
+      - speaker: candidate
+        text: "The visual quality audit by human reviewers is a nice touch - some quality aspects are hard to measure algorithmically."
+      - speaker: interviewer
+        text: "Exactly. Let's summarize the full design."
+    next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Design Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You have designed a comprehensive home feed ranker for Pinterest. Let's summarize.
+
+      **Architecture summary:**
+      - **Pipeline**: Candidate generation (300B -> 10K) -> lightweight ranker (10K -> 1K) -> heavy ranker (1K -> 200) -> blending (200 -> 25-50 shown)
+      - **Optimization**: Save-centric engagement or session-level inspiration score
+      - **Features**: PinSage embeddings + interest graph or rich cross features + visual attributes
+      - **Model**: Multi-task DCN with visual attention or LightGBM with embedding features
+      - **Serving**: Request-time ranking with session state or pre-ranked feed with lazy loading
+      - **Monitoring**: Engagement dashboards, shopping funnel tracking, seasonal baseline adjustment
+
+      **Strengths of your design:**
+      - Leverages Pinterest's unique assets: PinSage embeddings, visual understanding, interest taxonomy
+      - Handles the evergreen content challenge (no time decay needed)
+      - Session-aware ranking ensures quality across infinite scroll
+      - Clear connection between recommendation quality and business metrics (saves -> clicks -> purchases)
+
+      **Key challenges and further considerations:**
+      - **Visual layout optimization**: How to select Pin sizes and positions in the masonry grid to maximize visual appeal and engagement
+      - **Shopping intent detection**: When a user shifts from inspiration to shopping mode, the feed should adapt (more product Pins, prices, buy buttons)
+      - **Multi-interest balancing**: Users have many interests; how to allocate feed slots across interests without overwhelming any single topic
+      - **International content**: How to handle content in multiple languages and cultural contexts
+      - **Creator ecosystem**: How to incentivize creators to post high-quality Pins and maintain a healthy supply side
+
+      This design demonstrates excellent understanding of visual discovery platforms, practical handling of evergreen content at massive scale, and strong awareness of the unique ranking challenges in grid-based feeds. Well done!

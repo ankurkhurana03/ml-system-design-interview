@@ -1,0 +1,590 @@
+id: distributed-training
+title: "Distributed Training System"
+description: "Design a distributed training system for models with billions of parameters."
+companies: ["Google", "Meta", "OpenAI"]
+domains: ["MLOps/Infrastructure"]
+root: pd_start
+
+nodes:
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design a **distributed training system** for training models with billions of parameters, similar to the infrastructure behind GPT-4, LLaMA, and Gemini.
+
+      **Context**: The organization is building a **70-billion parameter** large language model (LLM) for enterprise applications. The model needs to be trained from scratch on **15 trillion tokens** of text data.
+
+      **Scale challenges:**
+      - **Model size**: 70B parameters in FP16 = **140GB** of model weights alone. Doesn't fit on a single GPU (A100 has 80GB memory)
+      - **Training memory**: With optimizer states (Adam), gradients, and activations, total memory per parameter is ~18 bytes. 70B * 18 bytes = **1.26TB** - requires distributed memory across 16+ GPUs minimum
+      - **Compute**: Estimated **1.5M GPU-hours** on A100 (based on Chinchilla scaling laws). That's **187 A100 GPUs running for 8,000 hours** (333 days), or **1,500 A100s for 42 days**
+      - **Data throughput**: 15T tokens at 4K sequence length = **3.75 billion sequences**. Must stream data efficiently to thousands of GPUs
+      - **Cost**: At $2/GPU-hour for A100, raw compute cost is **$3M**. Hardware failures, experiments, and tuning multiply this 3-5x
+
+      **System requirements:**
+      - Train the 70B model in **<60 days** wall-clock time
+      - Achieve **>50% Model FLOPs Utilization (MFU)** (industry benchmark: GPT-3 achieved ~47%, PaLM achieved ~57%)
+      - Handle GPU failures gracefully (at 1000+ GPUs, failures happen daily)
+      - Support hyperparameter tuning and experiment tracking
+
+      This is one of the hardest infrastructure problems in ML today.
+    dialogue:
+      - speaker: interviewer
+        text: "We're designing a distributed training system for a 70-billion parameter LLM. The model doesn't fit on a single GPU."
+      - speaker: candidate
+        text: "What's the GPU budget and timeline?"
+      - speaker: interviewer
+        text: "About 1,500 A100 GPUs for 42 days, or equivalent. Total compute budget around 1.5 million GPU-hours."
+      - speaker: candidate
+        text: "At that scale, GPU failures become a daily occurrence. How do we handle resilience?"
+      - speaker: interviewer
+        text: "Exactly. With 1,500 GPUs running for 42 days, you can expect 2-5 GPU failures per day. The system must recover without restarting from scratch."
+    next: pd_parallelism
+
+  - id: pd_parallelism
+    stage: problem_definition
+    type: question
+    label: "Parallelism Strategy"
+    speaker: interviewer
+    content: |
+      The fundamental question is how to distribute the training workload across 1,500 GPUs. What parallelism strategy would you use?
+    dialogue:
+      - speaker: interviewer
+        text: "How do you split a 70B parameter model across 1,500 GPUs? What parallelism strategies would you combine?"
+      - speaker: candidate
+        text: "We'll need a combination of parallelism strategies. No single approach works at this scale."
+    choices:
+      - label: "3D Parallelism (Data + Tensor + Pipeline)"
+        answer: |
+          I'd use **3D parallelism**, combining data parallelism, tensor parallelism, and pipeline parallelism. This is the approach used by NVIDIA's Megatron-LM and Microsoft's DeepSpeed.
+
+          **Tensor Parallelism (TP)** - within a node:
+          - Split individual layers (attention heads, FFN matrices) across GPUs within the same server
+          - For 70B: Use **TP=8** (8 GPUs per server via NVLink with 600 GB/s bandwidth). Each GPU holds 1/8th of each layer
+          - Requires all-reduce after each layer, so needs high-bandwidth interconnect (NVLink, not ethernet)
+          - Memory: Each GPU stores 140GB/8 = 17.5GB of model weights
+
+          **Pipeline Parallelism (PP)** - across nodes:
+          - Split the model's layers into sequential stages. Stage 1 handles layers 1-20, Stage 2 handles layers 21-40, etc.
+          - For 70B with 80 transformer layers: **PP=4** (4 stages of 20 layers each)
+          - **Micro-batching** (GPipe/PipeDream): Split each batch into micro-batches that flow through the pipeline. This reduces pipeline bubble (idle time) to ~15% with 8 micro-batches
+          - Each pipeline stage runs on one TP group (8 GPUs)
+
+          **Data Parallelism (DP)** - replicate the pipeline:
+          - Replicate the entire TP+PP configuration across multiple groups
+          - **DP = 1500 / (8 * 4) = ~47** data parallel replicas
+          - Each replica processes a different data batch. Gradients are synchronized via all-reduce across DP groups
+          - Use **ZeRO Stage 1** (optimizer state partitioning) across DP replicas to reduce memory
+
+          **Final configuration: TP=8, PP=4, DP=47** (total 1,504 GPUs):
+          - Per-GPU memory: ~17.5GB weights + ~20GB activations + ~10GB optimizer state = ~48GB (fits in 80GB A100)
+          - Pipeline bubble: ~12% with 8 micro-batches
+          - Communication: TP within node (NVLink), PP between adjacent nodes, DP all-reduce across cluster
+
+          **MFU estimate**: ~52-55% (good for this scale). Main inefficiencies: pipeline bubble (12%), communication overhead (8%), load imbalance (2%).
+        next: met_efficiency
+      - label: "FSDP (Fully Sharded Data Parallelism)"
+        answer: |
+          I'd use **Fully Sharded Data Parallelism (FSDP)**, PyTorch's native distributed training approach that shards everything across GPUs.
+
+          **How FSDP works**:
+          - Each GPU stores only **1/N-th** of the model parameters, gradients, and optimizer states (where N is total GPU count)
+          - Before a layer's forward pass, all-gather the full parameters from all GPUs
+          - After the backward pass, reduce-scatter the gradients and discard non-local parameters
+          - This is equivalent to **ZeRO Stage 3** (from DeepSpeed)
+
+          **For 70B on 1,500 GPUs**:
+          - Per-GPU shard: 70B params / 1500 GPUs = ~47M params = **~94MB** of model weights per GPU
+          - Plus proportional optimizer state and gradients: ~0.84GB per GPU
+          - Remaining GPU memory (~78GB on A100) is available for activations and communication buffers
+          - Can use large batch sizes and activation checkpointing for efficient utilization
+
+          **FSDP configuration:**
+          - **Sharding strategy**: Full shard (FULL_SHARD) for maximum memory savings
+          - **Mixed precision**: BF16 for compute, FP32 for master weights (FSDP handles this natively)
+          - **Activation checkpointing**: Recompute activations during backward pass instead of storing. Trades ~30% compute for 5-10x activation memory reduction
+          - **Communication overlap**: Overlap all-gather for layer N+1 with compute for layer N. Hides most communication latency
+
+          **Why FSDP over 3D parallelism?**
+          - **Simpler configuration**: One sharding dimension instead of three. No need to tune TP/PP/DP ratios
+          - **Native PyTorch**: First-class support in PyTorch 2.0+. Better debugging, profiling, and ecosystem integration
+          - **Flexible scaling**: Works from 8 GPUs to 8,000 GPUs with the same code. Just change WORLD_SIZE
+          - **No pipeline bubble**: Unlike pipeline parallelism, FSDP has no idle pipeline stages
+
+          **Trade-off**: FSDP's all-gather communication volume is higher than 3D parallelism because it reconstructs full layers for every forward pass. At 1,500 GPUs, network bandwidth is the bottleneck. Requires **high-bandwidth interconnect** (400Gbps InfiniBand between all nodes). On slower networks (100Gbps Ethernet), FSDP struggles at this scale.
+
+          **MFU estimate**: ~48-52% on InfiniBand cluster. Lower than 3D parallelism due to higher communication volume, but simpler to implement and debug.
+        next: met_efficiency
+
+  - id: met_efficiency
+    stage: metrics
+    type: info
+    label: "Efficiency Metrics"
+    speaker: interviewer
+    content: |
+      Let's define the metrics for evaluating training system performance.
+
+      **Compute efficiency:**
+      - **Model FLOPs Utilization (MFU)**: Ratio of actual model FLOPs to theoretical peak GPU FLOPs. The gold standard metric. MFU = (tokens_per_second * 6 * model_params) / (num_gpus * peak_flops_per_gpu). Target: **>50%** (GPT-3: 47%, PaLM: 57%, LLaMA-2: 54%)
+      - **Hardware FLOPs Utilization (HFU)**: Includes recomputation FLOPs from activation checkpointing. Higher than MFU but less meaningful for comparison
+      - **GPU utilization**: Average GPU SM utilization during training. Target: >85%. Low utilization indicates communication bottlenecks
+
+      **Throughput metrics:**
+      - **Tokens per second** (total across cluster): At 50% MFU on 1,500 A100s (each 312 TFLOPS BF16): ~420K tokens/sec. 15T tokens / 420K tokens/sec = ~413 days / scaling factor for batch efficiency
+      - **Samples per second**: Sequences processed per second across all GPUs
+      - **Time per iteration**: Forward + backward + communication per training step. Target: <5 seconds with global batch size of 4M tokens
+
+      **Communication metrics:**
+      - **All-reduce bandwidth utilization**: Percentage of available interconnect bandwidth used. Target: >60%
+      - **Communication/compute ratio**: Time spent communicating vs. computing. Target: <25% communication
+      - **Pipeline bubble fraction**: Idle time in pipeline parallelism. Target: <15%
+
+      **Training stability:**
+      - **Loss curve smoothness**: Training loss should decrease monotonically at log scale. Spikes indicate instability
+      - **Gradient norm**: Track gradient norm per layer. Exploding gradients indicate training instability
+      - **Learning rate sensitivity**: Loss response to learning rate changes should be predictable
+
+      **System reliability:**
+      - **Mean Time Between Failures (MTBF)**: Expected time between GPU failures at cluster scale. At 1,500 GPUs: ~4-12 hours
+      - **Recovery time**: Time from failure detection to resumed training. Target: **<10 minutes**
+      - **Effective training time**: Fraction of wall-clock time spent on useful training (excluding failures, restarts, checkpointing). Target: **>90%**
+    dialogue:
+      - speaker: interviewer
+        text: "What metrics tell you if the training system is performing well?"
+      - speaker: candidate
+        text: "Model FLOPs Utilization is the gold standard. At 50% MFU on 1,500 A100s, we're effectively using the equivalent of 750 GPUs worth of compute."
+      - speaker: interviewer
+        text: "What about system reliability? At this scale, failures are inevitable."
+      - speaker: candidate
+        text: "Mean Time Between Failures drives recovery strategy. With 1,500 GPUs, expect a failure every 4-12 hours. Recovery must be under 10 minutes to maintain over 90% effective training time."
+    next: data_pipeline
+
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      Let's discuss the data pipeline that feeds 15 trillion tokens to 1,500 GPUs.
+
+      **Data scale:**
+      - 15 trillion tokens from diverse sources: web crawl (8T), books (2T), code (2T), scientific papers (1T), conversational data (1T), curated datasets (1T)
+      - Raw data: ~60TB of compressed text (average ~4 bytes per token after tokenization)
+      - Tokenized data: ~30TB as token ID sequences (2 bytes per token, uint16)
+
+      **Data loading challenges:**
+      - At 420K tokens/sec with sequence length 4096, we need **~100 sequences/sec per GPU** (420K / 4096 / 1500 * 1500)
+      - Each sequence: 4096 tokens * 2 bytes = 8KB. Total read rate: 1500 GPUs * 100 seq/sec * 8KB = **~1.2 GB/sec** from storage
+      - Must shuffle data across epochs without repeating sequences (deduplication across the full 15T tokens)
+      - Data must arrive at GPUs with zero stalling - any data loading delay wastes expensive GPU time
+
+      **Data pipeline architecture:**
+      - **Pre-tokenized storage**: Store all data as pre-tokenized sequences in a memory-mapped format. No tokenization at training time
+      - **Sharded data files**: Split into ~10,000 shards of ~3GB each. Each shard contains random sequences from all data sources (pre-shuffled)
+      - **Data loader**: Each DP replica reads from a disjoint set of shards. Use **PyTorch DataLoader with multiple workers** (8 workers per GPU) for prefetching
+      - **Streaming format**: Use WebDataset or Mosaic StreamingDataset for efficient sequential reads from object storage (S3/GCS)
+
+      **Data mixing**: Different data sources have different quality and value. Use a mixing ratio (e.g., 55% web, 13% books, 13% code, 7% papers, 7% conversation, 5% curated) and adjust during training based on validation performance on each domain.
+
+      **Deduplication**: MinHash + LSH deduplication across the full dataset before training. Near-duplicate removal reduces dataset size by 20-30% but significantly improves model quality.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you efficiently feed 15 trillion tokens to 1,500 GPUs?"
+      - speaker: candidate
+        text: "Pre-tokenize everything, shard into thousands of files, and use streaming data loaders with heavy prefetching. Data loading must never stall the GPUs."
+      - speaker: interviewer
+        text: "What about data quality and mixing?"
+      - speaker: candidate
+        text: "Domain-weighted mixing ratios that can be adjusted during training. And comprehensive deduplication upfront - near-duplicate removal improves quality significantly."
+    next: data_question
+
+  - id: data_question
+    stage: data
+    type: question
+    label: "Checkpointing Strategy"
+    speaker: interviewer
+    content: |
+      With training runs lasting 42+ days, checkpointing strategy is critical. How would you handle checkpoints and fault tolerance?
+    dialogue:
+      - speaker: interviewer
+        text: "GPU failures happen every 4-12 hours at this scale. How do you checkpoint and recover?"
+      - speaker: candidate
+        text: "The checkpointing strategy directly determines how much training time we lose per failure."
+    choices:
+      - label: "Synchronous checkpointing with distributed filesystem"
+        answer: |
+          I'd implement **synchronous distributed checkpointing** using a high-performance parallel filesystem.
+
+          **Checkpoint contents** (for 70B model):
+          - Model parameters: 140GB (FP16)
+          - Optimizer states (Adam): 560GB (FP32 momentum + variance for each parameter)
+          - Learning rate scheduler state: <1KB
+          - Data loader state (shard positions, random seed): <1MB
+          - RNG states for all GPUs: ~10KB
+          - **Total: ~700GB** per checkpoint
+
+          **Checkpointing to Lustre/GPFS:**
+          - Use a **parallel distributed filesystem** (Lustre, GPFS, or WekaFS) mounted on all nodes
+          - Each GPU writes its shard concurrently. With 1,500 GPUs writing in parallel to Lustre at 200 GB/s aggregate: 700GB / 200 GB/s = **~3.5 seconds** write time
+          - Checkpoint every **30 minutes** (based on MTBF of 4-12 hours). Worst-case lost progress per failure: 30 minutes of training
+
+          **Recovery process:**
+          1. Detect failure (NCCL timeout, hardware error signal): ~30 seconds
+          2. Isolate failed GPU, redistribute work to spare GPUs: ~2 minutes
+          3. Load latest checkpoint from Lustre: ~3.5 seconds (parallel read)
+          4. Resume training from checkpoint: ~30 seconds for warmup
+          5. **Total recovery: ~3 minutes**
+
+          **Spare GPU pool**: Maintain 5% spare GPUs (75 GPUs) that are idle but ready to replace failed ones. When a GPU fails, a spare takes its place with the same checkpoint shard. No need to redistribute data across all remaining GPUs.
+
+          **Checkpoint management**: Keep last 5 checkpoints (3.5TB). Delete older ones. Also save "milestone" checkpoints at specific token counts for evaluation and reproducibility.
+
+          **Cost of checkpointing**: 3.5 seconds every 30 minutes = 0.2% overhead. Negligible impact on MFU.
+        next: feat_optimization
+      - label: "Asynchronous checkpointing + in-memory redundancy"
+        answer: |
+          I'd implement **asynchronous checkpointing** combined with **in-memory redundancy** for near-zero recovery time.
+
+          **In-memory redundancy** (primary fault tolerance):
+          - Each GPU maintains a **redundancy partner** on a different node
+          - After each training step, GPUs asynchronously send their state delta (gradient update) to their partner. Delta is small (~1-5MB for sharded states)
+          - If a GPU fails, its partner has the latest state and can immediately take over
+          - **Recovery time: <30 seconds** (no checkpoint loading needed)
+          - Memory overhead: Each GPU stores its own state + partner's state delta buffer (~100MB)
+
+          **Asynchronous checkpointing to persistent storage** (disaster recovery):
+          - A **background thread** on each GPU writes checkpoint state to cloud storage (S3/GCS) without blocking training
+          - Use **copy-on-write snapshots**: Snapshot the state tensors, then the GPU continues training while the snapshot is written asynchronously
+          - Checkpoint frequency: Every 2 hours to persistent storage
+          - Write bandwidth: S3 multipart upload at ~2 GB/s per node. 700GB / (1500 nodes * 2 GB/s) = **~0.23 seconds** - effectively instant with enough parallelism
+
+          **Why async?**
+          - **Zero training interruption**: Training never pauses for checkpointing. The background write is completely overlapped with compute
+          - **Fast recovery**: In-memory redundancy handles 95% of failures (single GPU fails) with <30 second recovery
+          - **Cloud-native**: Works with object storage, no need for expensive parallel filesystem (Lustre costs $500K+ for a large installation)
+
+          **Hierarchical recovery:**
+          1. **Single GPU failure**: In-memory redundancy. Partner GPU takes over in <30 seconds
+          2. **Node failure (8 GPUs)**: Other nodes' redundancy partners cover. Recovery in <2 minutes
+          3. **Rack failure (multiple nodes)**: Fall back to latest async checkpoint. Recovery in ~10 minutes
+          4. **Cluster failure**: Fall back to latest persistent checkpoint. Full restart
+
+          **Trade-off**: More complex implementation. Redundancy partners add ~2% network overhead for state synchronization. But eliminates all checkpoint-related training pauses and minimizes recovery time.
+        next: feat_optimization
+
+  - id: feat_optimization
+    stage: features
+    type: info
+    label: "Memory Optimization"
+    speaker: interviewer
+    content: |
+      Let's discuss memory optimization techniques that are essential for fitting a 70B model in GPU memory.
+
+      **Memory breakdown per GPU** (without optimization):
+      - Model parameters (FP16): 140GB / num_shards
+      - Gradients (FP16): Same as parameters
+      - Optimizer states (FP32): 2x model parameters (Adam momentum + variance)
+      - Activations: Varies with batch size, can be 10-100GB
+
+      **Key optimization techniques:**
+
+      **1. Mixed Precision Training (BF16/FP16):**
+      - Keep master weights in FP32, compute forward/backward in BF16
+      - Saves 50% memory on activations and gradients
+      - BF16 preferred over FP16: larger dynamic range, no need for loss scaling
+      - A100/H100 have dedicated BF16 tensor cores with 2x throughput vs FP32
+
+      **2. Activation Checkpointing (Gradient Checkpointing):**
+      - Don't store all intermediate activations during forward pass
+      - Instead, **recompute activations** during backward pass from saved checkpoints
+      - Trade-off: 30-40% extra compute for 5-10x activation memory reduction
+      - Selective checkpointing: Only checkpoint transformer blocks (largest activations), keep small activations
+
+      **3. Flash Attention (Dao et al., 2022):**
+      - Standard self-attention materializes the N*N attention matrix in GPU memory. For 4K sequence length: 4096 * 4096 * batch * heads * 2 bytes = enormous
+      - Flash Attention computes attention in **tiled SRAM blocks**, never materializing the full matrix in HBM
+      - **2-4x speedup** and **5-20x memory reduction** for attention
+      - Standard in all modern LLM training (PyTorch 2.0 includes SDPA with Flash Attention)
+
+      **4. CPU Offloading:**
+      - Move optimizer states to CPU RAM during forward pass (not needed until optimizer step)
+      - Modern servers have 1-2TB CPU RAM vs. 80GB GPU RAM
+      - DeepSpeed ZeRO-Offload manages this automatically
+      - Trade-off: PCIe bandwidth (~32 GB/s) becomes bottleneck for large offloads
+
+      These techniques combined can reduce per-GPU memory requirements by 3-5x, enabling larger models or larger batch sizes.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you fit a 70B model's training state in GPU memory?"
+      - speaker: candidate
+        text: "A combination of mixed precision, activation checkpointing, Flash Attention, and optionally CPU offloading."
+      - speaker: interviewer
+        text: "Which technique has the biggest impact?"
+      - speaker: candidate
+        text: "Flash Attention is the biggest single improvement - 2-4x speedup and massive memory savings for attention computation. It's standard now."
+      - speaker: interviewer
+        text: "And activation checkpointing?"
+      - speaker: candidate
+        text: "Essential at this scale. We trade 30-40% extra compute for 5-10x reduction in activation memory. Without it, the activation memory alone would exceed GPU capacity."
+    next: mod_architecture
+
+  - id: mod_architecture
+    stage: model
+    type: question
+    label: "Communication Architecture"
+    speaker: interviewer
+    content: |
+      At 1,500 GPUs, the network interconnect is critical. How would you architect the communication infrastructure?
+    dialogue:
+      - speaker: interviewer
+        text: "Communication is the bottleneck at this scale. How do you architect the network?"
+      - speaker: candidate
+        text: "The interconnect choice determines whether we achieve 50% MFU or 30%."
+    choices:
+      - label: "InfiniBand fat-tree topology"
+        answer: |
+          I'd use an **InfiniBand HDR (200Gbps) or NDR (400Gbps) fabric** with a fat-tree topology, the industry standard for HPC/ML training clusters.
+
+          **Network topology:**
+          - **Fat-tree (Clos)**: Non-blocking topology where aggregate bandwidth at each level equals the total bandwidth below. Every GPU can communicate with every other at full bandwidth simultaneously
+          - **3-level fat-tree**: Leaf switches (connect 8 GPUs per node), spine switches (connect 24 nodes per pod), core switches (connect pods)
+          - **1,500 GPUs**: ~188 nodes (8 GPUs each), ~8 pods of 24 nodes, interconnected by core switches
+
+          **Why InfiniBand?**
+          - **Bandwidth**: NDR = 400 Gbps per port, 4x faster than 100GbE. Critical for all-reduce operations over 70B parameters
+          - **Latency**: ~1 microsecond port-to-port (vs. ~10 microseconds for Ethernet). Matters for frequent small messages in pipeline parallelism
+          - **RDMA**: Remote Direct Memory Access bypasses the CPU and OS kernel. GPU-to-GPU data transfer without CPU involvement
+          - **GPU Direct RDMA**: Data flows directly from GPU memory to InfiniBand NIC to remote GPU memory. Zero CPU copies
+          - **Collective operations**: NCCL (NVIDIA Collective Communications Library) is optimized for InfiniBand, achieving near-theoretical bandwidth for all-reduce
+
+          **Communication patterns and bandwidth requirements:**
+          - **Tensor parallelism (within node)**: NVLink at 600 GB/s (A100) or 900 GB/s (H100). No InfiniBand needed
+          - **Pipeline parallelism (between stages)**: Point-to-point, ~8KB per micro-batch activation. Low bandwidth, latency-sensitive
+          - **Data parallelism all-reduce**: Heaviest traffic. Gradient all-reduce over 70B params / DP_degree. With ring all-reduce: 2 * (N-1)/N * data_size / N_GPUs
+
+          **Cost**: InfiniBand HDR cluster for 1,500 GPUs: ~$2-3M for switches and cables (adds ~30% to GPU cost). Significant but essential for achieving target MFU.
+        next: train_pipeline
+      - label: "Ethernet with RoCE v2 and optimized collectives"
+        answer: |
+          I'd use a **high-performance Ethernet fabric** (100/400GbE) with RoCE v2 (RDMA over Converged Ethernet) and optimized collective operations.
+
+          **Why Ethernet instead of InfiniBand?**
+          - **Cost**: 100GbE switches cost 3-5x less than equivalent InfiniBand. For 1,500 GPUs, savings of $1-2M in network infrastructure
+          - **Availability**: Ethernet equipment is commodity, available from multiple vendors. InfiniBand is primarily NVIDIA/Mellanox
+          - **Existing infrastructure**: Most data centers already have Ethernet. Can leverage existing network ops expertise
+          - **Cloud-native**: Major cloud providers (AWS, GCP, Azure) primarily offer Ethernet networking for GPU instances. EFA (AWS Elastic Fabric Adapter) and Google's Jupiter fabric are Ethernet-based
+
+          **RoCE v2 for RDMA:**
+          - RoCE v2 provides RDMA over Ethernet, achieving near-InfiniBand performance
+          - GPU Direct RDMA supported with RoCE v2, enabling GPU-to-GPU transfers
+          - Requires **lossless Ethernet** (PFC + ECN congestion control) for reliable operation
+
+          **Optimized collectives to compensate for lower bandwidth:**
+          - **Gradient compression**: Compress gradients before all-reduce using TopK sparsification or random-k. Send only top 1% of gradient values, achieving 10-100x compression with <1% accuracy impact
+          - **Overlap communication with computation**: Start all-reduce for layer N while computing gradients for layer N+1. DeepSpeed and FSDP support this natively
+          - **Hierarchical all-reduce**: Reduce locally within each node (NVLink, fast), then across nodes (Ethernet, slower). Reduces cross-node traffic by 8x
+          - **Async pipeline**: For pipeline parallelism, use async sends that overlap with compute
+
+          **Performance with optimizations:**
+          - 400GbE with RoCE v2: ~80% of InfiniBand NDR bandwidth for large all-reduce operations
+          - With gradient compression + hierarchical reduction: Effective bandwidth approaches InfiniBand for most workloads
+          - MFU: ~45-48% (3-5% lower than InfiniBand, but at significantly lower network cost)
+
+          **Trade-off**: Lower raw MFU means longer training time (maybe 50 days instead of 42). But total cost (hardware + network) may be lower. Best for organizations building on cloud infrastructure where InfiniBand isn't available.
+        next: train_pipeline
+
+  - id: train_pipeline
+    stage: training
+    type: info
+    label: "Training Pipeline"
+    speaker: interviewer
+    content: |
+      Let's discuss the end-to-end training pipeline and hyperparameter choices.
+
+      **Training hyperparameters** (based on Chinchilla scaling laws and LLaMA recipes):
+      - **Global batch size**: 4M tokens (1024 sequences of 4096 tokens). Ramp up from 256K to 4M over first 2% of training (batch size warmup)
+      - **Learning rate**: Peak 3e-4 with cosine decay to 3e-5. Linear warmup over 2000 steps
+      - **Optimizer**: AdamW with beta1=0.9, beta2=0.95, weight_decay=0.1, epsilon=1e-8
+      - **Gradient clipping**: Global norm clipping at 1.0 to prevent gradient explosion
+      - **Sequence length**: 4096 tokens (can increase to 8192 or 32768 with RoPE scaling for long-context fine-tuning)
+
+      **Training stability techniques:**
+      - **Gradient norm monitoring**: Log gradient norms per layer every 100 steps. Sudden spikes indicate instability
+      - **Loss spike detection**: If loss increases by >10% over 100 steps, revert to last checkpoint and lower learning rate by 50%
+      - **QK-norm**: Apply RMSNorm to query and key vectors in attention. Prevents attention logit growth that destabilizes training at scale
+      - **Z-loss regularization**: Add small penalty to logits norm, preventing extreme logit values
+
+      **Learning rate schedule:**
+      - Warmup: 2000 steps linear ramp from 0 to 3e-4
+      - Decay: Cosine schedule from 3e-4 to 3e-5 over remaining training
+      - Cool-down: Last 5% of training at constant 3e-5
+
+      **Evaluation during training:**
+      - Compute validation loss every 1000 steps on held-out data from each domain
+      - Run lightweight benchmarks (HellaSwag, MMLU, HumanEval) every 10K steps
+      - Track domain-specific metrics to adjust data mixing ratios
+
+      **Experiment tracking**: Log all metrics to Weights & Biases or MLflow. Track: loss curves, gradient norms, learning rate, throughput, GPU utilization, communication time, checkpoint size, and hardware failures.
+    dialogue:
+      - speaker: interviewer
+        text: "What hyperparameters would you use for training a 70B model?"
+      - speaker: candidate
+        text: "Global batch size of 4M tokens, peak learning rate 3e-4 with cosine decay, AdamW optimizer. These follow the LLaMA-2 recipe which is well-validated at this scale."
+      - speaker: interviewer
+        text: "How do you handle training instabilities?"
+      - speaker: candidate
+        text: "Gradient norm monitoring, automatic loss spike recovery with checkpoint rollback, QK-norm in attention, and gradient clipping. At this scale and cost, training instability can waste millions of dollars."
+    next: deploy_cluster
+
+  - id: deploy_cluster
+    stage: deployment
+    type: question
+    label: "Cluster Management"
+    speaker: interviewer
+    content: |
+      How would you manage the GPU cluster during a 42-day training run?
+    dialogue:
+      - speaker: interviewer
+        text: "42 days of continuous training on 1,500 GPUs. How do you manage this operation?"
+      - speaker: candidate
+        text: "It requires robust cluster management, failure handling, and operational procedures."
+    choices:
+      - label: "SLURM-based HPC cluster"
+        answer: |
+          I'd use a **SLURM-based HPC cluster** with custom job management for the training run.
+
+          **SLURM configuration:**
+          - **Partition**: Dedicated partition for the training job with 1,500 A100 GPUs + 75 spare GPUs
+          - **Job scheduling**: Long-running job (42 days) with preemption protection. SLURM `--time=UNLIMITED` with priority scheduling
+          - **Node health checks**: SLURM's `HealthCheckProgram` runs GPU diagnostics (nvidia-smi health check, memory test, NVLink test) before allocating nodes
+          - **Automatic requeue**: If a node fails, SLURM automatically requeues the job with the failed node excluded. Custom script loads latest checkpoint and resumes
+
+          **Failure handling workflow:**
+          1. NCCL detects communication failure (timeout after 5 minutes of no response)
+          2. Training job signals SLURM (via signal handler)
+          3. SLURM marks failed node as DRAIN, activates spare node
+          4. Resubmit job with updated node list
+          5. Job loads latest checkpoint, resumes training
+          6. **Total downtime: ~5-10 minutes per failure**
+
+          **GPU diagnostics daemon:**
+          - Continuous monitoring on every node: GPU temperature, memory ECC errors, NVLink status, PCIe bandwidth
+          - **Predictive failure detection**: Track ECC error rates. Rising ECC errors often precede GPU failures by hours. Proactively swap suspicious GPUs during scheduled checkpoint windows
+
+          **Operational procedures:**
+          - **Daily standup**: Cluster ops team reviews training progress, hardware status, efficiency metrics
+          - **Weekly maintenance window**: 2-hour window for firmware updates, network maintenance (scheduled during checkpoint)
+          - **On-call rotation**: 24/7 on-call for hardware failures and training instabilities
+
+          **Advantages**: SLURM is battle-tested in HPC. Handles node allocation, job scheduling, and failure recovery natively. Most GPU cluster operators have SLURM expertise.
+        next: mon_training
+      - label: "Kubernetes with GPU operator"
+        answer: |
+          I'd use **Kubernetes** with the NVIDIA GPU Operator for cloud-native cluster management.
+
+          **Kubernetes architecture:**
+          - **GPU nodes**: Each physical server runs as a K8s node with 8 A100s. NVIDIA GPU Operator manages GPU drivers, device plugins, and monitoring
+          - **Training job**: Deployed as a Kubernetes **Job** or **PyTorchJob** (Kubeflow Training Operator). Defines 1,500 GPU worker pods
+          - **Service mesh**: Each worker pod has a unique rank and communicates via NCCL over the pod network
+          - **Shared storage**: PersistentVolumes backed by high-performance storage (Amazon FSx for Lustre, Google Filestore, or Ceph) for checkpoints
+
+          **Why Kubernetes?**
+          - **Cloud-native**: Works on any cloud provider (EKS, GKE, AKS) or bare metal. Portable across environments
+          - **Elastic scaling**: Scale GPU count up/down without cluster reconfiguration. Add 100 GPUs for faster training, remove them when done
+          - **Multi-tenancy**: Other training jobs and experiments can run on the same cluster when the large job doesn't need all GPUs
+          - **Ecosystem**: Rich monitoring (Prometheus + Grafana), logging (ELK), and scheduling (Volcano, Kueue) ecosystem
+
+          **Failure handling with Kubeflow:**
+          - PyTorchJob controller detects worker pod failure
+          - Replaces failed pod on a healthy node (from spare node pool)
+          - Surviving workers wait for replacement, then all load from latest checkpoint
+          - **Elastic training** (torch.distributed.elastic): Supports changing the number of workers mid-training. If a node fails, continue with fewer workers temporarily while replacement provisions
+
+          **Volcano scheduler for GPU-aware scheduling:**
+          - Gang scheduling: All 1,500 worker pods are scheduled simultaneously or not at all (avoids partial allocation deadlock)
+          - Topology-aware placement: Place workers that communicate frequently (tensor parallel group) on the same node or rack
+          - Preemption: Training job can preempt lower-priority jobs to maintain GPU allocation
+
+          **Trade-off**: Kubernetes adds networking overhead (pod networking, CNI plugins). For InfiniBand, requires special configuration (SR-IOV, host networking). More complex than SLURM for pure HPC workloads, but better for mixed-use clusters.
+        next: mon_training
+
+  - id: mon_training
+    stage: monitoring
+    type: info
+    label: "Training Monitoring"
+    speaker: interviewer
+    content: |
+      Let's discuss monitoring during the 42-day training run.
+
+      **Training metrics dashboard** (real-time):
+      - **Loss curve**: Training and validation loss plotted against tokens processed. The most important signal
+      - **Throughput**: Tokens/sec, samples/sec, and MFU over time. Drops indicate hardware or communication issues
+      - **GPU utilization heatmap**: Per-GPU utilization across the cluster. Cold spots indicate stragglers or failures
+      - **Memory usage**: Per-GPU memory allocation. Approaching limits risks OOM crashes
+      - **Gradient statistics**: Norm, max, min per layer group. Early warning for instability
+
+      **Cluster health monitoring:**
+      - **GPU temperature**: Alert if any GPU exceeds 85C (thermal throttling at 83C on A100)
+      - **ECC error rates**: Track correctable and uncorrectable memory errors. Rising rates predict failure
+      - **NVLink/network bandwidth**: Monitor actual vs. expected bandwidth. Degradation indicates hardware issues
+      - **Straggler detection**: Identify GPUs that consistently take longer per step. Often indicates thermal throttling, memory errors, or network congestion
+
+      **Automated interventions:**
+      - **Loss spike recovery**: If training loss increases by >10% over 100 steps, automatically pause, revert to checkpoint 500 steps earlier, reduce LR by 50%, resume
+      - **Straggler mitigation**: If a GPU is >20% slower than average for 10 consecutive steps, preemptively move its workload to a spare
+      - **Temperature management**: If cluster-wide average temperature rises, reduce batch size slightly to reduce power consumption until cooling catches up
+
+      **Communication with stakeholders:**
+      - **Daily report**: Automated email/Slack with: tokens trained, estimated completion date, loss trajectory, hardware incidents
+      - **Milestone alerts**: Notification when training reaches 25%, 50%, 75%, 100% of target tokens
+      - **Cost tracking**: Running total of GPU-hours consumed, estimated remaining cost
+
+      **Post-training analysis:** After completion, produce a comprehensive training report: final metrics, hardware utilization, failure timeline, cost breakdown, and lessons learned.
+    dialogue:
+      - speaker: interviewer
+        text: "During a 42-day run costing $3M+, monitoring is critical. What do you track?"
+      - speaker: candidate
+        text: "Loss curve, throughput, GPU utilization heatmap, and gradient statistics in real-time. Plus cluster health metrics like temperature, ECC errors, and network bandwidth."
+      - speaker: interviewer
+        text: "What automated interventions would you set up?"
+      - speaker: candidate
+        text: "Auto-recovery from loss spikes by reverting to an earlier checkpoint, straggler detection and preemptive migration, and thermal management through batch size adjustment."
+      - speaker: interviewer
+        text: "Good. Stakeholder communication?"
+      - speaker: candidate
+        text: "Daily automated reports with progress, estimated completion, and cost tracking. Nobody wants a $3M surprise."
+    next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Design Complete"
+    speaker: interviewer
+    content: |
+      Outstanding work! You've designed a comprehensive distributed training system for billion-parameter models.
+
+      **Your design summary:**
+      - Chose 3D parallelism or FSDP as the distributed training strategy
+      - Defined efficiency metrics anchored on MFU (target >50%)
+      - Designed data pipeline for 15T tokens with efficient sharding and mixing
+      - Implemented fault tolerance with synchronous or asynchronous checkpointing
+      - Applied memory optimizations: mixed precision, activation checkpointing, Flash Attention
+      - Selected InfiniBand or Ethernet interconnect with appropriate trade-offs
+      - Defined training hyperparameters and stability techniques
+      - Managed cluster operations with SLURM or Kubernetes
+      - Built comprehensive monitoring with automated interventions
+
+      **Key strengths:**
+      - Practical understanding of GPU memory constraints and optimization techniques
+      - Fault tolerance designed for the reality of daily GPU failures at scale
+      - Training stability techniques prevent expensive wasted compute
+      - Cost-aware design with clear efficiency targets
+
+      **Areas for further exploration:**
+      - Sequence parallelism for very long contexts (32K+ tokens)
+      - Expert parallelism for Mixture-of-Experts architectures
+      - Multi-cluster training across data centers
+      - Carbon-aware scheduling (train when renewable energy is available)
+      - Continuous pre-training and model updates without restarting from scratch

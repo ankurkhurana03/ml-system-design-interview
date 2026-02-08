@@ -1,0 +1,510 @@
+id: self-driving-detection
+title: "Self-Driving Object Detection"
+description: "Design an object detection pipeline for a self-driving car's perception layer."
+companies: ["Waymo", "Tesla", "Cruise"]
+domains: ["Computer Vision", "Real-time"]
+root: pd_start
+
+nodes:
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design the **object detection pipeline** for a self-driving car's perception system. This is the component that identifies and localizes vehicles, pedestrians, cyclists, traffic signs, and other road objects from sensor data.
+
+      **System context:**
+      - The autonomous vehicle (AV) operates at **SAE Level 4** autonomy in urban environments (geo-fenced areas)
+      - Sensor suite: **6 cameras** (360-degree coverage, 2MP each at 30 FPS), **1 LiDAR** (128-beam, 10 Hz), **5 radars** (77 GHz, 20 Hz)
+      - Detection must cover: vehicles, pedestrians, cyclists, motorcycles, traffic signs/signals, construction cones, animals, debris
+      - **Safety-critical**: A missed pedestrian at 30 mph = ~1.5 seconds to impact at 50m. Detection latency directly affects braking distance
+
+      **Performance requirements:**
+      - **End-to-end latency**: Sensor input to detection output in **<100ms** (enabling 10 Hz decision cycles)
+      - **Recall for vulnerable road users** (pedestrians, cyclists): **>99.9%** (one miss per thousand is unacceptable)
+      - **Range**: Detect vehicles at **200m**, pedestrians at **100m**, traffic signs at **80m**
+      - **All conditions**: Day, night, rain, fog, glare, snow
+
+      This is arguably the most safety-critical ML system deployed today. Let's begin.
+    dialogue:
+      - speaker: interviewer
+        text: "We're designing object detection for an L4 self-driving car. This is a safety-critical system where missed detections can be fatal."
+      - speaker: candidate
+        text: "What's the sensor suite we're working with?"
+      - speaker: interviewer
+        text: "Six cameras for 360-degree coverage, 128-beam LiDAR at 10Hz, and five 77GHz radars. Detection must work within 100ms end-to-end."
+      - speaker: candidate
+        text: "And what objects do we need to detect?"
+      - speaker: interviewer
+        text: "Vehicles, pedestrians, cyclists, traffic signs, construction zones, animals, debris - essentially everything on or near the road. Pedestrian recall must be above 99.9%."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: question
+    label: "Sensor Fusion Strategy"
+    speaker: interviewer
+    content: |
+      The fundamental architectural decision is how to fuse data from cameras, LiDAR, and radar. How would you approach multi-sensor perception?
+    dialogue:
+      - speaker: interviewer
+        text: "We have cameras, LiDAR, and radar. How do you fuse these for object detection?"
+      - speaker: candidate
+        text: "The key architectural decision is early fusion versus late fusion of sensor modalities."
+    choices:
+      - label: "Camera-primary with LiDAR/radar validation"
+        answer: |
+          I'd use a **camera-primary architecture** where cameras are the main detection modality, with LiDAR and radar providing depth validation and redundancy.
+
+          **Rationale (the Tesla philosophy)**: Cameras capture the richest semantic information - color, texture, text on signs, traffic light states, turn signals, brake lights. These visual cues are essential for understanding road scenes. LiDAR provides excellent depth but can't read signs or distinguish a red light from green.
+
+          **Architecture**:
+          1. **Camera backbone**: Process all 6 camera feeds through a shared CNN/ViT backbone to extract multi-scale features
+          2. **BEV (Bird's Eye View) transform**: Project camera features into a unified BEV representation using **Lift-Splat-Shoot** (Philion & Fidler, 2020) or **BEVFormer** (Li et al., 2022). This creates a top-down feature map of the scene
+          3. **Detection head**: Run 3D object detection on the BEV features, predicting 3D bounding boxes (x, y, z, width, height, length, heading)
+          4. **LiDAR validation**: Use LiDAR point cloud to verify detected objects have physical presence (not a billboard or reflection). Also use LiDAR range for precise depth estimation
+          5. **Radar for velocity**: Radar provides direct velocity measurements via Doppler. Attach velocity estimates to detected objects for motion prediction
+
+          **Advantages**: Scales better (cameras are $50 each vs. $10K+ for LiDAR), handles more semantic tasks, and follows the approach Tesla has validated at massive scale (1M+ vehicles providing training data).
+
+          **Risk**: Camera-only depth estimation has larger errors than LiDAR, especially at range. Mitigate with LiDAR validation for critical decisions (emergency braking).
+        next: met_safety
+      - label: "LiDAR-primary with camera fusion (early fusion)"
+        answer: |
+          I'd use a **LiDAR-primary early fusion architecture** where LiDAR point clouds and camera images are fused at the feature level before detection.
+
+          **Rationale (the Waymo/Cruise philosophy)**: For a safety-critical system, precise 3D localization is paramount. LiDAR provides centimeter-accurate depth at all ranges, regardless of lighting. A pedestrian at 80m in the dark is invisible to cameras but clearly visible in LiDAR. When lives are at stake, we want the most geometrically accurate sensor as the foundation.
+
+          **Architecture - BEVFusion** (Liu et al., 2023):
+          1. **LiDAR branch**: Voxelize the point cloud (0.1m resolution), process with **VoxelNet** or **CenterPoint** 3D backbone. Produces BEV feature map from geometric data
+          2. **Camera branch**: Process 6 cameras through shared 2D backbone (ResNet-50 or Swin-T), project features to BEV using camera-to-LiDAR calibration
+          3. **Fusion module**: Concatenate LiDAR BEV features + camera BEV features channel-wise. Apply convolutional fusion layers to learn cross-modal interactions
+          4. **Detection heads**: Predict 3D bounding boxes, object class, velocity, and heading from fused BEV features
+          5. **Radar integration**: Radar points provide velocity ground truth and long-range detection (200m+) for highway scenarios
+
+          **Why early fusion?** Late fusion (detect separately, merge results) loses information at the fusion boundary. Early fusion allows the model to learn that "LiDAR cluster + camera patch showing blue color = police car" - cross-modal reasoning that late fusion can't achieve.
+
+          **Performance**: BEVFusion achieves **72.9 NDS** on nuScenes benchmark, the leading multi-modal result. It outperforms camera-only by ~8 points and LiDAR-only by ~3 points.
+
+          **Cost trade-off**: LiDAR adds $5-10K per vehicle. At L4, this cost is justified by the safety improvement. LiDAR costs are dropping ~30% annually.
+        next: met_safety
+
+  - id: met_safety
+    stage: metrics
+    type: info
+    label: "Safety Metrics"
+    speaker: interviewer
+    content: |
+      For a safety-critical system, metrics must be exceptionally rigorous.
+
+      **Primary safety metrics:**
+      - **Recall by object class**: Pedestrians >99.9%, cyclists >99.8%, vehicles >99.5%. These reflect the severity hierarchy - missing a pedestrian is worse than missing a parked car
+      - **True Positive Rate at fixed False Positive Rate**: At FPR=0.01%, what is our TPR? This measures performance at the operating point where we tolerate very few false alarms
+      - **Mean recall across distance bins**: 0-30m, 30-60m, 60-100m, 100-200m. Must maintain high recall even at range
+
+      **Detection quality metrics:**
+      - **3D IoU-based mAP**: Standard detection metric using 3D bounding box overlap. Target: >70 mAP on nuScenes-scale benchmark
+      - **Heading accuracy**: Mean absolute heading error <5 degrees. Heading is critical for predicting where a vehicle will go
+      - **Velocity estimation error**: <1 m/s for detected objects. Accurate velocity is needed for time-to-collision calculations
+
+      **Latency metrics:**
+      - **End-to-end latency**: Sensor timestamp to detection output. Target: <70ms (leaving 30ms budget for planning)
+      - **Latency jitter**: Standard deviation of latency must be <10ms. Predictable timing is essential for real-time control
+      - **Worst-case latency**: p99.9 must be <100ms. A single slow inference can be catastrophic
+
+      **Failure mode metrics:**
+      - **False negative rate in critical zones**: Within 30m and in the vehicle's predicted path. Must be essentially zero
+      - **Ghost object rate**: False detections that could cause unnecessary emergency braking. Target: <1 per 1000 km driven
+    dialogue:
+      - speaker: interviewer
+        text: "For self-driving, how do you define 'good enough' detection performance?"
+      - speaker: candidate
+        text: "Standard mAP isn't sufficient. We need class-specific recall targets reflecting the severity hierarchy - missing a pedestrian is categorically different from missing a traffic cone."
+      - speaker: interviewer
+        text: "What about latency? How strict are the timing requirements?"
+      - speaker: candidate
+        text: "End-to-end under 70ms, with the p99.9 under 100ms. Latency jitter matters too - the planning system needs predictable input timing."
+      - speaker: interviewer
+        text: "Good. How do you balance recall with false positives?"
+      - speaker: candidate
+        text: "Ghost objects that cause phantom braking are a real UX and safety issue. We need to track false detection rate per kilometer driven, targeting less than 1 per 1000km."
+    next: data_pipeline
+
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      Let's discuss data for training this detection system.
+
+      **Available data:**
+      - **Fleet logs**: 10M miles of driving data with sensor recordings (cameras + LiDAR + radar). ~1PB of raw data
+      - **Labeled data**: 500K frames with full 3D bounding box annotations (vehicles, pedestrians, cyclists, signs). Each frame costs ~$5-10 to label (3D annotation is expensive)
+      - **Public datasets**: nuScenes (1.4M 3D boxes), Waymo Open (12M 3D boxes), KITTI (200K 3D boxes), Argoverse 2 (5M 3D boxes)
+      - **Simulation**: CARLA, NVIDIA DRIVE Sim for generating unlimited synthetic scenarios
+
+      **Data challenges unique to self-driving:**
+      - **Long-tail events**: Most driving is uneventful. Rare critical scenarios (child running into street, construction zone, fallen tree) are underrepresented but most important
+      - **Annotation quality**: 3D bounding box annotation on point clouds is error-prone. Inter-annotator agreement is typically ~90% IoU for vehicles, ~80% for pedestrians (smaller, harder to delineate)
+      - **Domain shift**: Training data from San Francisco doesn't transfer perfectly to Detroit (different road styles, weather patterns, vehicle types)
+      - **Sensor calibration drift**: Camera-LiDAR calibration can drift over time, causing misaligned fusion features
+
+      **Auto-labeling pipeline**: Use an ensemble of 3 independent detection models to auto-label fleet logs. Where all 3 agree (high confidence), accept as ground truth. Where they disagree, flag for human review. This 10x reduces annotation cost while maintaining quality.
+    dialogue:
+      - speaker: interviewer
+        text: "Data is critical for self-driving. What are the unique challenges?"
+      - speaker: candidate
+        text: "The long-tail problem is severe. 99% of driving is routine, but the 1% of unusual scenarios is where safety matters most."
+      - speaker: interviewer
+        text: "How do you address the cost of 3D annotation?"
+      - speaker: candidate
+        text: "Auto-labeling with model ensembles, where high-confidence agreements become ground truth and disagreements go to human review. This dramatically reduces per-frame labeling cost."
+      - speaker: interviewer
+        text: "Good. And the domain shift between cities?"
+    next: data_question
+
+  - id: data_question
+    stage: data
+    type: question
+    label: "Long-Tail Strategy"
+    speaker: interviewer
+    content: |
+      How would you address the long-tail problem - ensuring the model handles rare but critical scenarios?
+    dialogue:
+      - speaker: interviewer
+        text: "A child running between parked cars. A wheelchair user in a crosswalk. A fallen tree blocking a lane. How do you ensure the model handles these?"
+      - speaker: candidate
+        text: "These rare scenarios are the difference between a safe and unsafe system."
+    choices:
+      - label: "Simulation-heavy approach (synthetic data generation)"
+        answer: |
+          I'd use **high-fidelity simulation** to generate unlimited training data for rare scenarios.
+
+          **Simulation platform**: NVIDIA DRIVE Sim or CARLA with custom assets. These produce physically-accurate sensor simulations - camera images with realistic lighting, LiDAR point clouds with proper beam patterns, and radar returns with realistic noise.
+
+          **Scenario generation**:
+          - **Programmatic scenarios**: Script specific dangerous situations - jaywalking pedestrian, cyclist swerving, construction zone entry, emergency vehicle approach. Generate 1000+ variations of each by randomizing speeds, distances, lighting, and backgrounds
+          - **Adversarial scenario generation** (Ding et al., 2021): Use optimization to find scenarios that cause the current model to fail. Then generate training data from these failure modes
+          - **Domain randomization**: Vary textures, lighting, weather, traffic density, road geometry to prevent overfitting to simulation artifacts
+          - **Reconstruction-based simulation**: Reconstruct real-world scenes from fleet logs, then insert simulated actors. This provides realistic backgrounds with controllable actors
+
+          **Bridging the sim-to-real gap**:
+          - **Neural rendering**: Use NeRF or 3D Gaussian Splatting to render photorealistic novel views of real-world scenes
+          - **Style transfer**: Apply real-world visual styles to simulated images
+          - **Progressive domain adaptation**: Pre-train on simulation, fine-tune on real data, iterate
+
+          **Scale**: Generate 10M simulated frames focusing on rare scenarios. Mix with real data at 1:1 ratio. This gives 50x more exposure to critical scenarios than real data alone.
+
+          **Validation**: Always validate on real-world held-out data. Track "sim-to-real" performance gap. If gap > 5% mAP, improve simulation fidelity.
+        next: feat_design
+      - label: "Real-data mining with scenario retrieval"
+        answer: |
+          I'd invest in **large-scale scenario mining** from fleet logs to find and label real examples of rare events.
+
+          **Mining pipeline**: Search through 10M miles of fleet logs for specific scenarios using a combination of:
+          - **Kinematic triggers**: Hard braking events (>0.5g deceleration), sudden steering, near-miss events. These correlate with unusual scenarios
+          - **Perception anomaly triggers**: Frames where the current model shows high uncertainty, conflicting detections, or rapid changes in tracked object state
+          - **Natural language search**: Use CLIP or similar to search for visual scenarios described in text - "construction zone with workers," "cyclist at intersection," "child near road"
+          - **GPS-based mining**: Identify locations with known complexity (school zones, hospital areas, construction permits) and extract all fleet data from those areas
+
+          **Targeted data collection**: Deploy dedicated data collection vehicles to environments with high scenario density:
+          - School zones during dismissal time
+          - Construction zones
+          - Areas with high pedestrian/cyclist density
+          - Night driving in urban areas
+          - Adverse weather conditions
+
+          **Annotation priority**: Label mined rare scenarios first. A frame showing a near-miss is worth 100x more than a frame of empty highway for training. Use the auto-labeling ensemble for bulk labeling, reserve expensive human annotators for rare/ambiguous scenarios.
+
+          **Scale**: Mine ~200K rare scenario frames from fleet logs, collect ~50K additional targeted captures. Combined with 500K existing labeled frames, this provides a balanced training set with adequate long-tail representation.
+
+          **Advantage over simulation**: Real data has no sim-to-real gap. The textures, lighting, object appearances, and sensor characteristics are perfectly real. This is especially important for edge cases where simulation fidelity is hardest to achieve (rain on windshield, night glare, dust).
+        next: feat_design
+
+  - id: feat_design
+    stage: features
+    type: info
+    label: "Feature Design"
+    speaker: interviewer
+    content: |
+      Let's discuss the feature representation for detection.
+
+      **BEV (Bird's Eye View) is the standard representation** for autonomous driving perception. Here's why and how:
+
+      **Why BEV?**
+      - All downstream tasks (planning, prediction) operate in 3D world coordinates. BEV naturally represents the driving scene in this coordinate system
+      - Fusing multiple cameras and LiDAR into a single BEV map creates a unified representation regardless of sensor placement
+      - Object sizes and distances are consistent in BEV (unlike perspective images where distant objects appear smaller)
+
+      **BEV feature construction:**
+      - **From cameras**: Use Lift-Splat-Shoot or BEVFormer to lift 2D image features into 3D voxels, then project to BEV. Resolution: 0.4m per pixel in a 200m x 200m grid (500x500 feature map)
+      - **From LiDAR**: Voxelize point cloud at 0.1m resolution, apply sparse 3D convolutions (e.g., SpConv), flatten to BEV
+      - **From radar**: Project radar detections to BEV grid, encode velocity as additional channels
+
+      **Multi-scale features**: Like FPN in 2D detection, we need multi-scale BEV features for detecting objects at different sizes. A motorcycle occupies fewer BEV pixels than a truck.
+
+      **Temporal features**: Stack BEV features from the last 5-10 frames (0.5-1 second history). This provides implicit velocity estimation and helps detect partially occluded objects that were visible in previous frames.
+
+      **Feature dimensions**: Final BEV feature map is typically 500x500 spatial * 256 channels = ~250MB of feature data per frame. GPU memory management is critical.
+    dialogue:
+      - speaker: interviewer
+        text: "What feature representation would you use for the detection model?"
+      - speaker: candidate
+        text: "Bird's Eye View is the standard and for good reason. It provides a unified coordinate system that all downstream modules - planning, prediction - operate in."
+      - speaker: interviewer
+        text: "How do you construct BEV features from cameras?"
+      - speaker: candidate
+        text: "Lift-Splat-Shoot or BEVFormer projects 2D image features into 3D voxels using estimated depth, then collapses to a top-down BEV map."
+      - speaker: interviewer
+        text: "And temporal features?"
+      - speaker: candidate
+        text: "Stack BEV features from the last 5-10 frames. This gives implicit velocity and helps with occlusion - an object hidden in this frame was visible in the previous frame."
+    next: mod_question
+
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Detection Architecture"
+    speaker: interviewer
+    content: |
+      What detection architecture would you use on the BEV features?
+    dialogue:
+      - speaker: interviewer
+        text: "Given BEV features, what detection head architecture would you choose?"
+      - speaker: candidate
+        text: "The main options are anchor-based detectors, anchor-free center-based detectors, and transformer-based approaches."
+    choices:
+      - label: "CenterPoint (anchor-free, center-based)"
+        answer: |
+          I'd use **CenterPoint** (Yin et al., 2021) as the detection head, an anchor-free center-based detector.
+
+          **How CenterPoint works**:
+          1. Predict a **heatmap** over the BEV grid where each peak indicates an object center
+          2. For each detected center, regress: 3D bounding box dimensions (w, h, l), heading angle, velocity vector, and a height offset (z-center)
+          3. Use **max-pooling NMS** on the heatmap to extract peaks (faster than traditional NMS)
+
+          **Why CenterPoint for driving?**
+          - **Anchor-free**: No anchor hyperparameters to tune. Objects in driving scenes vary enormously in size (motorcycle vs. truck), making anchor design difficult
+          - **Efficient**: Single-shot prediction without region proposals or anchor matching. Inference is faster than two-stage detectors
+          - **Strong tracking integration**: CenterPoint naturally extends to tracking by associating centers across frames using velocity predictions. This creates a unified detection+tracking model
+          - **Proven**: Achieves **67.3 NDS** on nuScenes with LiDAR-only, used in production by multiple AV companies
+
+          **Architecture details**:
+          - BEV backbone: **PointPillars** or **VoxelNet** encoder followed by 2D convolutional neck
+          - Detection head: Two Conv layers per regression target (heatmap, box dimensions, heading, velocity)
+          - Class-specific heads: Separate heatmaps for vehicles, pedestrians, cyclists (different aspect ratios and behaviors)
+
+          **Multi-task extension**: Add additional heads for lane detection, drivable area segmentation, and traffic light state classification on the same BEV features. Shared backbone amortizes computation across tasks.
+        next: train_system
+      - label: "DETR3D / StreamPETR (transformer-based)"
+        answer: |
+          I'd use a **transformer-based 3D detector** like StreamPETR or DETR3D for its strong performance and elegant architecture.
+
+          **StreamPETR** (Wang et al., 2023):
+          - Uses **learnable 3D object queries** that attend to multi-camera image features via cross-attention
+          - Each query represents a potential object in 3D space, learning to specialize in different regions and object types
+          - **Temporal propagation**: Object queries propagate across frames, enabling natural temporal modeling without explicit BEV construction
+          - Achieves **73.5 NDS** on nuScenes, state-of-the-art for camera-based detection
+
+          **Why transformers for driving?**
+          - **Global reasoning**: Self-attention allows reasoning about relationships between objects. A car ahead of a bus is likely to be in a lane, not floating. These contextual cues improve detection
+          - **Set prediction**: DETR-style set prediction with Hungarian matching avoids NMS entirely, producing cleaner detection outputs
+          - **Scalable with data**: Transformers improve more with additional training data compared to CNNs. With millions of labeled frames available, this matters
+          - **Unified architecture**: Same transformer architecture handles detection, tracking, and prediction. Waymo's recent work shows end-to-end transformer models outperform modular pipelines
+
+          **Architecture details**:
+          - **Image backbone**: ResNet-50 or ViT-B for each camera, producing multi-scale features
+          - **900 object queries** (300 for vehicles, 300 for pedestrians/cyclists, 300 for other)
+          - **6 transformer decoder layers** with cross-attention to image features and self-attention between queries
+          - **Temporal attention**: Queries attend to both current and previous frame features
+
+          **Trade-off**: Transformers are compute-heavy. StreamPETR runs at ~4 FPS on a single A100 with 6 cameras. For 10 Hz detection, need custom inference optimization or multiple GPUs. Deploying attention-heavy models on edge hardware is an active research challenge.
+        next: train_system
+
+  - id: train_system
+    stage: training
+    type: info
+    label: "Training System"
+    speaker: interviewer
+    content: |
+      Let's discuss the training strategy for this safety-critical model.
+
+      **Training data composition:**
+      - 500K real labeled frames (base training set)
+      - 200K mined rare scenario frames (long-tail augmentation)
+      - Optional: 1-10M simulated frames (if using simulation approach)
+      - Balanced sampling: 40% routine driving, 30% dense urban, 20% rare scenarios, 10% adverse weather
+
+      **Training approach:**
+      - **Mixed-precision training (FP16)** on 8-32 A100 GPUs. BEV models are memory-intensive
+      - **Class-balanced sampling**: Oversample frames containing rare classes (cyclists, construction workers, animals) by 5-10x
+      - **Copy-paste augmentation** (Ghiasi et al., 2021): Paste 3D point cloud segments of rare objects into training scenes. Want more cyclists? Copy-paste cyclist LiDAR points + camera crops from other frames
+      - **Multi-scale training**: Vary BEV resolution from 0.2m to 0.8m per pixel. Helps with objects at different ranges
+
+      **Loss function:**
+      - **Focal loss** for heatmap (handles class imbalance between object-containing and empty BEV cells)
+      - **L1 loss** for bounding box regression
+      - **Smooth L1 loss** for heading angle
+      - **Auxiliary losses**: Depth estimation supervision on camera features, point cloud segmentation on LiDAR features
+
+      **Safety-aware training modifications:**
+      - **Asymmetric loss weighting**: Missing a pedestrian (false negative) is penalized 10x more heavily than a false positive
+      - **Hard example mining**: After each epoch, identify the worst-performing scenarios and increase their sampling weight
+      - **Adversarial training**: Add perturbations to sensor inputs during training to improve robustness to sensor noise, calibration errors, and adverse conditions
+
+      **Training duration**: ~72 hours on 16 A100 GPUs for full training. Incremental fine-tuning with new data: ~12 hours.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you train for safety? Standard training optimizes average performance, not worst-case."
+      - speaker: candidate
+        text: "Asymmetric loss weighting is key - false negatives for pedestrians are penalized 10x more than false positives. We also oversample rare scenarios heavily."
+      - speaker: interviewer
+        text: "What about augmentation?"
+      - speaker: candidate
+        text: "Copy-paste augmentation in 3D is powerful. We can literally paste cyclist point clouds and image crops into training scenes, creating more exposure to rare road users."
+      - speaker: interviewer
+        text: "And adversarial robustness?"
+      - speaker: candidate
+        text: "Add sensor noise and calibration perturbations during training. The model needs to be robust to imperfect real-world sensor data."
+    next: deploy_system
+
+  - id: deploy_system
+    stage: deployment
+    type: question
+    label: "On-Vehicle Deployment"
+    speaker: interviewer
+    content: |
+      How would you deploy this model to run in real-time on the vehicle?
+    dialogue:
+      - speaker: interviewer
+        text: "The model needs to run at 10 Hz on hardware that fits in a car trunk and consumes reasonable power. How do you deploy?"
+      - speaker: candidate
+        text: "Embedded GPU deployment with heavy optimization is the only path for meeting latency requirements."
+    choices:
+      - label: "NVIDIA Orin with TensorRT optimization"
+        answer: |
+          I'd deploy on the **NVIDIA DRIVE Orin** platform with extensive TensorRT optimization.
+
+          **Hardware**: NVIDIA DRIVE Orin SoC
+          - 254 TOPS INT8 performance
+          - 32GB unified memory
+          - ~60W power consumption (automotive-grade, -25 to 80 C operating range)
+          - Cost: ~$1,000-2,000 per unit at volume
+
+          **Model optimization pipeline**:
+          1. **FP16 quantization**: Convert all model weights and activations from FP32 to FP16. ~2x speedup with negligible accuracy loss (<0.1 mAP drop)
+          2. **INT8 quantization** (selective): Quantize backbone and BEV encoder to INT8 using calibration on 1K representative frames. Keep detection head in FP16 for precision. ~1.5x additional speedup
+          3. **TensorRT compilation**: Convert PyTorch model to TensorRT engine with optimized kernel selection and layer fusion. Typically 2-3x speedup over native PyTorch
+          4. **Sparse convolution optimization**: For LiDAR voxel processing, use spconv with TensorRT custom plugins. LiDAR point clouds are ~90% empty; sparse operations exploit this
+          5. **Operator fusion**: Fuse sequential Conv-BN-ReLU into single operations. Fuse camera backbone multi-view processing into batched operations
+
+          **Inference pipeline** (total ~65ms):
+          - Camera preprocessing + backbone: 15ms (batched across 6 cameras)
+          - LiDAR voxelization + backbone: 10ms
+          - BEV feature construction + fusion: 15ms
+          - Detection head + post-processing: 10ms
+          - Temporal feature accumulation: 5ms
+          - Buffer/scheduling: 10ms
+
+          **Redundancy**: Deploy two Orin chips in active-active configuration. Both run detection independently. If either fails, the other maintains full capability. Cross-validate outputs for additional safety.
+        next: mon_production
+      - label: "Custom ASIC / FPGA accelerator"
+        answer: |
+          I'd deploy on a **custom inference accelerator** designed specifically for autonomous driving perception workloads.
+
+          **Why custom hardware?** General-purpose GPUs like Orin are flexible but not optimized for the specific operations in AV perception. Custom silicon can achieve 3-5x better performance-per-watt for the specific workloads we need.
+
+          **Custom accelerator design approach**:
+          - Partner with a chip design company (e.g., Mobileye EyeQ, Hailo, or internal ASIC team)
+          - Optimize for the specific operators: 3D sparse convolutions, BEV grid operations, attention mechanisms, camera projection transforms
+          - Dedicated hardware blocks for common sub-tasks: NMS, heatmap peak extraction, box decoding
+          - Target: **500+ TOPS** at **<100W**, 3x Orin's performance-per-watt
+
+          **FPGA as interim solution**:
+          - Use Xilinx Versal or Intel Agilex FPGAs while custom ASIC is designed (18-24 month timeline)
+          - FPGAs offer hardware customization without full ASIC commitment
+          - Reprogram FPGA when model architecture changes (flexibility advantage over ASIC)
+
+          **Model-hardware co-design**:
+          - Design the model architecture with hardware constraints in mind
+          - Use operators that map efficiently to custom accelerators (avoid exotic operations)
+          - Fixed-point arithmetic (INT8/INT4) throughout, quantization-aware training from the start
+          - Structured sparsity (2:4 or 4:8) that hardware can exploit for 2x speedup
+
+          **Trade-off**: Custom hardware is expensive to develop ($10-50M for ASIC tape-out) and takes 18-24 months. Only justified at scale (100K+ vehicles). FPGAs bridge the gap but are less power-efficient than ASICs.
+
+          **Companies taking this path**: Mobileye (EyeQ6), Tesla (FSD chip), Waymo (custom TPU-based inference). All achieved superior performance-per-watt versus off-the-shelf GPUs.
+        next: mon_production
+
+  - id: mon_production
+    stage: monitoring
+    type: info
+    label: "Production Monitoring"
+    speaker: interviewer
+    content: |
+      For a safety-critical system, monitoring goes far beyond standard ML metrics.
+
+      **Real-time on-vehicle monitoring:**
+      - **Confidence distribution tracking**: If average detection confidence drops suddenly, something is wrong (dirty camera lens, calibration drift, novel environment)
+      - **Detection rate monitoring**: Track objects detected per frame. A sudden drop to zero detections in urban driving indicates system failure
+      - **Latency watchdog**: Hardware timer that triggers emergency stop if detection pipeline exceeds 100ms. This is a hard real-time constraint
+      - **Sensor health**: Monitor camera image quality (brightness, contrast, blur), LiDAR point density, radar signal-to-noise
+
+      **Fleet-level monitoring:**
+      - **Disengagement analysis**: Every time the safety driver takes over, analyze what the perception system missed or got wrong. This is the most valuable data source for finding systematic issues
+      - **Near-miss detection**: Automatically identify situations where emergency braking was triggered. Were they true hazards or false detections? Track ghost braking rate per 1000 km
+      - **Cross-vehicle consistency**: The same intersection should produce similar detection outputs across different vehicles. Large variance indicates sensor or calibration issues
+      - **Performance by ODD (Operational Design Domain)**: Track accuracy separately for different conditions - urban vs suburban, day vs night, clear vs rain. Ensure all ODD conditions meet safety requirements
+
+      **Continuous validation:**
+      - **Shadow mode testing**: Deploy new model versions in shadow mode on 100+ vehicles. Compare outputs against current production model. Only promote if safety metrics improve
+      - **Regression testing**: Maintain a library of 10,000+ critical scenarios. Every model update must pass all scenarios without regression
+      - **Simulation re-testing**: Run new models through CARLA scenarios that stress-test rare events
+
+      **Safety certification**: Work with safety assessment teams to maintain ISO 26262 (ASIL-D) compliance. Document model capabilities, limitations, and failure modes. Regular third-party audits.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you monitor a safety-critical perception system in production?"
+      - speaker: candidate
+        text: "Multi-layered: real-time on-vehicle watchdogs, fleet-level analytics, and continuous offline validation."
+      - speaker: interviewer
+        text: "What's the most valuable data source for finding issues?"
+      - speaker: candidate
+        text: "Disengagements - when the safety driver takes over. Every disengagement is a gold mine of information about what the perception system missed."
+      - speaker: interviewer
+        text: "And for deploying model updates?"
+      - speaker: candidate
+        text: "Shadow mode on 100+ vehicles first, regression testing against 10,000 critical scenarios, and simulation stress-testing. Only then promote to production."
+    next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Design Complete"
+    speaker: interviewer
+    content: |
+      Outstanding work! You've designed a comprehensive perception pipeline for autonomous driving.
+
+      **Your design summary:**
+      - Chose camera-primary or LiDAR-primary sensor fusion strategy with clear rationale
+      - Defined safety-focused metrics with class-specific recall targets and strict latency requirements
+      - Addressed the long-tail data challenge through simulation or real-data mining
+      - Designed BEV-based feature representation with temporal context
+      - Selected detection architecture optimized for driving scenes
+      - Built a safety-aware training pipeline with asymmetric losses and copy-paste augmentation
+      - Deployed on automotive-grade hardware with extensive optimization
+      - Implemented multi-layered monitoring from real-time watchdogs to fleet-level analytics
+
+      **Key strengths:**
+      - Safety is treated as the overriding concern at every design decision
+      - The system handles the long tail of rare but critical scenarios
+      - Temporal context improves robustness to occlusion and sensor noise
+      - Fleet-level monitoring creates a continuous improvement loop
+
+      **Areas for further exploration:**
+      - End-to-end learning: Can we train perception + planning jointly?
+      - Uncertainty quantification: Can the model express "I'm not sure" reliably?
+      - Adversarial robustness: How does the system handle adversarial perturbations?
+      - Edge cases: Unprecedented scenarios the model has never seen (a couch on the highway)

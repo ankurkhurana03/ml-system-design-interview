@@ -1,0 +1,591 @@
+id: spotify-discover-weekly
+title: "Spotify Discover Weekly"
+description: "Build a recommendation system for Spotify's 'Discover Weekly' playlist."
+companies: ["Spotify", "Apple", "YouTube"]
+domains: ["Recommendation", "NLP"]
+root: pd_start
+
+nodes:
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we will design the recommendation system behind **Spotify's Discover Weekly** playlist.
+
+      Discover Weekly is one of the most successful recommendation products ever built. Launched in 2015, it delivers a **personalized 30-track playlist every Monday** to each of Spotify's **600+ million users**. The playlist has driven **over 10 billion track discoveries** since launch, and users who engage with Discover Weekly have **significantly higher retention** (30-day retention is ~15% higher for active Discover Weekly listeners).
+
+      The core challenge: from a catalog of **over 100 million tracks** by **4+ million artists**, select exactly 30 tracks that:
+      - The user has **never listened to** (novelty is essential)
+      - Match the user's **taste profile** (relevance)
+      - Include tracks from **lesser-known artists** (discovery, not just popular tracks)
+      - Feel **cohesive as a playlist** (flow and mood consistency)
+
+      Current pain points: some users report playlists that feel "too safe" (recommend what they already know), while others get jarring tracks that don't match their taste. Long-tail artists struggle to get included.
+
+      Let's scope the problem.
+    dialogue:
+      - speaker: interviewer
+        text: "Today we'll design the recommendation system behind Spotify's Discover Weekly. It delivers 30 personalized tracks every Monday to over 600 million users."
+      - speaker: candidate
+        text: "That's an iconic product. What makes this different from a typical recommendation problem?"
+      - speaker: interviewer
+        text: "Several things: strict novelty requirement - users must not have heard these tracks before. It needs to feel cohesive as a playlist, not just a random list of good tracks. And it should balance familiar taste with genuine discovery."
+      - speaker: candidate
+        text: "Got it. Let me start by understanding the product requirements more deeply."
+      - speaker: interviewer
+        text: "Let's scope it."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: info
+    label: "Problem Scope & Formulation"
+    speaker: interviewer
+    content: |
+      Let's formalize what Discover Weekly does as an ML problem.
+
+      **Product requirements:**
+      - Generate **30 tracks per user per week** (every Monday at midnight local time)
+      - All tracks must be **new to the user** (never played, skipped, or explicitly saved)
+      - Playlist should be **diverse** across artists (no more than 2 tracks per artist)
+      - Should include a mix of **familiar-adjacent** tracks (similar to what user likes) and **stretch picks** (slightly outside comfort zone, ~20% of playlist)
+      - Must respect **content licensing** (some tracks not available in certain markets)
+
+      **ML formulation options:**
+      This is fundamentally a **top-K item recommendation** problem, but with additional constraints (novelty, diversity, cohesion). We can break it into stages:
+      1. **Candidate generation**: Retrieve ~5,000 candidate tracks from 100M+ catalog
+      2. **Scoring/ranking**: Predict user affinity for each candidate
+      3. **Playlist assembly**: Select 30 tracks from ranked candidates with diversity and cohesion constraints
+
+      **Scale:**
+      - 600M users x 30 tracks = **18 billion track-user scores** per week
+      - Since this is a weekly batch job (not real-time), we have more compute budget than a real-time ranker
+      - But the batch must complete within a **6-hour window** (Saturday night to Sunday morning) to be ready for Monday rollout
+
+      What optimization objective should we use?
+    dialogue:
+      - speaker: interviewer
+        text: "The ML formulation is a top-K recommendation with novelty, diversity, and cohesion constraints. Candidate generation narrows 100M tracks to 5,000, then scoring picks the best 30."
+      - speaker: candidate
+        text: "Since this is weekly batch, we have more compute budget than a real-time system. How large is the batch window?"
+      - speaker: interviewer
+        text: "Six hours - Saturday night to Sunday morning. That's for all 600 million users. Now, what should we optimize for?"
+    next: met_question
+
+  - id: met_question
+    stage: metrics
+    type: question
+    label: "Optimization Objective"
+    speaker: interviewer
+    content: |
+      What should the Discover Weekly recommendation model optimize for? This determines what "good recommendations" means for the system.
+    dialogue:
+      - speaker: interviewer
+        text: "What should the model optimize for? What defines a 'good' Discover Weekly playlist?"
+      - speaker: candidate
+        text: "There's an interesting tension here between optimizing for immediate engagement on the playlist versus long-term user behavior changes."
+      - speaker: interviewer
+        text: "Exactly. Tell me about the approaches you'd consider."
+    choices:
+      - label: "Track-level engagement (saves, listens, skips)"
+        answer: |
+          I would optimize for **track-level engagement signals** as the primary objective: P(save), P(full_listen), and P(not_skip).
+
+          **Why track-level?** Each of the 30 tracks is an independent decision. If users save tracks or listen to them fully, we have done our job. Saves are the strongest signal - when a user adds a Discover Weekly track to their library, it is a clear indication of value. Full listens (listening past the 30-second mark) indicate enjoyment. Skip within 5 seconds indicates a bad recommendation.
+
+          **Proposed scoring function:**
+          ```
+          TrackScore = w1 * P(save) + w2 * P(full_listen) - w3 * P(skip_within_5s)
+          ```
+          Typical weights based on Spotify's published research: save is weighted **5x** a full listen. Skip penalty is about **2x** a full listen. This makes the model strongly prefer tracks users will save over tracks they merely tolerate.
+
+          **Offline metric**: For model evaluation, use **Precision@30** (what fraction of recommended tracks does the user engage with?) and **NDCG** (are the best tracks ranked first in the playlist?). Spotify has reported Discover Weekly Precision@30 values around **0.25-0.35** (users engage with 8-10 out of 30 tracks).
+
+          **Key benefit**: These signals are abundant (every play generates labels), low-latency (available within seconds), and directly measurable. We can iterate quickly.
+
+          **Key risk**: Optimizing for individual track engagement may produce playlists of "safe" recommendations - tracks very similar to what the user already listens to. This undermines the "discovery" promise.
+        next: met_engagement
+      - label: "Playlist-level satisfaction and discovery rate"
+        answer: |
+          I would optimize for **playlist-level outcomes** and explicit discovery metrics rather than individual track engagement.
+
+          **Why playlist-level?** Discover Weekly is not a search result - it is a curated experience. A playlist where 10 tracks are great and 20 are terrible feels worse than one where all 30 are decent, even if the first has higher average engagement. Users evaluate the **holistic experience**.
+
+          **Satisfaction signals:**
+          - **Playlist completion rate**: What fraction of the 30 tracks does the user listen to? Higher completion = better playlist.
+          - **Return rate**: Does the user come back to Discover Weekly next Monday? This is the ultimate success metric. Spotify reports that **40% of active users** engage with Discover Weekly regularly.
+          - **Discovery rate**: Of the 30 recommended tracks, how many does the user go on to listen to **outside** of Discover Weekly (add to playlists, play the artist's album, follow the artist)? This captures true discovery.
+          - **Negative signals**: Did the user abandon the playlist early (listened to <5 tracks)? Did they remove Discover Weekly from their library?
+
+          **Scoring approach:**
+          ```
+          PlaylistScore = E[completion_rate] + w1 * P(return_next_week) + w2 * E[discovery_actions] - w3 * P(early_abandon)
+          ```
+
+          **Key benefit**: This directly optimizes for the product goal - making Discover Weekly a habit that drives long-term retention. It naturally encourages playlist diversity and cohesion since monotonous playlists have lower completion rates.
+
+          **Key risk**: Playlist-level labels are **sparse and delayed** (you only get one label per user per week). Training is harder. Need to decompose playlist-level goals into track-level objectives for practical model training.
+        next: met_satisfaction
+
+  - id: met_engagement
+    stage: metrics
+    type: info
+    label: "Engagement Metrics Framework"
+    speaker: interviewer
+    content: |
+      Good choice. Let's define the complete metrics framework.
+
+      **Offline evaluation metrics:**
+      - **Primary**: Track-level AUC for P(save) and P(full_listen). Target: AUC > 0.78 for full listen, > 0.72 for save (saves are sparser and harder to predict).
+      - **Ranking quality**: NDCG@30 measuring whether the best tracks appear first in the playlist order.
+      - **Coverage**: What fraction of the catalog appears in any user's Discover Weekly? Higher coverage means we are not stuck recommending the same popular tracks. Target: **>5% of catalog represented weekly** (vs ~1% for naive popularity-based).
+      - **Novelty**: Average "surprise" of recommendations. Measured as average inverse popularity of recommended tracks. Higher = more discovery.
+
+      **Online A/B test metrics:**
+      - **Primary**: Save rate per playlist (total saves / 30 tracks). Current baseline: ~0.15 (users save ~4-5 tracks on average).
+      - **Guardrails**: Skip rate must not increase more than 5%. Weekly return rate must not decrease. Artist diversity (unique artists per playlist) must stay above 25.
+      - **Long-term**: 30-day retention of Discover Weekly listeners, total streaming hours attributed to Discover Weekly discoveries.
+
+      **Critical nuance - the exploration-exploitation trade-off:**
+      Pure engagement optimization leads to "filter bubble" playlists (all indie rock for an indie rock fan). We need an **exploration bonus** - tracks that are slightly outside the user's comfort zone should get a score boost. Spotify calls these "stretch picks" and targets **~20% of the playlist**.
+
+      Now let's discuss data.
+    dialogue:
+      - speaker: interviewer
+        text: "The metrics framework needs both offline and online components. AUC targets around 0.78 for full listen, 0.72 for save."
+      - speaker: candidate
+        text: "What about the exploration-exploitation trade-off? Pure engagement optimization could create filter bubbles."
+      - speaker: interviewer
+        text: "Great point. Spotify uses 'stretch picks' - about 20% of the playlist should be slightly outside the user's comfort zone. We need an exploration bonus in the scoring."
+      - speaker: candidate
+        text: "How do we measure whether the exploration is working?"
+      - speaker: interviewer
+        text: "Track 'discovery actions' - does the user listen to the artist outside Discover Weekly? If stretch picks lead to new artist follows, the exploration is working. Let's move to data."
+    next: data_pipeline
+
+  - id: met_satisfaction
+    stage: metrics
+    type: info
+    label: "Satisfaction Metrics Framework"
+    speaker: interviewer
+    content: |
+      Excellent thinking. Let's formalize the satisfaction-oriented metrics.
+
+      **Offline evaluation:**
+      - **Primary**: Predicted playlist completion rate. Use historical data to estimate how many tracks a user would listen to. Target: average completion of **35-40%** (10-12 out of 30 tracks).
+      - **Discovery prediction**: AUC for predicting whether a track leads to post-playlist artist engagement (follow, album play, add to library). Target: AUC > 0.68.
+      - **Diversity metrics**: Intra-list diversity (ILD) - average pairwise distance between tracks in embedding space. Target: ILD in the 0.4-0.6 range (too low = repetitive, too high = incoherent).
+
+      **Online A/B test:**
+      - **Primary**: Discover Weekly return rate (% of users who engage next Monday). Current benchmark: ~40%.
+      - **Secondary**: Playlist completion rate, post-playlist discovery actions (artist follows, album plays within 7 days).
+      - **Guardrails**: Track-level save rate must not drop more than 5%. Total skip rate must not spike. Session length in Discover Weekly must not decrease.
+      - **North star**: 90-day Spotify Premium retention for Discover Weekly users vs non-users.
+
+      **Practical compromise**: Train the model to predict track-level engagement (saves, listens, skips) since those labels are plentiful. Then tune the **playlist assembly algorithm** to optimize for playlist-level satisfaction metrics via A/B testing. This separates the "relevance" model from the "curation" layer.
+
+      Let's discuss data.
+    dialogue:
+      - speaker: interviewer
+        text: "The practical compromise is to train the model on track-level engagement but tune the playlist assembly algorithm for satisfaction."
+      - speaker: candidate
+        text: "That makes sense - it separates the relevance model from the curation layer. What about offline evaluation of the full pipeline?"
+      - speaker: interviewer
+        text: "Use historical replay. Take last week's Discover Weekly, measure actual outcomes, and compare with what our new model would have recommended. Counterfactual evaluation with IPS correction."
+      - speaker: candidate
+        text: "We'd also want diversity metrics like intra-list diversity to prevent the playlist from being too repetitive or too random."
+      - speaker: interviewer
+        text: "Exactly - target ILD in the 0.4 to 0.6 range. Let's move to data."
+    next: data_pipeline
+
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      Spotify has one of the richest datasets in music recommendation. Let's inventory what is available.
+
+      **Listening history data:**
+      - **Scale**: 600M users x ~40 minutes daily listening = **billions of track plays per day**
+      - **Signals per play**: Track ID, timestamp, duration listened, skip (yes/no, at what point), context (playlist, album, search, radio), device type
+      - **Saves and follows**: Track saves, album saves, artist follows, playlist additions - all timestamped
+
+      **Content data (audio + metadata):**
+      - **Audio features**: Spotify's audio analysis API provides tempo, key, loudness, energy, danceability, speechiness, acousticness, valence (musical positivity) for every track
+      - **Audio embeddings**: Deep audio embeddings from a CNN trained on raw audio spectrograms (128-dim vectors). Captures musical style beyond metadata.
+      - **Metadata**: Artist, album, genre tags, release date, popularity score (0-100), explicit flag
+      - **Lyrics**: Available for most tracks via Musixmatch partnership. Can extract themes, sentiment, language.
+
+      **Social and contextual data:**
+      - **Playlist co-occurrence**: Which tracks appear together in user-created playlists? This is **Spotify's secret weapon** - millions of curated playlists encode human taste at scale.
+      - **Collaborative signals**: Users with similar listening histories ("taste neighbors")
+      - **Temporal patterns**: Time-of-day listening preferences, seasonal patterns (holiday music in December)
+
+      **Data challenges:**
+      - **Popularity bias**: 80% of plays go to 1% of tracks. The model must not simply recommend popular tracks.
+      - **Implicit feedback only**: No explicit 1-5 star ratings. Must infer preference from play/skip/save behavior.
+      - **Position bias in playlists**: Tracks at the top of Discover Weekly get more plays regardless of quality.
+
+      Let's decide how to approach candidate generation.
+    dialogue:
+      - speaker: interviewer
+        text: "Spotify has incredibly rich data - billions of plays daily, audio features, playlist co-occurrence data, and audio embeddings from CNNs."
+      - speaker: candidate
+        text: "The playlist co-occurrence data is interesting - that encodes human curation at massive scale."
+      - speaker: interviewer
+        text: "Exactly, that's Spotify's secret weapon. Millions of user-created playlists capture taste relationships between tracks. The main data challenge is popularity bias - 80% of plays go to 1% of tracks."
+      - speaker: candidate
+        text: "We'll need to address that bias explicitly in our model to surface long-tail tracks."
+      - speaker: interviewer
+        text: "Right. Let's decide on the candidate generation approach."
+    next: feat_question
+
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Candidate Generation Strategy"
+    speaker: interviewer
+    content: |
+      How would you generate candidate tracks for Discover Weekly? We need to narrow from 100M+ tracks to ~5,000 candidates per user efficiently.
+    dialogue:
+      - speaker: interviewer
+        text: "How would you generate the candidate pool? We need to go from 100 million tracks to about 5,000 candidates per user."
+      - speaker: candidate
+        text: "There are several approaches - we could use collaborative filtering, content-based methods, or a hybrid. The key is efficiency since this runs for 600 million users."
+      - speaker: interviewer
+        text: "Walk me through your preferred approach."
+    choices:
+      - label: "Collaborative filtering via playlist co-occurrence"
+        answer: |
+          I would use **collaborative filtering based on playlist co-occurrence** as the primary candidate generation method, inspired by Spotify's published approach.
+
+          **Method: Word2Vec on playlists (Track2Vec)**
+          Treat each user-created playlist as a "sentence" and each track as a "word." Train **Word2Vec (skip-gram)** on millions of playlists to learn 256-dim track embeddings where tracks that frequently co-occur in playlists are close in embedding space.
+
+          **Why this works**: Playlist co-occurrence captures something deeper than listening history. When a human curator puts two tracks together, they are making a taste judgment: these tracks "go together." This encodes genre, mood, tempo, and cultural associations without explicit labels.
+
+          **Candidate retrieval**: For each user, compute their **taste profile** as the weighted average of embeddings of their top 100 most-played tracks (weighted by recency and play count). Then use **approximate nearest neighbor search (FAISS with IVF-PQ index)** to find the 5,000 closest tracks in embedding space. FAISS can search 100M vectors in **<10ms per query**.
+
+          **Diversity injection**: To avoid only retrieving tracks similar to the user's mainstream taste, also retrieve candidates from:
+          - **Taste neighbors**: Find 50 users with the most similar taste profiles, retrieve their recent discoveries
+          - **Genre exploration**: Sample 500 candidates from genres the user has shown mild interest in but does not dominate their listening
+
+          **Scale**: Pre-compute all 100M track embeddings (one-time). User taste profiles updated daily. ANN index fits in **~50GB RAM** with IVF-PQ compression.
+
+          **Limitation**: Collaborative filtering suffers from **cold-start** for new tracks with no playlist presence. Need a content-based fallback for new releases.
+        next: feat_details
+      - label: "Hybrid: audio embeddings + user graph"
+        answer: |
+          I would use a **hybrid candidate generation** approach combining audio content embeddings with user-user collaborative signals.
+
+          **Audio-based candidates (~2,500 tracks):**
+          Use a **deep audio embedding model** (e.g., a CNN or Audio Spectrogram Transformer trained on spectrograms) that maps each track to a 128-dim vector capturing musical style. Two tracks that sound similar (tempo, instrumentation, vocal style) will have close embeddings, even if they have never appeared in the same playlist.
+
+          For each user, compute their **audio taste profile** as the centroid of their recently-played tracks' audio embeddings. Retrieve the nearest 2,500 tracks using **FAISS with HNSW index** (faster for moderate-scale retrieval). This handles cold-start for new tracks since audio features are available immediately at upload.
+
+          **Graph-based candidates (~2,500 tracks):**
+          Build a **user-track bipartite graph** where edges represent plays, weighted by engagement signals (full listen = 1.0, skip = -0.5, save = 2.0). Run **personalized PageRank (PPR)** from the target user to identify tracks that are reachable through 2-3 hops but not directly connected (i.e., tracks the user has not heard but that are popular among similar users).
+
+          Use an efficient PPR approximation like **ISTA (Iterative Shrinkage-Thresholding Algorithm)** which runs in O(edges) per query. With a pre-built graph index, this takes **~50ms per user**.
+
+          **Merging**: Combine audio and graph candidates, de-duplicate, and remove tracks the user has already heard. Target: 5,000 unique candidates.
+
+          **Advantage over pure collaborative filtering**: Audio embeddings handle cold-start (new tracks) and capture perceptual similarity that playlist co-occurrence might miss (two jazz tracks from different decades, for instance). The graph captures social/cultural taste patterns.
+
+          **Trade-off**: More complex pipeline to maintain. Audio embeddings require a pre-trained model and periodic retraining. Graph construction is compute-intensive (billions of edges).
+        next: feat_details
+
+  - id: feat_details
+    stage: features
+    type: info
+    label: "Feature Engineering for Scoring"
+    speaker: interviewer
+    content: |
+      Good candidate generation strategy. Now let's engineer the features for the **scoring model** that will rank the 5,000 candidates.
+
+      **User features:**
+      - **Taste embedding** (256 dims): From the collaborative or hybrid model above
+      - **Audio preference profile** (128 dims): Average audio embedding of user's top tracks
+      - **Genre distribution**: 20-dim vector of genre affinities (normalized play counts per genre)
+      - **Temporal preferences**: 24-dim vector of hourly listening patterns, 7-dim for day-of-week
+      - **Engagement statistics**: Average session length, save rate, skip rate, discovery rate (% of new artists listened to)
+      - **Account maturity**: Days since account creation, total tracks played, playlist count
+
+      **Track features:**
+      - **Track embedding** (256 dims): From Word2Vec or audio model
+      - **Audio features** (13 dims): Spotify's standard audio features (tempo, energy, danceability, etc.)
+      - **Popularity**: Spotify popularity score (0-100), monthly listener count, trend direction (rising/falling)
+      - **Freshness**: Days since release, weeks since track was added to Spotify
+      - **Quality signals**: Average save rate, average completion rate, average skip rate across all listeners
+
+      **User-Track cross features:**
+      - **Embedding similarity**: Cosine similarity between user taste embedding and track embedding
+      - **Genre match**: Overlap between user's genre distribution and track's genres
+      - **Artist familiarity**: Has the user listened to this artist before? How many of this artist's tracks?
+      - **Taste neighbor popularity**: How many of the user's 50 taste neighbors have played this track?
+      - **Audio distance**: Euclidean distance between user's audio profile and track's audio embedding
+      - **Novelty score**: How different is this track from the user's typical listening? (inverse similarity)
+
+      These features give the scoring model both **relevance signals** (similarity, genre match) and **discovery signals** (novelty, taste neighbor popularity). Now let's choose the scoring model.
+    dialogue:
+      - speaker: interviewer
+        text: "For the scoring model, we need user features, track features, and cross features. The cross features are especially important - they capture the user-track relationship."
+      - speaker: candidate
+        text: "The novelty score is interesting - it's the inverse similarity. Wouldn't that conflict with the relevance signals?"
+      - speaker: interviewer
+        text: "That's the key tension. The model must learn to balance relevance and novelty. Tracks that are moderately novel but relevant perform best. The 'sweet spot' is a cosine similarity of about 0.3-0.5 from the user's taste center."
+      - speaker: candidate
+        text: "So the model needs to find that sweet spot rather than optimizing purely for similarity."
+      - speaker: interviewer
+        text: "Exactly. Let's choose the scoring model architecture."
+    next: mod_question
+
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Scoring Model Architecture"
+    speaker: interviewer
+    content: |
+      What model architecture would you use to score the 5,000 candidates per user?
+    dialogue:
+      - speaker: interviewer
+        text: "What model would you use to score the 5,000 candidates? Remember, this is a batch job, so latency is less critical than for real-time ranking."
+      - speaker: candidate
+        text: "Since it's batch, we can afford heavier models. The main architectures I'd consider are matrix factorization, a deep retrieval model, or a gradient boosting ensemble."
+      - speaker: interviewer
+        text: "Walk me through your recommendation."
+    choices:
+      - label: "Two-tower deep retrieval model"
+        answer: |
+          I would use a **two-tower deep retrieval model** trained with a multi-task objective.
+
+          **Architecture:**
+          - **User tower** (3-layer MLP, 512-256-128): Takes user features (taste embedding, genre distribution, engagement stats, temporal preferences). Outputs a 128-dim user representation.
+          - **Track tower** (3-layer MLP, 512-256-128): Takes track features (track embedding, audio features, popularity, quality signals). Outputs a 128-dim track representation.
+          - **Scoring**: Dot product of user and track representations, plus a **bias term** for track popularity correction.
+
+          **Training:**
+          - **Positive examples**: Tracks the user saved or listened to fully in Discover Weekly (or similar discovery contexts)
+          - **Negative examples**: In-batch negatives (other users' positives) + hard negatives (tracks shown but skipped)
+          - **Loss**: Sampled softmax with temperature scaling. This is more effective than pointwise BCE for recommendation.
+          - **Multi-task**: Primary head for P(save), secondary head for P(full_listen). Shared tower, separate final layers.
+
+          **Why two-tower?** The key advantage for a batch system is that **item embeddings can be pre-computed once** and reused across all 600M users. The user tower runs once per user, then scores 5,000 candidates via a single matrix multiplication. Total compute: user tower (0.1ms) + batch scoring (0.5ms) = extremely fast.
+
+          **Scaling**: At 600M users, even 0.6ms per user = 360K GPU-seconds = ~100 GPU-hours. Fits comfortably in a 6-hour batch window on a moderate GPU cluster (20-30 A100s).
+
+          **Limitation**: Dot-product scoring cannot capture complex user-item feature interactions (e.g., "user prefers fast tracks on weekday mornings"). The interaction is limited to what the embeddings encode.
+        next: train_strategy
+      - label: "LambdaMART gradient boosting ranker"
+        answer: |
+          I would use **LambdaMART** (gradient boosted decision trees optimized for ranking) as the scoring model.
+
+          **Why LambdaMART?** For scoring 5,000 candidates per user where we have rich hand-crafted features, gradient boosting is extremely effective. LambdaMART directly optimizes **NDCG** (Normalized Discounted Cumulative Gain), which aligns with our goal of putting the best tracks at the top of the playlist.
+
+          **Input features** (~80 total): All user features, track features, and cross features described earlier. No need for separate towers - the tree-based model handles feature interactions natively.
+
+          **Training data:**
+          - From historical Discover Weekly interactions: each (user, track) pair labeled with engagement (save=5, full_listen=2, partial_listen=1, skip=-1)
+          - Group by user session - LambdaMART optimizes ranking within each user's candidate list
+          - Train on **3-6 months** of weekly data to capture seasonal patterns
+          - Use **LightGBM** implementation: 500 trees, max depth 8, learning rate 0.05
+
+          **Key advantages:**
+          - **Feature interaction discovery**: Trees naturally find interactions like "users who listen to jazz AND have high novelty tolerance AND it's evening -> recommend experimental jazz." No manual feature crossing needed.
+          - **Interpretability**: Feature importances and SHAP values explain why tracks are recommended. Essential for debugging ("why did we recommend death metal to a pop listener?").
+          - **Training speed**: LightGBM trains on 10M examples in **minutes**, not hours. Enables rapid experimentation.
+
+          **Popularity debiasing**: Add an inverse popularity weight to training examples so that recommending a popular track correctly counts less than recommending a niche track correctly. This pushes the model toward genuine discovery.
+
+          **Limitation**: Tree-based models do not learn embeddings, so they rely on pre-computed features. Cannot adapt representations during training.
+        next: train_strategy
+
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: interviewer
+    content: |
+      Good model choice. Let's discuss the training strategy.
+
+      **Training data construction:**
+      - Source: **6 months** of historical Discover Weekly impressions and outcomes
+      - Each example: (user features at recommendation time, track features, engagement outcome)
+      - **Temporal split**: Train on months 1-5, validate on month 6 (last 4 weeks). Never random split - Discover Weekly is a weekly product with evolving taste.
+      - **Volume**: ~600M users x 30 tracks x 26 weeks = ~468 billion potential examples. Sample down to ~1 billion examples via stratified sampling (balance engagement levels).
+
+      **Handling implicit feedback:**
+      - **Positive labels**: Save (strongest), full listen (>80% of track), repeat listen, add-to-playlist
+      - **Negative labels**: Skip within 5 seconds, "Not Interested" button (if available)
+      - **Ambiguous**: Partial listen (30-80%) - treat as weak positive or ignore
+      - **Missing data**: Track was recommended but user never opened Discover Weekly that week - these are **not negatives** (user absence, not rejection). Exclude from training.
+
+      **Debiasing during training:**
+      - **Position bias**: Tracks at position 1 get 3-5x more plays than position 30 regardless of quality. Use **inverse propensity weighting**: weight each example by 1/P(play|position), estimated from position-level play rates.
+      - **Popularity bias**: Apply **popularity-stratified negative sampling** - ensure negatives include tracks across the popularity spectrum, not just popular tracks.
+      - **Exposure bias**: We only observe outcomes for tracks we recommended. Use **IPS-weighted loss** or train a propensity model to correct for this.
+
+      **Retraining cadence:**
+      - Full retrain: **Monthly** (captures seasonal shifts, new music trends)
+      - Warm-start fine-tune: **Weekly** (adapts to recent taste changes using last 2 weeks of data)
+      - User embeddings: Updated **daily** from latest listening data
+
+      **Evaluation before deployment:**
+      - Offline: Compare new model vs production model on held-out week. Must show improvement on NDCG@30 AND coverage AND novelty.
+      - "Backtest": Generate playlists for last week's users with new model, compare against what was actually recommended and what users actually engaged with.
+
+      Let's move to deployment.
+    dialogue:
+      - speaker: interviewer
+        text: "Training uses 6 months of Discover Weekly data with temporal splitting. Key challenges are handling implicit feedback and debiasing for position, popularity, and exposure."
+      - speaker: candidate
+        text: "The position bias correction is important. How much does position affect play rate?"
+      - speaker: interviewer
+        text: "Position 1 gets 3-5x more plays than position 30. We use inverse propensity weighting. Also important: users who didn't open Discover Weekly are NOT negative examples - they're missing data."
+      - speaker: candidate
+        text: "Good distinction. What's the retraining cadence?"
+      - speaker: interviewer
+        text: "Full retrain monthly, warm-start fine-tune weekly, user embeddings updated daily. Now let's discuss deployment."
+    next: deploy_question
+
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Deployment Strategy"
+    speaker: interviewer
+    content: |
+      How would you deploy the Discover Weekly generation pipeline?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you architect the deployment? Remember, 600 million playlists need to be ready every Monday morning."
+      - speaker: candidate
+        text: "This is a massive batch job with a 6-hour window. The key design decision is whether to run everything in one batch pass or decompose it into stages with caching."
+      - speaker: interviewer
+        text: "Walk me through your approach."
+    choices:
+      - label: "Fully batch pipeline with MapReduce"
+        answer: |
+          I would deploy a **fully batch pipeline** using Spark/MapReduce running over the weekend.
+
+          **Pipeline stages (sequential):**
+          1. **User embedding update** (1 hour): Refresh all 600M user taste profiles from latest listening data. Run as a Spark job reading from the engagement data lake.
+          2. **Candidate generation** (1.5 hours): For each user, retrieve 5,000 candidates via ANN search. Parallelized across **1,000 workers**, each handling 600K users. Total ANN queries: 600M, at ~1ms each = 600K seconds = ~10 minutes per worker.
+          3. **Feature assembly** (1 hour): For each (user, candidate) pair, assemble all features from pre-computed feature tables. This is a large join operation - 600M users x 5,000 candidates = **3 trillion feature lookups**. Use Spark with broadcast joins for user features.
+          4. **Scoring** (1 hour): Run the ranking model on all (user, candidate) pairs. With GPU inference, scoring 5,000 tracks per user takes ~5ms. Total: 600M x 5ms = 3M seconds = ~50K GPU-minutes = ~830 GPU-hours. On 200 GPUs, this takes ~4 hours. Optimize with batch processing.
+          5. **Playlist assembly** (0.5 hours): For each user, select top 30 from scored candidates with diversity constraints (max 2 per artist, genre balance, cohesion). This is a greedy selection algorithm running on CPU.
+          6. **Write to serving layer** (0.5 hours): Write 600M playlists to the content delivery system (likely Cassandra or a similar distributed store). Monday morning, the Spotify app queries this store.
+
+          **Total**: ~5.5 hours. Within the 6-hour window.
+
+          **Reliability**: Each stage checkpoints to durable storage (S3/HDFS). If a stage fails, restart from the last checkpoint. Implement retries and dead-letter queues for individual user failures.
+
+          **Cost**: ~200 GPUs for 4 hours + 1,000 CPU workers for 6 hours. At cloud pricing, roughly **$10-15K per weekly run** = ~$500-750K/year. Modest for a product serving 600M users.
+        next: mon_setup
+      - label: "Incremental daily pipeline with Monday assembly"
+        answer: |
+          I would use an **incremental daily pipeline** that pre-computes most work throughout the week, with a lightweight final assembly on Sunday night.
+
+          **Daily jobs (run every night):**
+          - **User embedding update**: Refresh taste profiles for users who were active today (~200M daily active users). Incremental update takes ~20 minutes vs 1 hour for full refresh.
+          - **New track indexing**: Add newly released tracks to the ANN index and pre-compute their features. ~100K new tracks daily.
+          - **Candidate pre-retrieval**: For each active user, refresh their candidate pool. Store top 10,000 candidates with pre-computed features in a user-level cache (Redis or DynamoDB).
+
+          **Sunday night assembly (3-hour window):**
+          - **Score all candidates**: For each user, score their cached 10,000 candidates with the latest model. Fresh model deployed on Saturday.
+          - **Playlist assembly**: Select top 30 with constraints.
+          - **Gap filling**: For users who were inactive all week (no updated embeddings), use last week's taste profile with randomized candidates to ensure freshness.
+          - **Write to serving layer**: Push playlists to CDN.
+
+          **Advantages over full batch:**
+          - **Freshness**: Daily candidate updates capture new releases faster. A hit song released Thursday appears in Monday's Discover Weekly.
+          - **Resilience**: If Sunday night's assembly fails, we have pre-computed candidates and can run a degraded version in 1 hour instead of 6.
+          - **Cost spreading**: Compute is spread across the week, avoiding a massive weekend spike.
+          - **Scalability**: As Spotify grows to 1B users, the 6-hour batch window becomes tight. Incremental processing scales more gracefully.
+
+          **Trade-off**: More complex pipeline with more moving parts. Need to manage daily state (cached candidates, incremental embeddings). But the reliability and freshness benefits are worth it at Spotify's scale.
+        next: mon_setup
+
+  - id: mon_setup
+    stage: monitoring
+    type: info
+    label: "Monitoring & Evaluation"
+    speaker: interviewer
+    content: |
+      Let's discuss monitoring for the Discover Weekly system.
+
+      **Weekly health dashboard:**
+      - **Engagement metrics**: Save rate per playlist, skip rate, completion rate, total streams - tracked week-over-week
+      - **Discovery metrics**: New artist follows attributed to Discover Weekly, tracks added to user playlists, post-DW streaming of recommended artists
+      - **Coverage metrics**: Unique tracks recommended across all users, unique artists, genre distribution. Alert if coverage drops (model collapsing to popular tracks).
+      - **Diversity metrics**: Average intra-list diversity, genre entropy per playlist, max artist repetition
+
+      **Pipeline health monitoring:**
+      - **Job completion**: Each batch stage must complete within its time budget. Alert if any stage exceeds 120% of expected duration.
+      - **Data quality**: Check for missing features (>1% null rate triggers alert), stale embeddings (age > 48 hours), ANN index consistency.
+      - **Output validation**: Sample 1,000 playlists before publishing. Check: all tracks exist in catalog, no tracks the user has heard before (novelty check), no tracks violating licensing in user's market, artist diversity constraints met.
+
+      **A/B testing cadence:**
+      - Every model or algorithm change is A/B tested for **4 weeks minimum** (4 Mondays of Discover Weekly)
+      - Sample: 1-5% of users in treatment, matched control group
+      - **Primary metric**: Discover Weekly return rate (does the user listen next Monday?)
+      - **Long-term holdbacks**: 0.5% of users permanently on an older model version to detect long-term quality trends
+
+      **User feedback integration:**
+      - Track "thumbs down" or "Not Interested" signals per track
+      - Analyze common failure patterns: wrong genre? Wrong mood? Too popular? Too obscure?
+      - Feed failure patterns back to the model as **hard negative examples** in the next training cycle
+
+      **Continuous improvement loop:**
+      1. **Monday**: New playlists go live, engagement data starts flowing
+      2. **Tuesday-Thursday**: Collect engagement data, monitor metrics
+      3. **Friday**: Run offline evaluation of experimental models against this week's data
+      4. **Saturday**: Deploy winning model for next week's batch
+      5. **Sunday**: Generate next week's playlists
+
+      Let's wrap up.
+    dialogue:
+      - speaker: interviewer
+        text: "Monitoring for a weekly product is different from real-time systems. We need weekly health dashboards, pipeline monitoring, and at least 4-week A/B tests."
+      - speaker: candidate
+        text: "The output validation before publishing is a good safety net. What are the most common failure modes?"
+      - speaker: interviewer
+        text: "Most common: recommending tracks the user has already heard (novelty violation), too many tracks from one genre (diversity failure), and recommending unavailable tracks in the user's market. All caught by the validation step."
+      - speaker: candidate
+        text: "The continuous improvement loop is elegant - a weekly cycle that matches the product's weekly cadence."
+      - speaker: interviewer
+        text: "Exactly. Let's summarize the full design."
+    next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Design Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You have designed a comprehensive recommendation system for Spotify's Discover Weekly. Let's summarize.
+
+      **Architecture summary:**
+      - **Candidate generation**: Collaborative filtering via playlist co-occurrence (Track2Vec + FAISS) or hybrid audio embeddings + user graph
+      - **Feature engineering**: Rich user taste profiles, track audio/metadata features, and user-track cross features including novelty scores
+      - **Scoring model**: Two-tower deep retrieval model or LambdaMART gradient boosting ranker
+      - **Playlist assembly**: Greedy selection with diversity constraints (artist, genre, mood cohesion)
+      - **Deployment**: Fully batch weekend pipeline or incremental daily pipeline with Monday assembly
+      - **Monitoring**: Weekly engagement and discovery dashboards, pipeline health checks, 4-week A/B tests
+
+      **Strengths of your design:**
+      - Handles the enormous scale (600M users, 100M+ track catalog) with efficient batch processing
+      - Balances relevance (tracks the user will enjoy) with discovery (new artists and genres)
+      - Addresses critical biases: position, popularity, and exposure
+      - Clear metrics framework that separates track-level model quality from playlist-level satisfaction
+
+      **Key challenges and open questions:**
+      - **Cold-start for new tracks**: How quickly do new releases enter Discover Weekly? Audio embeddings help but are imperfect.
+      - **Taste evolution**: Users' tastes change over months and years. How quickly should the model adapt vs maintaining a stable taste profile?
+      - **Cultural context**: Music preference varies dramatically by country, culture, and language. Should we train region-specific models?
+      - **Creator fairness**: How to ensure emerging artists get discovery opportunities without compromising user satisfaction
+      - **Playlist cohesion**: Going beyond track-level scoring to ensure the 30 tracks feel like a coherent playlist (mood arc, tempo flow)
+
+      This design demonstrates strong understanding of large-scale recommendation systems, practical data engineering, and the nuances of building a product that balances short-term engagement with long-term user value. Well done!

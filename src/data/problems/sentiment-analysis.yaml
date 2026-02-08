@@ -1,0 +1,817 @@
+id: sentiment-analysis
+title: "Social Media Sentiment Analysis"
+description: "Build a sentiment analysis system for real-time monitoring of social media trends."
+companies: ["X/Twitter", "Meta", "Brandwatch"]
+domains: ["NLP", "Real-time", "Classification"]
+root: pd_start
+
+nodes:
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design a **real-time sentiment analysis system** for social media monitoring. Our client is a large brand management platform (similar to Brandwatch or Sprinklr) that tracks public perception for Fortune 500 companies.
+
+      **Business context:**
+      - Monitor sentiment across X/Twitter, Reddit, Instagram, TikTok, and news articles
+      - Process **~5 million posts per day** across 200+ brand accounts
+      - Detect sentiment shifts within **15 minutes** of a trending event (e.g., product recall, PR crisis, viral complaint)
+      - Provide dashboards showing sentiment trends by brand, topic, geography, and time
+
+      **Current pain points:**
+      - Existing keyword-based monitoring misses sarcasm, slang, and context
+      - Manual review of flagged posts takes 4-8 hours, missing critical windows
+      - No ability to distinguish between genuine customer complaints and bot-driven campaigns
+      - Clients want proactive alerts, not reactive reports
+
+      **Scale:** 200+ enterprise clients, each tracking 5-50 brands, across 5 platforms. Peak load during major events (Super Bowl, product launches) can be 10x normal.
+    dialogue:
+      - speaker: interviewer
+        text: "Today we'll design a real-time sentiment analysis system for social media monitoring. The platform tracks public perception for Fortune 500 companies."
+      - speaker: candidate
+        text: "Interesting. What's the scale we're dealing with?"
+      - speaker: interviewer
+        text: "About 5 million posts per day across 200+ brand accounts on Twitter, Reddit, Instagram, TikTok, and news. We need to detect sentiment shifts within 15 minutes."
+      - speaker: candidate
+        text: "That's a substantial throughput requirement. What are the main issues with the current system?"
+      - speaker: interviewer
+        text: "Keyword-based monitoring misses sarcasm and context. Manual review takes too long. And there's no way to distinguish real complaints from bot campaigns. Let's scope this out."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: info
+    label: "Problem Scope"
+    speaker: candidate
+    content: |
+      Let me break down the core ML problem here.
+
+      **Sentiment classification taxonomy:**
+      - **Level 1 (coarse)**: Positive, Negative, Neutral -- covers 90% of use cases
+      - **Level 2 (fine-grained)**: Add Mixed, Sarcastic/Ironic -- critical for accuracy on social media
+      - **Level 3 (aspect-based)**: Sentiment per aspect (e.g., "Love the camera, hate the battery life") -- highest value but hardest
+
+      **Key challenges unique to social media:**
+      - **Short text**: Tweets are 280 characters max. Less context = harder classification.
+      - **Sarcasm and irony**: "Great job breaking the app again!" is negative despite positive words
+      - **Slang and evolving language**: "No cap", "slay", "mid" -- vocabulary shifts rapidly
+      - **Multilingual**: Global brands need sentiment in 20+ languages
+      - **Emojis and media**: An eye-roll emoji completely changes sentiment. Images/videos contain sentiment signals.
+      - **Bot detection**: 10-15% of social media engagement is bot-driven (University of Indiana research)
+
+      **System requirements:**
+      - Throughput: 5M posts/day = ~58 posts/second sustained, 580/second peak
+      - Latency: End-to-end from post creation to dashboard update < 15 minutes
+      - Accuracy: >85% weighted F1 on production traffic (human-evaluated)
+    dialogue:
+      - speaker: candidate
+        text: "The core ML problem is multi-class text classification -- positive, negative, neutral -- with the option to add fine-grained and aspect-based sentiment."
+      - speaker: interviewer
+        text: "What makes social media sentiment harder than, say, product review sentiment?"
+      - speaker: candidate
+        text: "Several things: short text with less context, rampant sarcasm, rapidly evolving slang, multilingual content, and emoji usage. Plus 10-15% of engagement is bot-driven."
+      - speaker: interviewer
+        text: "Good awareness. Let's discuss how to measure success."
+    next: met_question
+
+  - id: met_question
+    stage: metrics
+    type: question
+    label: "Evaluation Metrics"
+    speaker: interviewer
+    content: |
+      How would you measure the performance of the sentiment analysis system? What metrics would you prioritize?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you measure the system's performance? What metrics matter most?"
+      - speaker: candidate
+        text: "For a classification system like this, I need to balance accuracy, speed, and business impact."
+      - speaker: interviewer
+        text: "Tell me about the specific metrics and why."
+    choices:
+      - label: "Weighted F1 with per-class breakdown"
+        answer: |
+          I'd use **weighted F1 score** as the primary offline metric, with per-class precision/recall breakdown.
+
+          **Why weighted F1?** Sentiment classes are imbalanced -- typically ~50% neutral, ~30% positive, ~20% negative on social media. Weighted F1 accounts for this imbalance while considering both precision and recall.
+
+          **Per-class analysis is critical:**
+          - **Negative recall** is the most important single metric. Missing a genuine negative post during a crisis can cost millions. Target: >90% negative recall.
+          - **Positive precision** matters for marketing reports. Inflating positive sentiment erodes client trust. Target: >85%.
+          - **Neutral precision** prevents flooding dashboards with noise. Most posts mentioning a brand are neutral mentions ("I'm at Starbucks"). Target: >80%.
+
+          **Sarcasm detection sub-metric:**
+          - Track accuracy specifically on sarcastic posts (labeled subset). Sarcasm inversion causes the most egregious errors (classifying negative as positive).
+          - Target: >70% sarcasm detection accuracy (this is genuinely hard -- even humans disagree on sarcasm ~20% of the time).
+
+          **Evaluation protocol:**
+          - Maintain a labeled evaluation set of 5,000+ posts, refreshed quarterly with recent platform language
+          - Include posts from multiple platforms, languages, and topics
+          - 3 annotators per post, majority vote, Cohen's kappa >0.65 (sentiment annotation has inherent subjectivity)
+        next: met_detail
+      - label: "Business-aligned alerting metrics"
+        answer: |
+          I'd focus on **business-aligned metrics** that directly measure the system's value to clients, rather than pure classification accuracy.
+
+          **Primary metrics:**
+          - **Alert precision**: When the system fires a "sentiment spike" alert, what percentage are genuinely important events? Target: >80%. Too many false alarms and clients ignore alerts (the "cry wolf" problem).
+          - **Alert recall / detection rate**: Of genuine sentiment events (PR crises, viral complaints, trending praise), what percentage did the system detect? Target: >95%. Missing a crisis is catastrophic for client trust.
+          - **Time-to-detection (TTD)**: How many minutes from the first post of a sentiment shift to the system sending an alert? Target: <15 minutes. Compared to manual monitoring (~4-8 hours), this is the core value proposition.
+
+          **Secondary metrics:**
+          - **Sentiment accuracy on alerts**: Classification accuracy specifically on posts that triggered alerts. These are the high-stakes predictions that clients will scrutinize. Target: >90%.
+          - **Client engagement**: Do clients open alerts? Do they act on them? Track alert-to-action rate.
+          - **False negative cost**: Estimate the business cost of missed negative sentiment events. Even one missed crisis can lose a $500K/year client.
+
+          **Why business metrics over F1?**
+          A model with 85% F1 that detects crises in 10 minutes is more valuable than a model with 92% F1 that takes 2 hours. The business cares about actionable insights, not academic accuracy scores.
+        next: met_detail
+
+  - id: met_detail
+    stage: metrics
+    type: info
+    label: "Metrics Deep Dive"
+    speaker: interviewer
+    content: |
+      Great metric choices. Let me add some practical nuances.
+
+      **The ground truth problem in sentiment:**
+      - Sentiment is inherently subjective. Inter-annotator agreement is typically Cohen's kappa = 0.60-0.75 for 3-class sentiment.
+      - This means your model's theoretical ceiling is ~85-90% accuracy, even with perfect modeling.
+      - For aspect-based sentiment, agreement drops to kappa ~0.50 -- much harder.
+      - **Practical implication**: Don't chase >90% F1. Focus on reducing high-impact errors (missed negatives, misclassified sarcasm).
+
+      **Online vs offline metrics:**
+      - **Offline**: F1, precision, recall on labeled evaluation set. Run after every model update.
+      - **Online**: Alert precision/recall, time-to-detection, client satisfaction scores. Track continuously.
+      - **A/B testing**: When deploying a new model, run both old and new in parallel on the same traffic. Compare alert quality and client feedback.
+
+      **Drift detection:**
+      - Social media language evolves rapidly. "Rizz" didn't exist 3 years ago. Your model's vocabulary will become stale.
+      - Track prediction confidence distribution over time. If average confidence drops, the model is seeing unfamiliar patterns.
+      - Monitor class distribution shifts. If "neutral" predictions suddenly spike from 50% to 70%, investigate.
+
+      Let's discuss the data pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "Sentiment is subjective -- inter-annotator agreement is only 0.60-0.75 kappa. Your model's ceiling is around 85-90% accuracy."
+      - speaker: candidate
+        text: "So I shouldn't chase 90%+ F1. Instead, focus on reducing high-impact errors like missed negatives and misclassified sarcasm."
+      - speaker: interviewer
+        text: "Exactly. Also track language drift -- social media vocabulary evolves fast. If model confidence drops over time, it's seeing unfamiliar patterns."
+    next: data_pipeline
+
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: candidate
+    content: |
+      The data pipeline needs to handle high-throughput ingestion from multiple platforms with different APIs and formats.
+
+      **Data sources and ingestion:**
+      - **X/Twitter**: Streaming API (now X API v2, ~$5K/month for enterprise tier). Real-time firehose filtered by brand keywords, mentions, and hashtags. Rate limit: ~500K tweets/day per app.
+      - **Reddit**: Pushshift API or Reddit Data API. Monitor brand-related subreddits and keyword mentions. Comments are often longer and more nuanced than tweets.
+      - **Instagram**: Graph API. Caption text + hashtags. Limited to business accounts. Images contain sentiment signals (happy faces vs angry faces).
+      - **TikTok**: Research API. Video transcripts (via speech-to-text) + comments + hashtags.
+      - **News articles**: RSS feeds + web scraping. Full article text provides rich context.
+
+      **Data processing pipeline (Apache Kafka-based):**
+      1. **Ingestion**: Platform-specific connectors produce raw posts to Kafka topics (one per platform)
+      2. **Preprocessing**: Kafka Streams consumers clean text (remove URLs, normalize Unicode, expand contractions), detect language, de-duplicate
+      3. **Enrichment**: Add metadata (author follower count, post engagement metrics, geo-location)
+      4. **Classification**: Send to ML model for sentiment prediction
+      5. **Aggregation**: Compute rolling sentiment scores per brand, topic, geography
+      6. **Alerting**: Detect significant shifts and fire alerts
+
+      **Labeling strategy:**
+      - **Bootstrap**: Use existing labeled datasets (Sentiment140 -- 1.6M tweets, SST-5, SemEval) for initial model training
+      - **Active learning**: Sample uncertain predictions (confidence 0.4-0.6) for human labeling. 500-1000 labels/week is sufficient.
+      - **Annotation team**: 5 annotators, 3 per post, majority vote. Cost: ~$0.10-0.20 per labeled post using Scale AI or internal team.
+      - **Target**: 50,000+ labeled posts for fine-tuning, refreshed quarterly
+    dialogue:
+      - speaker: candidate
+        text: "We need platform-specific connectors for Twitter, Reddit, Instagram, TikTok, and news. I'd use a Kafka-based pipeline for high-throughput processing."
+      - speaker: interviewer
+        text: "How would you handle the labeling challenge? Sentiment labeling is expensive and subjective."
+      - speaker: candidate
+        text: "Bootstrap with existing datasets like Sentiment140, then use active learning to efficiently label uncertain predictions. About 500-1000 labels per week with 3 annotators per post."
+      - speaker: interviewer
+        text: "Good approach. Let's talk about feature engineering."
+    next: feat_question
+
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Engineering"
+    speaker: interviewer
+    content: |
+      What features would you extract from social media posts for sentiment classification?
+    dialogue:
+      - speaker: interviewer
+        text: "What features would you use for sentiment classification? Social media text is quite different from standard NLP datasets."
+      - speaker: candidate
+        text: "There are two broad approaches -- using pre-trained language model embeddings or engineering traditional NLP features."
+      - speaker: interviewer
+        text: "Walk me through the trade-offs."
+    choices:
+      - label: "Pre-trained transformer embeddings (BERT/RoBERTa)"
+        answer: |
+          I'd use **pre-trained transformer embeddings** as the primary feature representation, specifically a model fine-tuned for social media.
+
+          **Model choice:**
+          - **BERTweet** (base: 110M params): Pre-trained on 850M English tweets. Understands Twitter-specific language, hashtags, mentions, and abbreviations. This is the strongest starting point for tweet sentiment.
+          - **XLM-RoBERTa** (base: 278M params): Pre-trained on 100 languages. Essential for multilingual sentiment analysis across global brands.
+          - **CardiffNLP twitter-roberta-base-sentiment-latest**: Already fine-tuned for 3-class sentiment on tweets. Can be used directly or further fine-tuned on your data.
+
+          **Why transformers over traditional features?**
+          - **Contextual understanding**: "This phone is sick" (positive slang) vs "I'm sick of this phone" (negative). Transformers capture this; bag-of-words cannot.
+          - **Transfer learning**: Pre-trained on billions of tokens, they understand language patterns even for rare brands or niche topics.
+          - **Minimal feature engineering**: Feed in raw text, get embeddings. No need to manually engineer features.
+          - **Sarcasm handling**: Attention mechanisms can capture long-range dependencies that signal sarcasm ("Oh sure, because breaking the app is EXACTLY what I wanted").
+
+          **Architecture:**
+          - Input: Raw post text (up to 128 tokens for tweets, 512 for Reddit/news)
+          - Encoder: BERTweet or XLM-RoBERTa (frozen or fine-tuned)
+          - Classification head: Linear layer(s) -> softmax over sentiment classes
+          - Output: Probability distribution over {positive, negative, neutral}
+
+          **Inference cost**: ~2ms per post on GPU (A10G), ~20ms on CPU. At 58 posts/second sustained, a single A10G GPU handles the load with room to spare.
+        next: feat_transformer_detail
+      - label: "Hybrid: embeddings + handcrafted social signals"
+        answer: |
+          I'd use a **hybrid approach** combining transformer embeddings with handcrafted social media-specific features.
+
+          **Transformer backbone (for text understanding):**
+          - BERTweet or RoBERTa for contextual text embeddings
+          - Produces a 768-dim vector capturing semantic meaning
+
+          **Handcrafted social signals (for context the model can't learn from text alone):**
+
+          **Lexical features:**
+          - Ratio of CAPS WORDS to total words (strong sentiment signal on social media)
+          - Exclamation/question mark count and density
+          - Emoji sentiment score (each emoji has a known sentiment valence from the Emoji Sentiment Ranking dataset)
+          - Profanity presence (using a curated word list -- strong negative signal)
+          - Elongated words ("sooooo good" vs "good" -- intensity signal)
+
+          **Platform-specific features:**
+          - Hashtag sentiment (some hashtags like #fail, #love have inherent sentiment)
+          - Reply vs original post (replies to brands are more likely negative -- complaints)
+          - Author's historical sentiment distribution (consistently negative users vs first-time complainers)
+          - Engagement ratio: likes-to-replies (high replies, low likes = controversial = likely negative)
+
+          **Temporal features:**
+          - Time since brand's last post (complaints cluster after brand actions)
+          - Day of week / hour (sentiment patterns vary by time)
+          - Is this during a known event (product launch, earnings call)?
+
+          **Why hybrid?** In ablation studies, adding handcrafted features to transformer embeddings typically improves F1 by 2-4% on social media datasets. The model learns text semantics from embeddings but gets explicit signals about social media conventions from handcrafted features.
+
+          **Architecture:** Concatenate [768-dim embedding | 30-dim handcrafted features] -> MLP classifier
+        next: feat_hybrid_detail
+
+  - id: feat_transformer_detail
+    stage: features
+    type: info
+    label: "Transformer Features Detail"
+    speaker: interviewer
+    content: |
+      Good choice. Let me add practical considerations.
+
+      **Handling emoji and special characters:**
+      - Emojis are significant sentiment signals. "Great service!" vs "Great service..." (sarcasm) -- punctuation matters.
+      - BERTweet handles emojis well since it was trained on tweets. Standard BERT tokenizes emojis poorly.
+      - Consider converting emojis to text descriptions as a preprocessing option: fire emoji -> "[fire emoji]"
+
+      **Multilingual strategy:**
+      - For 20+ languages, XLM-RoBERTa is the practical choice. Single model handles all languages.
+      - Language-specific fine-tuning: Fine-tune on sentiment data for each major language (English, Spanish, Portuguese, Japanese, Arabic cover 80%+ of social media)
+      - For low-resource languages, cross-lingual transfer from English works surprisingly well (~80% of English performance)
+
+      **Handling long text (Reddit, news):**
+      - Tweets are short (128 tokens), but Reddit comments and news articles can be 2000+ tokens
+      - Use a sliding window: split long text into 512-token overlapping chunks, classify each, aggregate (max pooling or attention-weighted average)
+      - Alternative: Use Longformer or BigBird for efficient long-document encoding
+
+      **Batch processing optimization:**
+      - Dynamic batching: Group posts by similar length, pad to max length within batch
+      - This reduces wasted computation on padding tokens by 40-60%
+      - Use ONNX Runtime for optimized transformer inference: 2-3x faster than PyTorch
+
+      Let's discuss model architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "BERTweet handles emojis well since it was trained on tweets. For multilingual, XLM-RoBERTa handles 100 languages in a single model."
+      - speaker: candidate
+        text: "For long text from Reddit and news, I'd use a sliding window approach -- split into overlapping chunks and aggregate predictions."
+      - speaker: interviewer
+        text: "Good. Dynamic batching and ONNX Runtime can give 2-3x inference speedup, which matters at 5M posts/day. Let's discuss model selection."
+    next: mod_question
+
+  - id: feat_hybrid_detail
+    stage: features
+    type: info
+    label: "Hybrid Features Detail"
+    speaker: interviewer
+    content: |
+      Strong approach. The hybrid combination is well-supported by research. Some additional details:
+
+      **Emoji sentiment scoring:**
+      - The Emoji Sentiment Ranking (Novak et al., 2015) dataset provides sentiment scores for 751 emojis
+      - Aggregate emoji sentiment: average sentiment score of all emojis in a post
+      - Emoji diversity: number of unique emojis (more emojis = more expressive = stronger sentiment)
+      - Key insight: In tweets, emoji sentiment alone achieves ~65% accuracy -- a strong standalone signal
+
+      **Author-level features (user modeling):**
+      - Historical sentiment ratio: What fraction of this user's past posts about any brand were negative?
+      - A user with 90% negative posts is likely a serial complainer; their negative sentiment is less alarming than a usually-positive user suddenly posting negative content
+      - Account age and follower count: New accounts with few followers are more likely bots
+      - Verification status: Verified accounts carry more weight for brand monitoring
+
+      **Feature selection and importance:**
+      - After training, run SHAP analysis to understand feature contributions
+      - Typical finding: transformer embedding contributes ~70%, emoji features ~10%, engagement features ~8%, author features ~7%, temporal ~5%
+      - Drop features with <1% contribution to reduce inference cost
+
+      **Handling missing features:**
+      - Not all platforms provide the same metadata (TikTok doesn't expose follower count the same way as Twitter)
+      - Use platform-specific feature sets or impute missing features with platform-level averages
+
+      Let's discuss model selection.
+    dialogue:
+      - speaker: interviewer
+        text: "The Emoji Sentiment Ranking dataset gives scores for 751 emojis. Emoji sentiment alone achieves about 65% accuracy -- a strong signal."
+      - speaker: candidate
+        text: "Author-level features are valuable too. A usually-positive user suddenly posting negatively is more alarming than a serial complainer."
+      - speaker: interviewer
+        text: "Good insight. After training, SHAP analysis typically shows transformer embeddings contribute about 70% of prediction. Let's discuss model architecture."
+    next: mod_question
+
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Model Selection"
+    speaker: interviewer
+    content: |
+      What model architecture would you choose for sentiment classification at this scale?
+    dialogue:
+      - speaker: interviewer
+        text: "What model architecture would you use for classifying sentiment at 5 million posts per day?"
+      - speaker: candidate
+        text: "The key trade-off is between model accuracy and inference efficiency at this scale."
+      - speaker: interviewer
+        text: "Walk me through the options."
+    choices:
+      - label: "Fine-tuned BERT/RoBERTa classifier"
+        answer: |
+          I'd use a **fine-tuned BERTweet** (or RoBERTa) model as the primary classifier.
+
+          **Architecture:**
+          - **Encoder**: BERTweet-base (110M parameters), pre-trained on 850M tweets
+          - **Classification head**: [CLS] token -> Linear(768, 256) -> ReLU -> Dropout(0.3) -> Linear(256, 3) -> Softmax
+          - **Output**: Probability distribution over {positive, negative, neutral}
+
+          **Fine-tuning strategy:**
+          - Start from CardiffNLP's twitter-roberta-base-sentiment checkpoint (already fine-tuned for sentiment)
+          - Further fine-tune on your labeled dataset (50K posts, 3 epochs, lr=2e-5)
+          - Use **class-weighted cross-entropy loss** to handle imbalanced classes
+          - Freeze embedding layers for first epoch, then unfreeze all layers with discriminative learning rates (lower for earlier layers)
+
+          **Performance expectations:**
+          - F1 (weighted): 85-88% on English tweets
+          - Inference: ~2ms per post on NVIDIA A10G GPU
+          - Throughput: ~500 posts/second on single GPU, far exceeding the 58/second requirement
+          - Model size: ~440MB (BERTweet-base)
+
+          **Why this over larger models?**
+          - BERTweet-base achieves 95% of the accuracy of larger models at 10x lower inference cost
+          - For sentiment (a relatively "easy" classification task compared to NLI or QA), base-size transformers are sufficient
+          - The accuracy bottleneck is annotation quality, not model capacity
+          - Easy to deploy, well-supported tooling (HuggingFace Transformers)
+        next: mod_bert_detail
+      - label: "LLM with few-shot prompting (GPT-4o-mini)"
+        answer: |
+          I'd use a **cloud LLM with few-shot prompting** -- specifically GPT-4o-mini -- for sentiment classification.
+
+          **Why LLM for sentiment?**
+          - **Zero-shot capability**: Can classify sentiment without any fine-tuning. Just describe the task in the prompt.
+          - **Nuance handling**: LLMs excel at sarcasm, irony, and cultural context that trip up smaller models. "Thanks for nothing" is correctly identified as negative.
+          - **Aspect-based sentiment**: LLMs can extract aspect-level sentiment in a single call: "The camera is great [positive] but the battery life is terrible [negative]."
+          - **Explainability**: Can ask the LLM to explain its reasoning, which helps debug errors and build client trust.
+
+          **Prompt design:**
+          ```
+          Classify the sentiment of this social media post about {brand}.
+          Categories: positive, negative, neutral
+          Consider sarcasm, irony, and cultural context.
+
+          Examples:
+          Post: "Love the new update! Finally fixed the login bug"
+          Sentiment: positive
+
+          Post: "Oh great, another update that breaks everything"
+          Sentiment: negative (sarcasm)
+
+          Post: "Just ordered from {brand}"
+          Sentiment: neutral
+
+          Post: "{post_text}"
+          Sentiment:
+          ```
+
+          **Cost analysis (GPT-4o-mini at $0.15/M input, $0.60/M output):**
+          - Average prompt: ~200 input tokens + ~10 output tokens = ~$0.04 per 1000 posts
+          - 5M posts/day = ~$200/day = ~$6,000/month
+          - This is expensive but eliminates model training/hosting costs entirely
+
+          **Latency**: ~100ms per post with GPT-4o-mini. Batch API available for non-real-time processing at 50% discount.
+
+          **Trade-off**: Higher per-query cost but zero ML infrastructure to maintain. Best for smaller scale or when aspect-based sentiment is required.
+        next: mod_llm_detail
+
+  - id: mod_bert_detail
+    stage: model
+    type: info
+    label: "BERT Classifier Details"
+    speaker: interviewer
+    content: |
+      Solid model choice. Let me add production optimization details.
+
+      **Model distillation for faster inference:**
+      - Distill BERTweet-base (110M params) into DistilBERT (66M params) or TinyBERT (14.5M params)
+      - Distillation process: Train smaller model to match larger model's output distributions
+      - Quality loss: ~1-2% F1 drop for DistilBERT, ~3-5% for TinyBERT
+      - Speed gain: 2x faster (DistilBERT) to 7x faster (TinyBERT)
+      - For 5M posts/day, even TinyBERT on CPU handles the throughput
+
+      **Multi-task learning (recommended):**
+      - Train a single model for multiple tasks simultaneously:
+        - Task 1: 3-class sentiment (positive/negative/neutral)
+        - Task 2: Sarcasm detection (binary)
+        - Task 3: Emotion classification (joy/anger/sadness/fear/surprise)
+        - Task 4: Spam/bot detection (binary)
+      - Shared transformer backbone, separate classification heads per task
+      - Multi-task learning improves each individual task by 1-3% due to shared representations
+      - Reduces total inference cost (one forward pass instead of four)
+
+      **Handling class imbalance:**
+      - Negative posts are often minority class (20%) but most important
+      - Use focal loss (alpha=0.25, gamma=2) instead of cross-entropy
+      - Or oversample negative class 2x during training
+      - Track per-class metrics separately -- overall F1 can mask poor negative recall
+
+      Let's discuss training strategy.
+    dialogue:
+      - speaker: interviewer
+        text: "Consider model distillation -- DistilBERT gives 2x faster inference with only 1-2% F1 drop. TinyBERT is 7x faster with 3-5% drop."
+      - speaker: candidate
+        text: "Multi-task learning is smart -- sharing a backbone for sentiment, sarcasm, emotion, and bot detection gives better representations and cuts inference cost."
+      - speaker: interviewer
+        text: "Exactly. And use focal loss to handle class imbalance -- negative posts are the minority but most important. Let's discuss training."
+    next: train_strategy
+
+  - id: mod_llm_detail
+    stage: model
+    type: info
+    label: "LLM Classifier Details"
+    speaker: interviewer
+    content: |
+      Interesting approach. LLMs for classification have some unique considerations.
+
+      **Batch processing for cost reduction:**
+      - OpenAI's Batch API provides 50% discount for non-real-time jobs (24-hour completion)
+      - For posts that don't need real-time classification (historical analysis, reports), batch processing cuts costs to ~$3,000/month
+      - For real-time alerts, use streaming API only on posts matching high-priority brand keywords
+
+      **Tiered classification strategy:**
+      - **Tier 1 (real-time, ~10% of posts)**: Posts mentioning priority brands or trending topics -> GPT-4o-mini streaming API. Cost: ~$600/month.
+      - **Tier 2 (near-real-time, ~30%)**: Recent posts for active monitoring -> Batch API with 1-hour SLA. Cost: ~$1,200/month.
+      - **Tier 3 (batch, ~60%)**: Historical and low-priority posts -> Batch API with 24-hour SLA. Cost: ~$1,200/month.
+      - Total: ~$3,000/month vs $6,000 for all real-time
+
+      **Structured output for reliability:**
+      ```json
+      {
+        "sentiment": "negative",
+        "confidence": 0.92,
+        "sarcasm": true,
+        "aspects": [
+          {"aspect": "customer service", "sentiment": "negative"},
+          {"aspect": "product quality", "sentiment": "positive"}
+        ],
+        "reasoning": "The post uses sarcastic praise to express frustration with support response times"
+      }
+      ```
+
+      **Calibration issue:**
+      - LLM confidence scores are poorly calibrated. A reported "90% confidence" might only be correct 70% of the time.
+      - Build a calibration layer: collect 1000 predictions with confidence scores, fit isotonic regression to map reported confidence to actual accuracy.
+
+      Let's discuss training and optimization.
+    dialogue:
+      - speaker: interviewer
+        text: "OpenAI's Batch API gives 50% discount. Use a tiered strategy -- real-time for priority posts, batch for the rest. Brings cost down to about $3,000/month."
+      - speaker: candidate
+        text: "Structured output is great for getting aspect-level sentiment in a single call. But I'd need to calibrate the confidence scores -- LLMs are poorly calibrated."
+      - speaker: interviewer
+        text: "Exactly. Fit isotonic regression on 1000 labeled predictions to fix calibration. Let's discuss training."
+    next: train_strategy
+
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: candidate
+    content: |
+      Here's my training strategy, covering both fine-tuned and LLM-based approaches.
+
+      **For fine-tuned BERT/RoBERTa:**
+
+      **Data splits:**
+      - Train: 40K posts (stratified by platform, language, class)
+      - Validation: 5K posts
+      - Test: 5K posts (held out, never used during development)
+      - Use temporal splits: train on older data, test on recent data to simulate production drift
+
+      **Training procedure:**
+      - Optimizer: AdamW with weight decay 0.01
+      - Learning rate: 2e-5 with linear warmup (10% of steps) and cosine decay
+      - Batch size: 32 (with gradient accumulation if GPU memory limited)
+      - Epochs: 3-5 (early stopping on validation F1, patience=2)
+      - Mixed precision (FP16) for 2x training speedup
+
+      **Curriculum learning:**
+      - Start with "easy" examples (clear positive/negative with high annotator agreement)
+      - Gradually introduce harder examples (sarcasm, mixed sentiment, ambiguous)
+      - This improves final F1 by 1-2% vs random ordering
+
+      **For LLM-based approach:**
+      - No traditional training needed
+      - Instead, invest in **prompt engineering** and **few-shot example selection**
+      - Curate 20-30 diverse few-shot examples covering edge cases (sarcasm, multilingual, brand-specific)
+      - Use DSPy or PromptSource to systematically optimize prompt variants
+      - A/B test prompt changes in production
+
+      **Continuous retraining (both approaches):**
+      - Retrain/re-evaluate monthly using newly labeled data
+      - Active learning: label 500 uncertain predictions per week
+      - Monitor for concept drift: new slang, new platforms, cultural shifts
+      - Keep 3 model versions ready for instant rollback
+    dialogue:
+      - speaker: candidate
+        text: "For fine-tuning, I'd use temporal splits, AdamW with cosine learning rate schedule, and curriculum learning starting with easy examples."
+      - speaker: interviewer
+        text: "How do you handle the rapid evolution of social media language?"
+      - speaker: candidate
+        text: "Continuous retraining monthly, with active learning labeling 500 uncertain predictions per week. I'd keep 3 model versions ready for rollback."
+      - speaker: interviewer
+        text: "Good. Curriculum learning improving F1 by 1-2% is a nice touch. Let's talk deployment."
+    next: deploy_question
+
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Deployment Architecture"
+    speaker: interviewer
+    content: |
+      How would you deploy this sentiment analysis system at scale?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you architect the deployment to handle 5 million posts per day with 15-minute freshness?"
+      - speaker: candidate
+        text: "This is fundamentally a streaming data problem. I need to choose between a stream-processing architecture and a batch-with-micro-batch approach."
+      - speaker: interviewer
+        text: "Describe your preferred architecture."
+    choices:
+      - label: "Stream processing (Kafka + Flink)"
+        answer: |
+          I'd deploy a **stream processing architecture** using Apache Kafka and Apache Flink for true real-time sentiment analysis.
+
+          **Architecture:**
+          ```
+          Social Media APIs -> Kafka Ingestion Topics
+            -> Flink Job 1: Preprocessing (text cleaning, language detection, dedup)
+            -> Flink Job 2: ML Inference (sentiment classification)
+            -> Flink Job 3: Aggregation (rolling sentiment scores per brand/topic)
+            -> Kafka Output Topics -> Dashboard/Alerting
+          ```
+
+          **ML model serving within Flink:**
+          - Load ONNX-exported BERTweet model into each Flink task manager
+          - GPU-backed task managers (NVIDIA T4) for model inference
+          - Each task manager handles ~200 posts/second
+          - 3 task managers provide 600 posts/second capacity (10x peak requirement)
+
+          **Windowed aggregation:**
+          - **Tumbling window (5 min)**: Compute sentiment distribution per brand per 5-minute window
+          - **Sliding window (1 hour, slide 5 min)**: Rolling average sentiment for trend detection
+          - **Session window**: Group bursts of posts about the same event
+
+          **Alert detection:**
+          - Compare current 5-minute sentiment to the 24-hour rolling average
+          - If negative sentiment exceeds 2 standard deviations above average, fire alert
+          - Debounce: Don't fire multiple alerts for the same event within 30 minutes
+
+          **Advantages**: True real-time processing (seconds, not minutes), natural backpressure handling, exactly-once processing guarantees. Battle-tested at Twitter, LinkedIn, Netflix.
+
+          **Cost**: ~$3,000/month for Kafka cluster + Flink cluster on AWS (MSK + EMR). GPU instances add ~$1,500/month.
+        next: deploy_detail
+      - label: "Micro-batch processing (Spark Streaming)"
+        answer: |
+          I'd use **micro-batch processing** with Spark Structured Streaming for a simpler, more maintainable architecture.
+
+          **Architecture:**
+          ```
+          Social Media APIs -> Kafka Topics (raw posts)
+            -> Spark Streaming (micro-batch every 1 minute):
+              1. Read batch from Kafka
+              2. Preprocess (clean text, detect language, dedup)
+              3. Batch ML inference (sentiment classification)
+              4. Write results to TimescaleDB
+              5. Check alert conditions
+            -> Dashboard reads from TimescaleDB
+            -> Alert service sends notifications
+          ```
+
+          **Why micro-batch over true streaming?**
+          - **Batched inference is 5-10x more efficient** for GPU-based models. Processing 1000 posts in one batch is much faster than 1000 individual inferences due to GPU parallelism.
+          - **Simpler debugging**: Each micro-batch is a discrete unit. Failures are easy to replay and investigate.
+          - **Exactly-once semantics** are simpler with checkpoint-based micro-batching.
+          - **1-minute micro-batches** still meet the 15-minute SLA with plenty of margin.
+
+          **ML inference optimization:**
+          - Export model to TorchScript or ONNX for optimized inference
+          - Dynamic batching: Accumulate posts up to batch size of 256 or 100ms timeout
+          - Single NVIDIA T4 GPU handles ~500 posts/second in batched mode
+          - Total batch inference for 1-minute micro-batch: ~100ms (5M daily / 1440 minutes = ~3,500 posts per batch)
+
+          **Storage:**
+          - **TimescaleDB** (PostgreSQL extension): Time-series optimized, hypertable partitioned by time. Supports SQL queries for dashboards.
+          - Retention: Raw posts 90 days, aggregated sentiment 2 years
+          - Compression: 10x storage reduction with columnar compression
+
+          **Cost**: ~$2,000/month (smaller Kafka cluster + Spark on EMR + single T4 GPU). Simpler ops than full streaming.
+        next: deploy_detail
+
+  - id: deploy_detail
+    stage: deployment
+    type: info
+    label: "Deployment Details"
+    speaker: interviewer
+    content: |
+      Good architecture. Let me add cross-cutting deployment concerns.
+
+      **Multi-tenant architecture:**
+      - Each client has isolated dashboards but shares the ML inference pipeline
+      - Client-specific configuration: which brands to track, custom keywords, alert thresholds
+      - Tenant-level rate limiting to prevent one client's viral event from starving others
+
+      **Scaling for peak events:**
+      - Super Bowl, product launches, and PR crises cause 10x traffic spikes
+      - **Auto-scaling**: Kubernetes HPA (Horizontal Pod Autoscaler) on Kafka consumer lag metric
+      - **Preemptive scaling**: For known events (Super Bowl Sunday), scale up 2 hours before
+      - **Graceful degradation**: At extreme load, skip enrichment features and classify with text-only (faster, slightly less accurate)
+
+      **Model serving infrastructure:**
+      - Use **Triton Inference Server** (NVIDIA) for optimized GPU inference with dynamic batching
+      - Model registry: MLflow tracks model versions, metrics, and artifacts
+      - Canary deployments: New model serves 5% of traffic for 24 hours before full rollout
+      - A/B testing: Run two models simultaneously, compare on same traffic
+
+      **Dashboard and alerting:**
+      - **Real-time dashboards**: Grafana backed by TimescaleDB or ClickHouse. Show sentiment trends, word clouds, top posts, geographic heatmaps.
+      - **Alerting**: PagerDuty/Slack integration. Alert types: sentiment spike, volume spike, viral post detection, bot campaign detection.
+      - **API**: REST API for programmatic access. Clients integrate sentiment data into their own tools.
+
+      Let's discuss monitoring.
+    dialogue:
+      - speaker: interviewer
+        text: "For multi-tenant architecture, share the ML pipeline but isolate client dashboards. Use auto-scaling for peak events like the Super Bowl."
+      - speaker: candidate
+        text: "I'd use Triton Inference Server for GPU inference with dynamic batching, and MLflow for model versioning. Canary deployments with 5% traffic for 24 hours before full rollout."
+      - speaker: interviewer
+        text: "Good. Graceful degradation at extreme load is important -- classify with text-only features if enrichment is too slow. Let's discuss monitoring."
+    next: mon_question
+
+  - id: mon_question
+    stage: monitoring
+    type: question
+    label: "Monitoring Strategy"
+    speaker: interviewer
+    content: |
+      How would you monitor this sentiment analysis system in production?
+    dialogue:
+      - speaker: interviewer
+        text: "What monitoring would you put in place? Sentiment systems can degrade silently as language evolves."
+      - speaker: candidate
+        text: "I need to monitor model accuracy, system health, and business impact -- all three dimensions."
+      - speaker: interviewer
+        text: "What specific signals matter most?"
+    choices:
+      - label: "Model drift detection and accuracy tracking"
+        answer: |
+          I'd implement **continuous drift detection and accuracy monitoring** to catch degradation before it impacts clients.
+
+          **Prediction distribution monitoring:**
+          - Track the sentiment class distribution hourly: {positive: X%, negative: Y%, neutral: Z%}
+          - Compare to the 30-day rolling average using Population Stability Index (PSI)
+          - PSI > 0.2 triggers an investigation -- significant shift in model behavior
+          - Example: If neutral suddenly jumps from 50% to 65%, the model might be confused by a new meme format
+
+          **Confidence calibration tracking:**
+          - For each confidence bucket (0-0.5, 0.5-0.7, 0.7-0.9, 0.9-1.0), track actual accuracy
+          - If the 0.9-1.0 bucket drops below 90% actual accuracy, the model is overconfident
+          - Recalibrate using temperature scaling or Platt scaling on recent labeled data
+
+          **Vocabulary drift detection:**
+          - Track out-of-vocabulary (OOV) rate for the tokenizer
+          - If OOV rate increases from 2% to 5%, new slang or terminology is emerging
+          - Log novel tokens and their contexts for analysis
+          - Trigger retraining when OOV rate exceeds threshold
+
+          **Automated accuracy evaluation:**
+          - Sample 200 predictions/day, send to human annotators
+          - Compute weekly F1 score on fresh production data
+          - Alert if F1 drops >3% below the 4-week rolling average
+          - Track accuracy separately by platform (Twitter vs Reddit vs Instagram) -- drift may affect one platform first
+
+          **Latency and throughput monitoring:**
+          - P50, P95, P99 inference latency (target: P99 <50ms)
+          - Kafka consumer lag (target: <5 minutes)
+          - GPU utilization (target: 40-70% -- room for spikes but not wasteful)
+        next: mon_terminal
+      - label: "Business impact monitoring and client health"
+        answer: |
+          I'd focus monitoring on **business impact metrics** and **client health scores** to ensure the system delivers real value.
+
+          **Client health dashboard:**
+          - Per-client metrics: alert volume, alert precision (feedback from clients), response time to alerts
+          - **Net Promoter Score** (NPS) surveys quarterly
+          - **Churn prediction**: Clients who ignore alerts for 2+ weeks, or downgrade alert thresholds, are at risk
+
+          **Alert quality monitoring:**
+          - Track alert feedback loop: client marks alerts as "helpful", "not helpful", or "missed event"
+          - Compute rolling alert precision (helpful / total alerts) per client. Target: >75%.
+          - Track time-to-detection: from first post in a sentiment event to alert delivery. Target: <15 minutes.
+          - Compare against manual monitoring baselines: did the system catch events the manual team would have missed?
+
+          **Competitive benchmarking:**
+          - For major public events (product recalls, PR crises), compare system's detection time to media coverage
+          - Was the alert faster than the first news article? This is the gold standard for value.
+
+          **Revenue correlation:**
+          - Track correlation between system usage metrics and client retention/upsell
+          - Clients who act on >50% of alerts have 3x higher retention
+          - Use this data to prioritize accuracy improvements for high-value clients
+
+          **Operational dashboards:**
+          - Real-time: Kafka lag, inference latency, error rates, GPU utilization
+          - Daily: Posts processed, alerts fired, human label queue size, model confidence distribution
+          - Weekly: Accuracy trends, platform-specific performance, top failure modes
+
+          **Incident response:**
+          - Playbook for common issues: model serving crash, Kafka lag spike, API rate limiting, bot campaign
+          - Auto-rollback if error rate exceeds 1% for 5+ minutes
+          - On-call rotation with escalation path
+        next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Sentiment Analysis Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive real-time sentiment analysis system.
+
+      **Your architecture summary:**
+      - **Classification**: 3-class sentiment with sarcasm handling on social media text
+      - **Features**: Transformer embeddings (BERTweet/XLM-RoBERTa) or hybrid with social signals
+      - **Model**: Fine-tuned BERT classifier or LLM with few-shot prompting
+      - **Data**: Multi-platform ingestion via Kafka, active learning for labeling
+      - **Deployment**: Stream processing (Kafka + Flink) or micro-batch (Spark Streaming)
+      - **Monitoring**: Drift detection and accuracy tracking or business impact metrics
+
+      **Strengths of your design:**
+      - Handles social media-specific challenges (sarcasm, slang, emojis, multilingual)
+      - Scalable architecture for 5M+ posts/day with peak handling
+      - Alert system with tunable precision/recall trade-offs
+      - Continuous retraining to handle language drift
+
+      **Advanced topics to explore:**
+      - **Multimodal sentiment**: Analyze images and video content alongside text (ViT + BERT fusion)
+      - **Fine-grained emotion detection**: Beyond positive/negative -- detect anger, joy, fear, surprise
+      - **Narrative tracking**: Identify and track emerging narratives/stories, not just sentiment
+      - **Counterfactual analysis**: "What would sentiment have been without our marketing campaign?"
+      - **Bot detection integration**: Weight sentiment by bot probability -- exclude bot-driven sentiment from reports
+
+      This design shows strong understanding of NLP at scale, real-time systems architecture, and the practical challenges of social media analysis. Great job!
+    dialogue:
+      - speaker: interviewer
+        text: "Excellent work! You've designed a comprehensive real-time sentiment analysis system handling 5 million posts per day."
+      - speaker: candidate
+        text: "Thank you! The key trade-off was balancing model sophistication with the throughput requirements. BERTweet provides good accuracy while keeping inference fast."
+      - speaker: interviewer
+        text: "Your awareness of social media-specific challenges like sarcasm, slang evolution, and bot detection really elevated this design. Great job!"

@@ -1,0 +1,654 @@
+id: airbnb-occupancy
+title: "Airbnb Occupancy Prediction"
+description: "Design a hotel occupancy prediction model for a booking site like Airbnb."
+companies: ["Airbnb", "Booking.com", "Expedia"]
+domains: ["Time Series", "Tabular/Structured"]
+root: pd_start
+
+nodes:
+  # ============ PROBLEM DEFINITION ============
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design an **occupancy prediction system** for a booking platform like Airbnb.
+
+      **Business context:**
+      - Airbnb has **7.7M+ active listings** across 220+ countries and regions
+      - Hosts need to know: "What's the probability my listing will be booked on a given date?"
+      - The platform needs occupancy forecasts for: **pricing recommendations** (Smart Pricing), **search ranking** (show available listings higher), **supply acquisition** (recruit hosts in low-supply areas), and **financial planning**
+      - Prediction horizons range from **1 day to 90 days** ahead
+
+      **Key challenges:**
+      - **Heterogeneous inventory**: Unlike hotels with standardized rooms, Airbnb listings range from shared rooms to luxury villas. Each listing has unique characteristics
+      - **Host behavior**: Hosts can block dates, change prices, update photos -- all affect bookability
+      - **Demand seasonality**: Beach houses peak in summer, ski chalets in winter, city apartments during conferences
+      - **Cold start**: ~20% of listings are new each year with no booking history
+      - **Censored data**: We only observe whether a listing was booked, not how many people *wanted* to book it (demand is partially hidden when listings are already occupied)
+
+      Let's scope the ML problem.
+    dialogue:
+      - speaker: interviewer
+        text: "Today we'll design an occupancy prediction system for Airbnb. The platform has over 7.7 million active listings globally."
+      - speaker: candidate
+        text: "Interesting. Occupancy prediction feeds into many downstream systems -- pricing, search ranking, supply planning."
+      - speaker: interviewer
+        text: "Exactly. And unlike hotels, each Airbnb listing is unique, which makes this harder than traditional hotel occupancy forecasting."
+      - speaker: candidate
+        text: "Right, and we have the cold-start problem with new listings having no history."
+      - speaker: interviewer
+        text: "Good observation. Let's scope the ML problem."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: info
+    label: "Problem Scope"
+    speaker: interviewer
+    content: |
+      **Refined scope:**
+      - **Input**: Listing ID, target date, current date (determines forecast horizon)
+      - **Output**: Probability of occupancy (0.0 to 1.0) for each listing-date pair
+      - **Granularity**: Per-listing, per-night prediction
+      - **Horizons**: 1-day, 7-day, 30-day, 90-day lookahead (different horizons serve different use cases)
+
+      **Use cases by horizon:**
+      | Horizon | Consumer | Purpose |
+      |---------|----------|---------|
+      | 1-7 days | Search ranking | Prioritize bookable listings |
+      | 7-30 days | Smart Pricing | Help hosts set optimal prices |
+      | 30-90 days | Supply planning | Identify markets needing more hosts |
+      | 1-90 days | Revenue forecasting | Platform financial planning |
+
+      **Available data:**
+      - **Booking history**: 5 years of reservation data (check-in, check-out, price, guest count)
+      - **Listing attributes**: Location, property type, amenities, photos, reviews, price, cancellation policy
+      - **Host behavior**: Calendar updates, price changes, response rate, acceptance rate
+      - **Market data**: Local events, holidays, competitor pricing (hotels), weather forecasts
+      - **Search/browse data**: How many users viewed/saved/inquired about each listing
+
+      Now, how should we frame this prediction problem?
+    dialogue:
+      - speaker: interviewer
+        text: "We're predicting per-listing, per-night occupancy probability across 1 to 90 day horizons."
+      - speaker: candidate
+        text: "Different horizons serve different use cases. Search ranking needs short-term, supply planning needs longer-term forecasts."
+      - speaker: interviewer
+        text: "Right. And we have rich data -- booking history, listing attributes, host behavior, and even search engagement data."
+    next: pd_formulation
+
+  - id: pd_formulation
+    stage: problem_definition
+    type: question
+    label: "ML Formulation"
+    speaker: interviewer
+    content: |
+      How should we frame the occupancy prediction as an ML problem? The formulation choice affects data preparation, modeling, and how we use predictions downstream.
+    dialogue:
+      - speaker: interviewer
+        text: "How would you formulate this ML problem? The choice has big implications for data preparation and modeling."
+      - speaker: candidate
+        text: "The two main framings are binary classification -- will this listing be booked on this date? -- or time series forecasting of occupancy rates."
+      - speaker: interviewer
+        text: "Walk me through the trade-offs."
+    choices:
+      - label: "Binary classification: Will listing X be booked on date D?"
+        answer: |
+          I'd frame this as **binary classification** predicting whether a specific listing will be occupied on a specific date.
+
+          **Why classification?**
+          - The core question is binary: booked or not booked on a given night
+          - Classification outputs **calibrated probabilities** (P(booked) = 0.73), which are directly useful for all downstream applications
+          - Search ranking uses probability to prioritize likely-available listings
+          - Smart Pricing uses probability to recommend: "At your current price, there's a 45% chance of booking -- try $120 instead for 70% chance"
+
+          **Training data construction:**
+          - For each (listing, date) pair where the date has passed, label = 1 if booked, 0 if not
+          - This gives us **billions of training examples** (7.7M listings x 365 days)
+          - Feature vector includes listing attributes, temporal features, market context, and historical booking patterns
+
+          **Key advantage:** We can generate predictions at the individual listing-date level, which is exactly what search ranking and pricing need. No aggregation required.
+
+          **Challenge:** Class imbalance varies wildly. Popular listings in peak season are booked 90%+ of nights (mostly positive). New listings or off-season may be booked <10% of nights (mostly negative). Need careful handling of this distribution.
+
+          **Airbnb's approach:** Their published work uses a similar binary classification framing with gradient boosting for their Smart Pricing product.
+        next: met_classification
+      - label: "Time series forecasting: Predict occupancy rate over time windows"
+        answer: |
+          I'd frame this as **time series forecasting** predicting occupancy rates for each listing over future time windows.
+
+          **Why time series?**
+          - Occupancy is inherently **temporal** -- bookings follow seasonal patterns, day-of-week patterns, and trend patterns
+          - Time series models capture **autocorrelation**: if a listing was booked last Saturday, it's more likely booked this Saturday
+          - Can forecast entire occupancy curves: "This listing will be 80% booked in July, 40% in August, 60% in September"
+          - Natural fit for supply planning: aggregate forecasts across a market to get total available nights
+
+          **Training data construction:**
+          - For each listing, construct a daily occupancy time series (1 = booked, 0 = available, NA = blocked by host)
+          - Aggregate to weekly occupancy rate for smoother targets: `occupied_nights / available_nights` per week
+          - Training: Predict future occupancy rate given past occupancy history + covariates
+
+          **Key advantage:** Captures temporal dynamics explicitly -- seasonality, trends, booking lead time patterns. A listing that books out 60 days ahead has different dynamics than one that fills last-minute.
+
+          **Challenge:** Each listing is a separate time series. With 7.7M listings, we need a **global model** that shares parameters across listings (like DeepAR or TFT), not 7.7M individual ARIMA models.
+
+          **For aggregation use cases** (market-level supply planning, revenue forecasting), time series forecasting is the natural formulation since these consumers want future trends, not individual booking probabilities.
+        next: met_timeseries
+
+  # ============ METRICS ============
+  - id: met_classification
+    stage: metrics
+    type: info
+    label: "Classification Metrics"
+    speaker: interviewer
+    content: |
+      For binary classification of occupancy, we need metrics that handle the unique challenges of this problem.
+
+      **Primary offline metrics:**
+      - **Log-loss (cross-entropy)**: Primary metric because we care about **calibrated probabilities**, not just ranking. If the model says P(booked)=0.7, we want 70% of those listing-dates to actually be booked. Log-loss directly measures calibration quality.
+      - **AUC-ROC**: Measures ranking ability -- can the model distinguish bookable from non-bookable listing-dates? Target: >0.85
+      - **Calibration curve**: Plot predicted probability vs actual booking rate in decile buckets. Should follow the diagonal. **Platt scaling** or **isotonic regression** if miscalibrated.
+
+      **Stratified metrics** (critical for fairness):
+      - By **listing type**: Entire home vs private room vs shared room
+      - By **market**: Urban vs beach vs rural vs ski
+      - By **forecast horizon**: 1-day predictions are easier than 90-day
+      - By **listing age**: New listings (<6 months) vs established (>2 years)
+      - By **season**: Peak vs off-peak accuracy
+
+      **Business metrics (online):**
+
+      | Metric | Use Case | Target |
+      |--------|----------|--------|
+      | **Smart Pricing adoption** | More hosts use pricing tool | +10% adoption |
+      | **Booking conversion** | Hosts who follow price suggestions book more | +5% bookings |
+      | **Host revenue** | Hosts earn more with ML-suggested prices | +3% revenue |
+      | **Search relevance** | Users see available listings higher | +2% booking from search |
+      | **Inventory utilization** | Platform-wide occupied night rate | Improve by 2% |
+
+      The ultimate success metric is **platform-wide gross booking value (GBV)** -- if occupancy predictions improve, both hosts and the platform earn more.
+    dialogue:
+      - speaker: interviewer
+        text: "For classification, log-loss is our primary metric because we need calibrated probabilities for pricing and ranking."
+      - speaker: candidate
+        text: "Right, AUC tells us about ranking ability, but log-loss captures calibration. If we say 70% chance, it should really be 70%."
+      - speaker: interviewer
+        text: "And we must stratify by listing type, market, horizon, and listing age. Performance can vary dramatically across segments."
+    next: data_pipeline
+
+  - id: met_timeseries
+    stage: metrics
+    type: info
+    label: "Time Series Metrics"
+    speaker: interviewer
+    content: |
+      For time series occupancy forecasting, we need metrics that evaluate forecast quality over time.
+
+      **Point forecast metrics:**
+      - **MAPE (Mean Absolute Percentage Error)**: Primary metric for weekly occupancy rate forecasts. Target: <15% for 1-week horizon, <25% for 4-week horizon
+      - **MAE on occupancy rate**: Average absolute error on predicted occupancy rate (0-1 scale). Target: <0.08 (8 percentage points)
+      - **Weighted MAPE**: Weight by listing revenue -- errors on high-value listings matter more
+
+      **Probabilistic forecast metrics:**
+      - **CRPS (Continuous Ranked Probability Score)**: Measures quality of the full predicted distribution, not just point estimate. Lower is better.
+      - **Prediction interval coverage**: For 80% prediction intervals, do 80% of actuals fall within? Check at 50%, 80%, 95% levels
+      - **Winkler score**: Penalizes both wide intervals (low precision) and missed coverage (poor calibration)
+
+      **Temporal evaluation:**
+      - Accuracy by **forecast horizon**: 1-week ahead vs 4-week vs 12-week. Accuracy should degrade gracefully
+      - Accuracy by **season**: Model should handle peak and off-peak equally well
+      - **Trend capture**: Does the model correctly predict occupancy increasing/decreasing? Directional accuracy matters for supply planning
+
+      **Aggregation metrics** (for supply planning):
+      - **Market-level MAPE**: Aggregate listing forecasts to market level. Should be more accurate than individual listings due to error cancellation. Target: <10% for market-level 4-week forecast
+
+      **Business metrics**: Same as classification -- ultimately measured by host revenue impact, platform GBV, and inventory utilization.
+    dialogue:
+      - speaker: interviewer
+        text: "For time series, we use MAPE for point forecasts and CRPS for probabilistic forecasts. Accuracy should degrade gracefully with horizon."
+      - speaker: candidate
+        text: "CRPS is important because downstream consumers like Smart Pricing need uncertainty estimates, not just point predictions."
+      - speaker: interviewer
+        text: "Exactly. And at the market level, individual listing errors should cancel out, giving us better aggregate accuracy for supply planning."
+    next: data_pipeline
+
+  # ============ DATA (CONVERGED) ============
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      Let's design the data pipeline for occupancy prediction.
+
+      **Data sources:**
+
+      | Source | Key Fields | Update Frequency |
+      |--------|-----------|-----------------|
+      | Reservations | listing_id, check_in, check_out, price_paid, guest_count, lead_time | Real-time |
+      | Listing catalog | location, property_type, bedrooms, amenities, photos_count, rating | Daily |
+      | Calendar/pricing | host-set availability, nightly price per date, minimum stay | Real-time |
+      | Search impressions | listing_id, date, impressions, clicks, contact_rate | Hourly |
+      | Reviews | rating, text, recency, count | Daily |
+      | Market data | local events, holidays, hotel rates, weather forecast | Daily |
+
+      **Label construction:**
+      - For each (listing_id, date), label = 1 if a confirmed reservation covers that date, 0 otherwise
+      - **Exclude host-blocked dates** -- these are not "available but unbooked", they're intentionally unavailable
+      - **Handling cancellations**: Cancelled bookings -> label flips from 1 to 0. Use the final state as ground truth
+
+      **Censoring problem:**
+      - Once a listing is booked for date D, we can't observe additional demand for that date
+      - This means booked dates may have had demand of 1, 5, or 50 interested guests -- we only see the first booking
+      - **Mitigation**: Use search impression and inquiry data as a proxy for demand (observed even after booking)
+
+      **Data splits:**
+      - **Temporal**: Train on months 1-9, validate month 10, test months 11-12
+      - **Never shuffle dates** -- leaks seasonal information
+      - Ensure test set includes both peak season and off-peak for comprehensive evaluation
+
+      **Scale**: 7.7M listings x 365 days = **2.8B training examples per year**. Feature engineering must be efficient.
+    dialogue:
+      - speaker: interviewer
+        text: "The data pipeline processes reservation data, listing attributes, calendar updates, search impressions, and market data."
+      - speaker: candidate
+        text: "The censoring problem is tricky. Once a listing is booked, we can't see how many other people wanted it."
+      - speaker: interviewer
+        text: "Good catch. We use search impressions and inquiry data as proxies for unobserved demand. Now let's engineer features."
+    next: feat_question
+
+  # ============ FEATURES ============
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Strategy"
+    speaker: interviewer
+    content: |
+      What features would you engineer for occupancy prediction? The feature set must capture listing quality, demand patterns, and competitive dynamics.
+    dialogue:
+      - speaker: interviewer
+        text: "What features would you build? We need to capture listing quality, demand patterns, and the competitive landscape."
+      - speaker: candidate
+        text: "I see two main approaches -- focusing on listing-specific historical patterns, or emphasizing market-level demand signals."
+      - speaker: interviewer
+        text: "Tell me about each approach."
+    choices:
+      - label: "Listing-centric: Historical booking patterns + listing quality signals"
+        answer: |
+          I'd prioritize **listing-specific features** that capture each property's unique booking patterns and quality.
+
+          **Historical booking features:**
+          - **Same-period occupancy**: Occupancy rate for the same week last year (strong seasonal signal)
+          - **Rolling occupancy**: 7-day, 30-day, 90-day trailing occupancy rates
+          - **Booking lead time distribution**: P50 lead time (days between booking and check-in). Beach houses book 60+ days ahead; city apartments book 3-7 days ahead
+          - **Day-of-week pattern**: Per-listing weekend vs weekday booking rates
+          - **Cancellation rate**: Listings with high cancellation rates have inflated "booking" counts
+
+          **Listing quality signals:**
+          - **Review score** (overall + sub-scores: cleanliness, accuracy, check-in, communication, location, value)
+          - **Review count** and recency of last review
+          - **Photo quality score** (from a separate vision model -- Airbnb has one)
+          - **Superhost status** (binary indicator of host reliability)
+          - **Response rate and time** (hosts who respond fast get more bookings)
+          - **Listing completeness**: Percentage of description fields filled out
+
+          **Price competitiveness:**
+          - Current price vs listing's own historical median price (is host pricing high or low for themselves?)
+          - Price percentile within market (is this listing cheap or expensive relative to comparable listings?)
+          - Price trend: Has the host been raising or lowering prices recently?
+
+          **Calendar signals:**
+          - Days until target date (forecast horizon)
+          - Are surrounding dates already booked? (A listing booked Friday and Sunday is likely to book Saturday)
+          - Minimum stay requirement vs target date availability window
+        next: mod_question
+      - label: "Market-centric: Demand signals + competition + external events"
+        answer: |
+          I'd prioritize **market-level demand signals** that capture what's driving bookings in each area.
+
+          **Market demand features:**
+          - **Search volume**: Number of searches for this market (city/neighborhood) for the target date range. High search volume = high demand
+          - **Search-to-book ratio**: What percentage of searches in this market result in bookings? Low ratio = oversupply or price resistance
+          - **Inquiry rate**: Guest inquiries for similar listings in this market
+          - **Market occupancy rate**: Overall occupancy for comparable listings in the same neighborhood
+
+          **Competition features:**
+          - **Available inventory**: How many similar listings are available on the target date? More competition = lower individual occupancy
+          - **Competitor pricing**: Median price of similar available listings in the same market. If our listing is priced below median, higher booking probability
+          - **New listing count**: Recent listing additions in the market (supply growth)
+          - **Hotel occupancy/pricing**: Local hotel occupancy rates and ADR (Average Daily Rate) from STR data. When hotels are full, Airbnb demand increases
+
+          **External demand drivers:**
+          - **Events**: Concerts, conferences, sports events within 10 km. Use event databases (PredictHQ, Eventbrite). Taylor Swift concert = 10x demand spike
+          - **Holidays**: National holidays, school breaks, long weekends. Country-specific holiday calendars
+          - **Weather forecasts**: Beach markets correlate with sunshine; ski markets with snowfall
+          - **Flights**: Incoming flight bookings to the destination airport (available from OAG data)
+
+          **Spatial features:**
+          - Listing's distance to key attractions, transit, restaurants
+          - Neighborhood desirability score (derived from aggregate review scores)
+          - Walk score, transit score
+
+          This approach captures **why demand exists**, not just historical patterns. Critical for forecasting during events or in new markets.
+        next: mod_question
+
+  # ============ MODEL ============
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Model Architecture"
+    speaker: interviewer
+    content: |
+      What model architecture would you choose for occupancy prediction?
+    dialogue:
+      - speaker: interviewer
+        text: "What model would you choose? Remember we have 7.7 million listings and need predictions across multiple horizons."
+      - speaker: candidate
+        text: "The key trade-off is between gradient boosting which is fast and interpretable, and deep learning which can model temporal dynamics and share across listings."
+      - speaker: interviewer
+        text: "Walk me through your recommendation."
+    choices:
+      - label: "LightGBM with listing-level features and calibration"
+        answer: |
+          I'd use **LightGBM** for binary classification of listing-date occupancy, with careful calibration.
+
+          **Why LightGBM?**
+          - Handles the **mixed feature types** naturally (categorical listing attributes + numerical demand signals)
+          - **Fast training**: Can train on 2.8B examples in hours using distributed LightGBM (Spark)
+          - **Feature importance**: SHAP values explain "why is this listing predicted to be 85% booked?" -- critical for hosts
+          - **Production-proven**: Airbnb's published ML papers describe using gradient boosting for their core prediction models
+
+          **Model design:**
+          - **Task**: Binary classification (booked vs not booked per listing-date)
+          - **Loss**: Log-loss (optimizes for calibrated probabilities)
+          - **Key hyperparameters**: num_leaves=127, learning_rate=0.05, min_child_samples=50
+          - **Calibration**: Post-training Platt scaling on validation set. Critical because raw GBM probabilities can be poorly calibrated at the extremes
+
+          **Per-horizon models:**
+          - Train separate models for 1-7 day, 8-30 day, and 31-90 day horizons
+          - Shorter horizons have more real-time features available (current traffic, last-minute searches)
+          - Longer horizons rely more on seasonality and historical patterns
+
+          **Cold-start handling:**
+          - New listings lack booking history features. Fall back to **market-level features** and **listing similarity**
+          - Find the 50 most similar existing listings (by location, type, price, amenities) and use their average occupancy as a prior
+          - As the listing accumulates bookings (>10), transition to its own history
+
+          **Scalability**: Score 7.7M listings x 90 days = 693M predictions. At ~500K predictions/second (LightGBM on CPU), this takes ~23 minutes in batch.
+        next: train_strategy
+      - label: "Temporal Fusion Transformer for probabilistic forecasting"
+        answer: |
+          I'd use the **Temporal Fusion Transformer (TFT)** for probabilistic occupancy forecasting.
+
+          **Why TFT?**
+          - **Purpose-built for multi-horizon forecasting** with mixed inputs (static listing attributes + time-varying features)
+          - Produces **probabilistic outputs** (full predicted distribution, not just point estimate) -- essential for pricing and planning
+          - **Interpretable attention**: Shows which time steps and features the model focuses on for each prediction
+          - Published by Google (2019), shown to outperform DeepAR, ARIMA, and Prophet on multiple forecasting benchmarks
+
+          **Architecture:**
+          ```
+          Static features (listing attributes) -> Variable Selection -> Static Enrichment
+          Historical time features (past bookings, prices) -> LSTM Encoder -> Temporal Self-Attention
+          Future known features (calendar, events, weather) -> LSTM Decoder -> Multi-Head Attention
+          All combined -> Gated Residual Networks -> Quantile outputs (P10, P50, P90)
+          ```
+
+          **Key TFT components for occupancy:**
+          - **Variable selection network**: Automatically learns which features matter (e.g., "for beach listings, weather matters more; for city listings, events matter more")
+          - **Static covariate encoders**: Listing attributes (bedrooms, location, type) condition the temporal model
+          - **Multi-horizon output**: Single forward pass predicts all 90 days simultaneously
+
+          **Global model across listings:**
+          - One model shared across all 7.7M listings (not per-listing models)
+          - Listing-specific behavior captured through listing features and historical patterns
+          - **Transfer learning**: The model learns that "beach house in Miami" and "beach house in Barcelona" share seasonal patterns
+
+          **Cold-start**: TFT handles cold start naturally -- for new listings with no history, the model uses static features and market context to generate forecasts. As history accumulates, the temporal encoder improves predictions.
+
+          **Trade-off**: Training requires GPUs (~8 A100s for ~24 hours). Inference for 693M predictions needs batch processing with GPU acceleration. More complex to maintain than GBM.
+        next: train_strategy
+
+  # ============ TRAINING ============
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: interviewer
+    content: |
+      Let's discuss training strategy for occupancy prediction.
+
+      **Data preparation:**
+      - **Temporal split**: Train on 2 years of data, validate on 2 months, test on 2 months. Always hold out the most recent data for testing
+      - **Walk-forward validation**: Train on [month 1..T], predict [T+1..T+3], slide T forward. This simulates real production behavior
+      - **Stratified sampling**: Ensure train/val/test sets have proportional representation of listing types, markets, and seasons
+
+      **Handling class imbalance:**
+      - Global average occupancy is ~60%, but varies wildly: some listings are 95%+ booked, others <10%
+      - **Per-listing base rate**: Include the listing's historical occupancy as a feature (strong prior)
+      - **Focal loss** for classification: Down-weight easy examples (consistently booked/unbooked), focus on uncertain cases
+      - For time series: Use **sample weights** proportional to listing activity level
+
+      **Multi-horizon training:**
+      - For GBM: Separate models per horizon band (1-7d, 8-30d, 31-90d)
+      - For TFT: Single model with horizon as input, multi-step output
+      - **Curriculum learning** for TFT: Start training on short horizons, gradually add longer horizons. Stabilizes training
+
+      **Feature freshness vs stability:**
+      - Short-horizon models should use **real-time features** (today's search volume, recent price changes)
+      - Long-horizon models should use **stable features** (listing attributes, historical averages, seasonal patterns)
+      - Including stale real-time features for long horizons adds noise without signal
+
+      **Retraining cadence:**
+      - **Weekly retraining** with sliding 2-year window
+      - **Daily feature refresh**: Update rolling aggregates (7d/30d occupancy rates, recent search volumes)
+      - **Event-triggered retraining**: Major market changes (new COVID variant, major event announcement) trigger immediate retraining
+    dialogue:
+      - speaker: interviewer
+        text: "Walk-forward validation is essential -- train on months 1 to T, predict T+1 to T+3, slide forward. This simulates real production behavior."
+      - speaker: candidate
+        text: "And we need separate treatment for different horizons. Short-term gets real-time features, long-term uses stable historical patterns."
+      - speaker: interviewer
+        text: "Exactly. Weekly retraining with daily feature refreshes keeps the model current without excessive compute cost."
+      - speaker: candidate
+        text: "What about major market disruptions like COVID?"
+      - speaker: interviewer
+        text: "Event-triggered retraining for major shifts. The 2-year training window also helps -- it naturally includes both normal and disrupted periods. Let's deploy."
+    next: deploy_question
+
+  # ============ DEPLOYMENT ============
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Deployment Architecture"
+    speaker: interviewer
+    content: |
+      How would you deploy the occupancy prediction system to serve 7.7M listings across 90 days?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you deploy this? We need predictions for 7.7 million listings across 90 days -- nearly 700 million predictions."
+      - speaker: candidate
+        text: "The key choice is whether to batch-compute all predictions periodically, or compute on-demand when a listing is queried."
+      - speaker: interviewer
+        text: "Consider the different downstream consumers and their latency needs."
+    choices:
+      - label: "Batch pipeline: Nightly prediction of all listing-dates"
+        answer: |
+          I'd use a **nightly batch pipeline** that pre-computes predictions for all listing-date combinations.
+
+          **Architecture:**
+          ```
+          Nightly at 2 AM UTC:
+          Feature Store -> Batch Inference (Spark) -> Prediction Store (DynamoDB/BigQuery)
+
+          Serving:
+          Consumer request -> Prediction Store lookup -> Return cached prediction
+          ```
+
+          **Why batch?**
+          - 693M predictions is a batch-friendly workload -- no per-request latency constraint
+          - All downstream consumers (pricing, search, supply planning) can query the same pre-computed store
+          - **Simpler infrastructure**: No model serving cluster needed, just a database
+          - Predictions are consistent across consumers -- search and pricing see the same occupancy estimate
+
+          **Nightly pipeline steps:**
+          1. **Feature assembly** (Spark, 1 hour): Join listing attributes, compute rolling aggregates, fetch market signals
+          2. **Batch inference** (Spark + LightGBM, 30 min): Score all 693M listing-date pairs
+          3. **Post-processing** (30 min): Calibrate probabilities, compute confidence intervals, flag anomalies
+          4. **Write to store** (15 min): Atomic swap of prediction tables (old -> new)
+          5. **Quality validation** (15 min): Compare new predictions vs yesterday's, alert if >5% of listings change by >0.3
+
+          **Intra-day refresh:**
+          - For high-value listings (top 10% by revenue), refresh predictions every 4 hours
+          - Triggered refresh when a listing's price changes or a nearby competitor is booked
+
+          **Prediction store schema:**
+          ```
+          listing_id | date | occupancy_prob | confidence | model_version | computed_at
+          ```
+
+          **Fallback**: If nightly pipeline fails, use yesterday's predictions (1 day stale is acceptable for most consumers).
+        next: mon_question
+      - label: "On-demand inference with caching for search ranking"
+        answer: |
+          I'd use **on-demand inference** for search ranking (latency-sensitive) with caching, plus batch for other consumers.
+
+          **Hybrid architecture:**
+          ```
+          Search ranking (real-time):
+          Search query -> Candidate listings -> Model Service (GPU) -> Occupancy scores -> Re-rank
+
+          Pricing / Supply planning (batch):
+          Nightly batch -> Prediction Store -> Query on demand
+          ```
+
+          **Why hybrid?**
+          - **Search ranking** needs fresh predictions at query time. A listing booked 5 minutes ago should drop in ranking immediately. Batch predictions are hours stale.
+          - **Pricing and supply planning** can tolerate nightly batch -- they don't need second-level freshness
+          - Real-time inference enables **personalization**: Adjust occupancy estimate based on the searching guest's characteristics (trip dates, party size, budget)
+
+          **Real-time model serving:**
+          - Model deployed on **ONNX Runtime** or **TorchServe** with GPU
+          - Search returns ~200 candidate listings per query, batch-scored in one forward pass (~20ms on T4 GPU)
+          - **Cache layer**: Cache predictions per (listing_id, date) with 30-minute TTL. Cache hit rate >90% since popular listings are queried repeatedly
+          - Auto-scaling: Kubernetes HPA based on query rate, pre-scaled for peak hours
+
+          **Feature serving for real-time:**
+          - Pre-computed features in **Redis**: listing attributes, rolling occupancy rates, market signals
+          - Per-query features computed on the fly: relative price vs competitors available now, freshness of availability
+
+          **Advantages**: Search shows the most accurate availability estimates, improving user experience and booking conversion. Fresh signals like "just booked" propagate within minutes, not hours.
+
+          **Trade-off**: More complex infrastructure (model serving + batch + cache). Higher operational cost but justified by search conversion improvement.
+        next: mon_question
+
+  # ============ MONITORING ============
+  - id: mon_question
+    stage: monitoring
+    type: question
+    label: "Monitoring Strategy"
+    speaker: interviewer
+    content: |
+      What monitoring would you implement for the occupancy prediction system?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you monitor this system? Millions of hosts rely on these predictions for pricing decisions."
+      - speaker: candidate
+        text: "We need to track both prediction accuracy and business impact."
+      - speaker: interviewer
+        text: "Tell me your approach."
+    choices:
+      - label: "Prediction accuracy monitoring with market-level dashboards"
+        answer: |
+          I'd implement **layered accuracy monitoring** from individual predictions up to market-level trends.
+
+          **Prediction accuracy (computed daily as ground truth becomes available):**
+          - **Log-loss by horizon bucket**: Track separately for 1-7d, 8-30d, 31-90d. Alert if any bucket degrades >5% from 30-day rolling average
+          - **Calibration drift**: Plot actual booking rate vs predicted probability in deciles. If calibration degrades, trigger recalibration
+          - **Per-market accuracy**: Dashboard showing MAE and log-loss per major market (NYC, London, Paris, etc.). Some markets may need market-specific models
+
+          **Segment-level monitoring:**
+          - **Cold-start listings**: Track accuracy for listings <6 months old separately. If significantly worse, improve cold-start features
+          - **Listing type**: Accuracy for entire homes vs shared rooms vs unique stays (treehouses, boats). Some types may be systematically mispredicted
+          - **Price ranges**: Luxury vs budget listings may have different prediction challenges
+
+          **Data quality monitoring:**
+          - Feature freshness: Are rolling aggregates being updated? Are market signals current?
+          - Listing data quality: Missing photos, stale descriptions, inactive hosts -- flag for data team
+          - **Calendar blocking**: Monitor host calendar update patterns. If hosts increasingly block dates without bookings, our "available but unbooked" labels are contaminated
+
+          **Anomaly detection:**
+          - If a market's predicted occupancy suddenly differs >20% from recent actuals, alert. Could indicate a local event not in our calendar, or a data pipeline issue
+          - Track prediction stability: Are predictions for stable markets changing dramatically between daily runs?
+
+          **Monthly model health report**: Accuracy trends, feature importance shifts, worst-performing segments, recommended improvements.
+        next: mon_terminal
+      - label: "Business impact tracking with host feedback loops"
+        answer: |
+          I'd focus monitoring on **business impact** and **host trust** since these are the ultimate measures of success.
+
+          **Host-facing metrics:**
+          - **Smart Pricing adoption**: What percentage of hosts enable Smart Pricing? Track over time. If our predictions are accurate, more hosts trust the tool
+          - **Price suggestion acceptance rate**: When we suggest a price, does the host accept it? Higher acceptance = trust in our occupancy estimates
+          - **Host revenue impact**: A/B test -- hosts with ML-powered pricing vs hosts without. Target +5% revenue per host
+          - **Occupancy improvement**: Hosts using our predictions should see higher occupancy than control group
+
+          **Guest-facing metrics:**
+          - **Search result availability**: What percentage of search results are actually available? If we predict high occupancy but listings are unavailable, search quality suffers
+          - **Booking conversion rate**: Users who see accurate availability estimates should convert more
+          - **Wishlist save rate**: If we show "high demand, book soon" signals powered by occupancy predictions, do users save/book faster?
+
+          **A/B testing framework:**
+          - **Shadow mode first**: Run new model alongside production, compare predictions without affecting users
+          - **Gradual rollout**: 5% of hosts see new predictions -> 20% -> 50% -> 100%
+          - **Hold-back control**: Permanently keep 5% of hosts on baseline model for continuous comparison
+          - **Market-level A/B**: Test new model in entire markets (not random hosts) to capture network effects
+
+          **Host feedback collection:**
+          - Survey hosts: "Were our booking predictions helpful for your pricing decisions?"
+          - Track host support tickets mentioning "pricing", "occupancy", or "bookings"
+          - Monitor forums and social media for host sentiment about pricing tools
+
+          **Quarterly business review**: Connect occupancy prediction improvements to platform GBV (Gross Booking Value), take rate, and market share vs competitors.
+        next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Occupancy Prediction Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive **occupancy prediction system** for a booking platform.
+
+      **Your key design decisions:**
+      - Framed as binary classification (per-listing-date) or time series forecasting (occupancy curves)
+      - Defined log-loss/CRPS metrics with calibration focus and host-revenue business metrics
+      - Addressed censored demand, cold start, and host behavior in data pipeline
+      - Engineered listing-centric features (booking history, quality) or market-centric features (demand signals, competition, events)
+      - Selected LightGBM with calibration or Temporal Fusion Transformer for probabilistic forecasting
+      - Deployed via nightly batch or hybrid on-demand + batch architecture
+      - Monitored with accuracy dashboards or business impact tracking with host feedback
+
+      **What makes this problem unique:**
+      - **Heterogeneous inventory**: Each listing is unique, unlike hotel rooms. Requires listing-level features
+      - **Cold start**: 20% new listings annually with no history. Market features and listing similarity are essential
+      - **Censored demand**: Can't observe demand beyond first booking. Search data as demand proxy
+      - **Host behavior**: Hosts affect outcomes through pricing, calendar management, and responsiveness
+      - **Multi-stakeholder**: Must benefit hosts (higher revenue), guests (better search), and platform (higher GBV)
+
+      **Evolution path:**
+      1. **v1**: LightGBM with listing features, nightly batch (1-2 months to production)
+      2. **v2**: Add market-level features, calibration, cold-start handling (month 3-4)
+      3. **v3**: TFT for probabilistic forecasting, Smart Pricing integration (month 5-8)
+      4. **v4**: Real-time search integration, personalized occupancy estimates (month 9-12)
+
+      This demonstrates strong end-to-end thinking about a uniquely challenging forecasting problem. Great job!
+    dialogue:
+      - speaker: interviewer
+        text: "Excellent work! You've covered the unique challenges of occupancy prediction -- censored demand, cold start, and heterogeneous inventory."
+      - speaker: candidate
+        text: "Thanks! The key insight is that occupancy prediction isn't just about the listing itself -- market context and competitive dynamics matter just as much."
+      - speaker: interviewer
+        text: "Exactly. And connecting predictions to business impact through Smart Pricing and search ranking makes this more than an academic forecasting exercise. Great job!"

@@ -1,0 +1,1052 @@
+id: ads-reranking-calibration
+title: "Ads Re-ranking with Calibration"
+description: "Build an ads re-ranking system with probability calibration."
+companies: ["Google", "Meta", "Microsoft"]
+domains: ["Ranking/Search", "Tabular/Structured"]
+root: pd_start
+
+nodes:
+  # ============ PROBLEM DEFINITION ============
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we will design an **ads re-ranking system with probability calibration** -- one of the most critical and nuanced components in online advertising.
+
+      **Business context:**
+      - Modern ad systems use a multi-stage funnel: retrieval (millions of candidates) -> pre-ranking (thousands) -> ranking (hundreds) -> **re-ranking** (final ordering of 10-30 ads)
+      - The re-ranker is the **last ML model before ads are shown to the user**, making it the highest-leverage point for optimization
+      - At Google, the re-ranker processes ~**8.5B queries/day** and directly determines which ads earn the ~$240B/year in Search ad revenue
+      - **Probability calibration** is essential because ad pricing uses `charge = pCTR * bid` -- if pCTR is miscalibrated by 10%, advertisers are over/under-charged by 10%
+
+      **What makes re-ranking different from ranking?**
+      - Re-ranking operates on **already-scored** ads from the main ranker
+      - It can consider **list-level context**: ad diversity, position effects, and inter-ad interactions
+      - It must be **perfectly calibrated** because its outputs feed directly into the auction pricing mechanism
+      - Latency budget is extremely tight: **<5ms** for the re-ranking stage alone
+
+      **Goal:** Design an ML system that takes ranked ad candidates and produces a final ordering with well-calibrated click probabilities, optimizing for both revenue and user experience.
+
+      Let us begin by scoping the re-ranking objective.
+    dialogue:
+      - speaker: interviewer
+        text: "Today we are designing an ads re-ranker with calibration. Why is re-ranking separate from the main ranking model?"
+      - speaker: candidate
+        text: "The main ranker scores ads independently -- it predicts pCTR for each ad in isolation. But the actual click probability depends on what other ads are shown alongside it. A shoe ad might get 5% CTR when shown alone, but only 2% when shown next to three other shoe ads. The re-ranker captures these list-level interactions that pointwise rankers miss."
+      - speaker: interviewer
+        text: "Great. And why is calibration particularly critical at this stage?"
+      - speaker: candidate
+        text: "Because the re-ranker's probability outputs are the final pCTR values used in the auction. The advertiser's charge is computed as the minimum bid needed to maintain their position, which depends on the pCTR ratio between adjacent ads. If these probabilities are miscalibrated, the auction charges incorrect prices, leading to either advertiser overpayment and churn, or platform revenue loss."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: info
+    label: "Re-ranking Scope"
+    speaker: interviewer
+    content: |
+      Let us define the precise scope and constraints for the re-ranking system.
+
+      **Input:** A ranked list of 10-30 ad candidates, each with:
+      - Pointwise pCTR from the main ranker
+      - Ad features (creative type, category, advertiser, bid, quality score)
+      - User features (demographics, interests, recent behavior)
+      - Context features (query, page type, device, position)
+
+      **Output:** A re-ordered list with:
+      - Final ad positions (which ads appear in slots 1, 2, 3, ...)
+      - Calibrated click probabilities for each ad in its assigned position
+      - These probabilities must satisfy `E[predicted_CTR] = E[actual_CTR]` across all slices
+
+      **Constraints:**
+      - **Latency:** <5ms total for re-ranking + calibration (the ranker already used 5ms of the 10ms budget)
+      - **Consistency:** The same (user, query, ads) should produce the same ranking -- no randomness at serving time
+      - **Monotonicity:** If the main ranker ranks ad A above ad B, the re-ranker should have a strong (but not absolute) prior to preserve this ordering
+      - **Fairness:** Must not systematically disadvantage certain advertiser sizes or categories
+
+      **Key design decisions ahead:**
+      1. How to model list-level interactions (pointwise vs listwise re-ranking)
+      2. How to calibrate probabilities (post-hoc vs in-model calibration)
+      3. How to balance revenue, relevance, and diversity
+
+      Let us start with the core re-ranking approach.
+    dialogue:
+      - speaker: interviewer
+        text: "What is the latency budget for re-ranking specifically?"
+      - speaker: candidate
+        text: "The total ad serving budget is typically 10ms. The main ranker takes about 5ms. That leaves about 5ms for re-ranking, calibration, post-processing, and auction computation combined. The re-ranker itself should ideally complete in 2-3ms, leaving room for the rest."
+      - speaker: interviewer
+        text: "How many ads does the re-ranker typically process?"
+      - speaker: candidate
+        text: "Usually 10-30 candidates. The main ranker already filtered from thousands to these finalists. The re-ranker then selects the final 3-8 ads to display, potentially reordering them based on list-level context."
+    next: met_question
+
+  # ============ METRICS ============
+  - id: met_question
+    stage: metrics
+    type: question
+    label: "Re-ranking Objective"
+    speaker: interviewer
+    content: |
+      What should be the primary optimization objective for the re-ranker? This is a nuanced decision because the re-ranker sits at the intersection of user experience, advertiser value, and platform revenue.
+    choices:
+      - label: "Revenue optimization with calibration constraint"
+        answer: |
+          I would optimize for **expected revenue** subject to a strict calibration constraint.
+
+          **Why revenue-first:**
+          - The re-ranker is the last opportunity to maximize `sum(pCTR_i * bid_i)` for the displayed ad slate
+          - By considering list-level interactions, the re-ranker can find orderings that generate more total revenue than a pointwise sort by `pCTR * bid`
+          - Example: Showing a high-bid ad in position 2 (instead of 3) might increase its CTR enough that the total page revenue increases, even though position 2's click comes at the expense of the ad previously there
+
+          **Primary metric: Expected Revenue Per Session (ERPS)**
+          ```
+          ERPS = sum over positions k: calibrated_pCTR(ad_k, position_k) * bid(ad_k)
+          ```
+
+          **Calibration constraint (non-negotiable):**
+          - **Expected Calibration Error (ECE) < 0.005** across all prediction deciles
+          - Per-position calibration: predictions for position 1, 2, 3, etc. must each be individually calibrated
+          - Per-vertical calibration: finance ads, e-commerce ads, etc. must each be calibrated
+          - If ECE exceeds threshold, recalibration is triggered before the model can serve
+
+          **Secondary metrics:**
+          - **Revenue lift** vs serving the main ranker's ordering directly (A/B test)
+          - **Auction integrity:** Average price-per-click should be stable (not inflated by miscalibration)
+          - **Advertiser ROI stability:** Week-over-week variance in cost-per-click per advertiser
+
+          **Trade-off:** Pure revenue optimization can reduce ad diversity and user experience. We need diversity guardrails to prevent showing 5 ads from the same advertiser or category.
+        next: met_revenue
+      - label: "Balanced: relevance + diversity + revenue"
+        answer: |
+          I would optimize for a **balanced multi-objective** that considers relevance, diversity, and revenue simultaneously.
+
+          **Why balanced:**
+          - Pure revenue optimization leads to **ad fatigue** -- users see too many high-bid but repetitive ads
+          - Google's research found that introducing diversity constraints in re-ranking **improved long-term revenue by 2-4%** despite reducing short-term revenue by 0.5%
+          - Diverse ad slates lead to higher overall CTR because each ad is incrementally informative to the user
+
+          **Multi-objective scoring function:**
+          ```
+          slate_score = alpha * relevance_score
+                      + beta * diversity_score
+                      + gamma * revenue_score
+          ```
+
+          Where:
+          - `relevance_score = sum(calibrated_pCTR_k)` -- total expected clicks
+          - `diversity_score = sum over pairs: dissimilarity(ad_i, ad_j)` -- penalize similar ads
+          - `revenue_score = sum(calibrated_pCTR_k * bid_k)` -- total expected revenue
+
+          **Primary metrics:**
+          - **Whole-page CTR:** Total clicks / total impressions for the entire ad slate (not per-ad)
+          - **Category diversity index:** Shannon entropy of ad categories in the displayed slate
+          - **Revenue per session:** Must not degrade more than 1% vs revenue-only baseline
+
+          **Calibration requirement (same as revenue-first):**
+          - ECE < 0.005, per-position and per-vertical calibration
+          - Calibration is independent of the re-ranking objective -- it is always required for correct auction pricing
+
+          **Trade-off:** Multi-objective optimization is harder to tune (alpha, beta, gamma weights). Requires careful A/B testing to find the right balance. The diversity component may require MMR (Maximal Marginal Relevance) or DPP (Determinantal Point Process) algorithms that add latency.
+        next: met_balanced
+
+  - id: met_revenue
+    stage: metrics
+    type: info
+    label: "Revenue-Focused Metrics"
+    speaker: interviewer
+    content: |
+      Good. Let us establish the full metrics framework for a revenue-focused re-ranker.
+
+      **Offline evaluation metrics:**
+
+      | Metric | Description | Target |
+      |--------|------------|--------|
+      | **ERPS** | Expected revenue per session from ad slate | Higher than pointwise baseline |
+      | **ECE** | Expected Calibration Error | < 0.005 |
+      | **Position-wise ECE** | Calibration per ad position (1,2,3,...) | < 0.01 each |
+      | **Brier Score** | Mean squared error of probability predictions | < 0.03 |
+      | **NDCG@5** | Quality of the top-5 ad ranking | > 0.85 |
+      | **Revenue lift** | % improvement over pointwise pCTR*bid sort | > 1% |
+
+      **Online A/B metrics:**
+      - **RPM (Revenue per mille impressions)** -- primary business KPI
+      - **CPC stability:** Average cost-per-click should not spike (indicates miscalibration)
+      - **Advertiser spend efficiency:** Clicks per dollar spent, segmented by advertiser size
+      - **Fill rate:** Percentage of ad slots actually filled (re-ranker should not over-filter)
+
+      **Calibration evaluation detail:**
+      The gold standard is the **reliability diagram** -- bin predictions into 20 deciles and plot predicted vs actual CTR:
+      ```
+      Perfect calibration: all points on the y = x diagonal
+      Overconfident: points below the diagonal (predicting higher than actual)
+      Underconfident: points above the diagonal (predicting lower than actual)
+      ```
+
+      At Google's scale, even a 0.5% calibration error translates to **tens of millions of dollars** in mispricing annually. Calibration is not a nice-to-have; it is a hard requirement.
+
+      Let us now discuss the data pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you measure calibration in practice with sparse data?"
+      - speaker: candidate
+        text: "For fine-grained slices like 'position 3, finance vertical, mobile device', we may have limited data. I use Bayesian calibration with a prior from the aggregate calibration curve. For slices with fewer than 10K impressions, I blend the slice-specific calibration with the global calibration using an adaptive weight based on sample size. This prevents overfitting the calibration to noise in small slices."
+    next: data_pipeline
+
+  - id: met_balanced
+    stage: metrics
+    type: info
+    label: "Balanced Metrics Framework"
+    speaker: interviewer
+    content: |
+      Excellent. Let us define the balanced metrics framework that captures relevance, diversity, and revenue.
+
+      **Offline evaluation:**
+
+      | Metric | Measures | Target |
+      |--------|---------|--------|
+      | **Whole-page CTR** | Are we showing relevant ads overall? | Higher than baseline |
+      | **Category entropy** | How diverse is the ad slate? | Shannon H > 1.5 bits |
+      | **Intra-list diversity** | Average pairwise dissimilarity of shown ads | > 0.6 (scale 0-1) |
+      | **ECE** | Calibration quality | < 0.005 |
+      | **Revenue per slate** | Revenue from displayed ads | Within 1% of revenue-only |
+      | **Position fairness** | Do small advertisers ever get top positions? | Gini coefficient < 0.7 |
+
+      **Online A/B metrics:**
+      - **Whole-page CTR** (primary) -- captures relevance improvements from diversity
+      - **Unique advertiser exposure rate** -- how many distinct advertisers are shown per session
+      - **User satisfaction proxy:** Session depth after seeing ads, return visit rate
+      - **Revenue per session** (guardrail) -- must not degrade > 1%
+
+      **Diversity measurement details:**
+      - **MMR (Maximal Marginal Relevance):** After selecting ad k, the marginal value of adding ad k+1 is discounted by its similarity to already-selected ads
+      - **Category coverage:** Across a session, user should see ads from at least 3 different categories
+      - **Advertiser diversity:** No single advertiser should occupy more than 50% of a page's ad slots
+
+      **Balancing weights (alpha, beta, gamma) tuning:**
+      Run offline sweep with 10 weight combinations, deploy top-3 as A/B test variants for 2 weeks, select the combination that maximizes whole-page CTR without degrading revenue > 0.5%.
+
+      Now let us design the data pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "Does adding diversity always help?"
+      - speaker: candidate
+        text: "Not always. For highly specific queries like 'Nike Air Max size 10', the user wants to see multiple Nike shoe ads, not a diverse slate of unrelated products. Diversity should be query-intent-aware. For broad queries like 'running shoes', diversity helps significantly because the user is exploring. We can learn this intent from query specificity features."
+    next: data_pipeline
+
+  # ============ DATA ============
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      The data pipeline for re-ranking has unique requirements because we need **list-level training data**, not just individual ad impressions.
+
+      **Training data construction:**
+      Each training example is a **(query, user, ad_slate, clicks)** tuple:
+      - **Input:** The list of ads that were shown, with their features and positions
+      - **Labels:** Which ads were clicked (binary per ad) and position-level CTR
+      - **Key challenge:** We only observe clicks on ads that were *shown in specific positions* -- we never observe what would have happened if ad A was in position 2 instead of position 5
+
+      **Data volumes:**
+
+      | Source | Volume | Purpose |
+      |--------|--------|---------|
+      | Impression slates | ~2B slates/day | Training examples for list-level model |
+      | Click events | ~100M clicks/day | Positive labels |
+      | Position randomization logs | ~50M slates/day (5% random) | Unbiased position effect estimation |
+      | Main ranker scores | Per-ad, per-slate | Input features from upstream model |
+      | Advertiser metadata | ~10M advertisers | For diversity and fairness features |
+
+      **Position bias debiasing:**
+      This is the single most important data quality issue for re-ranking. Users click position 1 at 5-10x the rate of position 5 regardless of ad quality.
+      - **Approach 1:** Run 5% of traffic with **random position shuffling** and train position bias model on this data
+      - **Approach 2:** Use **inverse propensity weighting (IPW)** -- weight each training example by `1 / P(shown_at_this_position)`
+      - **Approach 3:** Include position as a feature during training, set it to a neutral value during inference
+
+      **Calibration data requirements:**
+      - Calibration model needs **at least 100K examples per calibration bin** for stability
+      - Per-position calibration needs 100K+ impressions per position (easy for positions 1-3, harder for positions 5+)
+      - Recalibration data: most recent 24 hours, updated hourly
+
+      Now let us design the feature engineering for re-ranking.
+    dialogue:
+      - speaker: interviewer
+        text: "Why is position bias such a big deal for re-ranking specifically?"
+      - speaker: candidate
+        text: "Because the re-ranker decides which ad goes in which position. If we train on biased data where position 1 ads always look better, the model learns that whatever was in position 1 should stay there -- creating a self-reinforcing loop. The main ranker can somewhat ignore position bias because it just needs to rank, but the re-ranker needs calibrated probabilities per position, so the bias directly corrupts the calibration."
+    next: feat_question
+
+  # ============ FEATURES ============
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Strategy"
+    speaker: interviewer
+    content: |
+      What features would you design for the re-ranking model? Remember, the re-ranker has access to the main ranker's scores and operates on the full list of candidate ads.
+    choices:
+      - label: "List-level interaction features"
+        answer: |
+          I would focus on **list-level interaction features** that capture how ads in the slate interact with each other.
+
+          **Why list-level features:**
+          The re-ranker's entire value proposition is considering **inter-ad effects** that the pointwise ranker misses. Features should capture:
+          1. **Competition effects:** Similar ads cannibalize each other's clicks
+          2. **Complementary effects:** Diverse ads can increase overall page engagement
+          3. **Position-context effects:** An ad's CTR depends on what is above and below it
+
+          **Feature groups:**
+
+          | Group | Features | Rationale |
+          |-------|---------|-----------|
+          | **Upstream scores** | Main ranker pCTR, bid, quality_score, pCTR*bid | Preserve ranking knowledge |
+          | **Intra-list similarity** | Cosine similarity to ad above/below, category overlap count, same-advertiser flag | Capture cannibalization |
+          | **Position context** | Rank in original ordering, rank-normalized pCTR, relative bid strength | Position-aware scoring |
+          | **Slate statistics** | Mean pCTR of slate, max bid, category entropy, num unique advertisers | Characterize the competition |
+          | **Cross-ad features** | Ad category match with query, ad-to-ad semantic similarity, creative type diversity | Pairwise interactions |
+
+          **Critical feature: relative strength**
+          ```
+          relative_pCTR = ad_pCTR / mean(slate_pCTR)
+          relative_bid = ad_bid / max(slate_bid)
+          competition_density = count(same_category_ads) / slate_size
+          ```
+          These features help the model understand whether an ad is a strong or weak candidate relative to its competition in *this specific auction*, not globally.
+
+          **Trade-off:** List-level features change whenever the slate composition changes, making caching impossible. They must be computed fresh for every request, adding ~1ms of feature engineering latency.
+        next: feat_list
+      - label: "Enhanced pointwise features with position modeling"
+        answer: |
+          I would enhance the **pointwise features** from the main ranker with explicit position modeling, keeping the architecture simple and fast.
+
+          **Why enhanced pointwise:**
+          - The main ranker already captures most of the ad-user relevance signal
+          - The re-ranker's primary job is to **correct for position bias** and apply calibration
+          - Simpler features = faster inference = more latency budget for calibration
+
+          **Feature groups:**
+
+          | Group | Features | Dim |
+          |-------|---------|-----|
+          | **Upstream model outputs** | pCTR, pCVR, quality_score, relevance_score | 4 |
+          | **Position features** | Candidate position, log(position), position bucket | 3 |
+          | **Position bias estimates** | Historical CTR by position, device-specific position CTR | 4 |
+          | **Ad-level statistics** | Ad historical CTR (7d, 30d), advertiser avg CTR, ad freshness | 5 |
+          | **User-level signals** | User's position-specific click tendency, session click count so far | 3 |
+          | **Context** | Device type, time of day bucket, query commercial intent score | 4 |
+
+          **Position bias modeling (key innovation):**
+          - Estimate `P(examine | position)` -- the probability a user even looks at a given position
+          - Model CTR as: `P(click) = P(examine | position) * P(click | examine, ad)`
+          - **Examination hypothesis:** CTR = examination_probability * relevance
+          - Train examination model separately on position-randomized data
+          - At inference: predict relevance only, multiply by position examination probability
+
+          **Total feature dimension:** ~25 features. This allows ultra-fast scoring -- a small MLP or even a shallow GBDT can process this in <1ms.
+
+          **Trade-off:** Does not capture list-level interactions (cannibalization, complementarity). For high-value queries with many competitive ads, this misses some signal. But for most queries, position correction is the highest-value intervention.
+        next: feat_pointwise
+
+  - id: feat_list
+    stage: features
+    type: info
+    label: "List-Level Features Detail"
+    speaker: interviewer
+    content: |
+      Let us detail the list-level feature computation pipeline.
+
+      **Pairwise similarity computation:**
+      For a slate of N ads, compute N*(N-1)/2 pairwise similarities. For N=20 ads, that is 190 pairs.
+      ```python
+      for i, j in combinations(range(N), 2):
+          category_match[i][j] = int(ads[i].category == ads[j].category)
+          semantic_sim[i][j] = cosine(ads[i].embedding, ads[j].embedding)
+          same_advertiser[i][j] = int(ads[i].advertiser == ads[j].advertiser)
+      ```
+
+      **Aggregating into per-ad features:**
+      - `avg_similarity_to_slate`: Mean semantic similarity to all other ads
+      - `max_similarity`: Similarity to the most similar ad (strongest competitor)
+      - `same_category_count`: Number of ads in the same category
+      - `unique_category_rank`: How unique is this ad's category in the slate?
+
+      **Dynamic features (computed per-request):**
+
+      | Feature | Computation | Why It Matters |
+      |---------|------------|----------------|
+      | `competition_index` | Same-category ads weighted by their pCTR | Measures cannibalization risk |
+      | `marginal_diversity` | Shannon entropy change if this ad is added | MMR-style diversity value |
+      | `bid_percentile` | Ad's bid rank within the slate | Relative bid strength |
+      | `quality_gap` | Difference between this ad's quality and slate average | Stands out or blends in? |
+
+      **Pre-computed features (updated hourly):**
+      - Ad category co-click matrix: "Users who clicked electronics ads also clicked tech accessories ads"
+      - Advertiser affinity scores: "This user historically engages with this advertiser's ads"
+      - Position-category interaction: "Finance ads perform 30% better in position 1 than position 3"
+
+      **Feature computation latency:** ~0.5ms for a 20-ad slate on CPU. Dominated by the pairwise similarity computation, which can be vectorized with numpy/torch.
+
+      Now let us choose the re-ranking model architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle the quadratic cost of pairwise features as the slate grows?"
+      - speaker: candidate
+        text: "For typical slate sizes of 10-30, the O(N^2) cost is negligible -- 190 pairs for 20 ads takes microseconds. But if we needed to handle larger slates, we could use approximate methods: only compute similarities with the top-5 neighbors per ad, or use locality-sensitive hashing to find similar ads in O(N log N) instead of O(N^2)."
+    next: mod_question
+
+  - id: feat_pointwise
+    stage: features
+    type: info
+    label: "Enhanced Pointwise Features"
+    speaker: interviewer
+    content: |
+      Let us detail the enhanced pointwise features with focus on position modeling.
+
+      **Position bias estimation (the core challenge):**
+      We use the **cascade model** from Craswell et al. (2008):
+      ```
+      P(click | ad, position) = P(examine | position) * P(click | examine, ad)
+      ```
+
+      **Estimating P(examine | position):**
+      From position-randomized traffic (5% of all traffic):
+      - Position 1: P(examine) = 0.95
+      - Position 2: P(examine) = 0.82
+      - Position 3: P(examine) = 0.65
+      - Position 4: P(examine) = 0.45
+      - Position 5: P(examine) = 0.30
+
+      These drop roughly exponentially. The exact values vary by device (mobile drops faster due to scrolling) and page type.
+
+      **Device-specific examination rates:**
+
+      | Position | Desktop | Mobile | Tablet |
+      |----------|---------|--------|--------|
+      | 1 | 0.95 | 0.92 | 0.93 |
+      | 2 | 0.85 | 0.75 | 0.80 |
+      | 3 | 0.70 | 0.55 | 0.65 |
+      | 4 | 0.50 | 0.35 | 0.45 |
+      | 5 | 0.35 | 0.20 | 0.30 |
+
+      **Debiased training target:**
+      Instead of training on raw clicks, train on:
+      ```
+      relevance_label = click / P(examine | position, device)
+      ```
+      This removes position bias from the training signal, so the model learns true ad relevance.
+
+      **Feature normalization for re-ranking:**
+      - Z-score normalize all features within each slate (mean=0, std=1)
+      - This makes the model invariant to absolute scales -- it compares ads relative to each other
+      - Critical for generalization across queries with very different CTR distributions
+
+      Now let us select the model architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "Does randomizing positions for 5% of traffic hurt revenue?"
+      - speaker: candidate
+        text: "Yes, it costs about 3-5% revenue on the randomized traffic because suboptimal ads are shown in top positions. But this randomization is essential for unbiased position effect estimation. The improved calibration from the debiased model more than compensates -- typically a 1-2% revenue gain on the remaining 95% of traffic. Think of it as a data collection tax that pays for itself many times over."
+    next: mod_question
+
+  # ============ MODEL ============
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Re-ranking Model"
+    speaker: interviewer
+    content: |
+      What model architecture would you use for the re-ranking stage?
+    choices:
+      - label: "Listwise model (Transformer/attention-based)"
+        answer: |
+          I would use a **Transformer-based listwise re-ranker** that processes the entire ad slate simultaneously.
+
+          **Why Transformer for re-ranking:**
+          - Self-attention naturally captures **pairwise interactions** between all ads in the slate
+          - No need to manually engineer inter-ad features -- the model learns which interactions matter
+          - Transformers are **permutation-equivariant** by design -- the output for each ad considers all other ads, regardless of input order
+          - Meta and Google have published results showing listwise re-rankers outperform pointwise models by **1-3% in whole-page metrics**
+
+          **Architecture:**
+          ```
+          Per-ad features (20 dim each)
+                │
+                ▼
+          Ad Embedding MLP: FC(64) → FC(32) per ad
+                │
+                ▼
+          [ad_1_embed, ad_2_embed, ..., ad_N_embed]  (N x 32 matrix)
+                │
+                ▼
+          Self-Attention (2 layers, 4 heads, dim=32)
+                │
+                ▼
+          Per-ad output MLP: FC(32) → FC(1) → sigmoid
+                │
+                ▼
+          [pCTR_1, pCTR_2, ..., pCTR_N]  (calibrated probabilities)
+          ```
+
+          **Key design choices:**
+          - **2 layers of self-attention** (not 6+). With only 10-30 ads, deeper is not better and adds latency.
+          - **Positional encoding** for candidate position (not the final assigned position -- that is the output)
+          - **Causal masking:** NOT used. Each ad should attend to all other ads bidirectionally.
+          - **Output:** Per-ad click probability, which accounts for the slate context.
+
+          **Latency:** 2 layers, 4 heads, 32-dim, batch of 20 ads: ~1.5ms on CPU (ONNX optimized). Fits within the 5ms budget.
+
+          **Trade-off:** More complex to train (requires list-level loss functions like ListNet or LambdaLoss) and harder to interpret than pointwise models. But the accuracy gains from modeling inter-ad interactions are substantial for competitive ad auctions.
+        next: mod_listwise
+      - label: "Pointwise model with calibration layer"
+        answer: |
+          I would use a **lightweight pointwise model** that adjusts the main ranker's pCTR, combined with a separate **calibration layer**.
+
+          **Why pointwise re-ranking:**
+          - **Ultra-fast:** Scores each ad independently. 20 ads in <0.5ms.
+          - **Simple to train:** Standard binary classification with log loss.
+          - **Interpretable:** Each feature's contribution to the score adjustment is traceable.
+          - **Robust:** No complex list-level training that can overfit to slate compositions.
+
+          **Architecture: Residual correction model**
+          ```
+          Input: [main_ranker_pCTR, ad_features, user_features, position_features]
+                │
+                ▼
+          Small MLP: FC(64, ReLU) → FC(32, ReLU) → FC(1)
+                │
+                ▼
+          delta = output  (correction term)
+                │
+                ▼
+          logit_adjusted = logit(main_ranker_pCTR) + delta
+                │
+                ▼
+          pCTR_adjusted = sigmoid(logit_adjusted)
+                │
+                ▼
+          Calibration layer: isotonic regression or Platt scaling
+                │
+                ▼
+          pCTR_calibrated (final output)
+          ```
+
+          **Key innovation: residual correction**
+          - The model does not predict pCTR from scratch -- it learns a **correction** to the main ranker
+          - The correction is in logit space: `logit(pCTR_final) = logit(pCTR_ranker) + delta`
+          - This means the re-ranker starts from a strong baseline and only adjusts what needs changing
+          - In practice, `delta` is small (typically -0.5 to +0.5 in logit space)
+
+          **Separate calibration layer:**
+          After the model produces adjusted pCTR, apply **isotonic regression** trained on the most recent 24 hours of data:
+          ```
+          raw_adjusted_pCTR → isotonic_regression → calibrated_pCTR
+          ```
+          Isotonic regression is non-parametric and monotone, preserving the ranking while fixing the probability scale.
+
+          **Trade-off:** Cannot model inter-ad interactions (how ad A's presence affects ad B's CTR). For highly competitive slates with many similar ads, this misses cannibalization effects. But for most queries, position correction + calibration provides 80% of the re-ranker's value.
+        next: mod_pointwise
+
+  - id: mod_listwise
+    stage: model
+    type: info
+    label: "Listwise Model Details"
+    speaker: interviewer
+    content: |
+      Let us detail the Transformer-based listwise re-ranker and its training.
+
+      **Loss function design (critical for listwise models):**
+
+      | Loss | Formula | Properties |
+      |------|---------|-----------|
+      | **ListNet** | KL(softmax(labels), softmax(scores)) | Listwise, differentiable |
+      | **LambdaLoss** | Weighted pairwise loss by NDCG delta | Optimizes NDCG directly |
+      | **Calibrated ListNet** | ListNet + alpha * calibration_loss | Joint ranking + calibration |
+
+      I would use **Calibrated ListNet** -- a custom loss that jointly optimizes ranking quality and probability calibration:
+      ```
+      L = L_listnet(scores, clicks) + 0.1 * L_calibration(sigmoid(scores), clicks)
+      ```
+      Where `L_calibration` is a binned calibration loss that penalizes deviation from the y=x diagonal on the reliability diagram.
+
+      **Handling variable-length slates:**
+      - Pad all slates to max_len=30 with a special "empty" token
+      - Apply attention mask to ignore padding tokens
+      - The model naturally handles slates of 10-30 ads without any architecture changes
+
+      **Training data augmentation:**
+      - **Slate shuffling:** Randomly permute ad order in training (since input order should not matter)
+      - **Slate subsampling:** Train on random subsets of the slate (helps generalize to different slate sizes)
+      - **Counterfactual positions:** For each training slate, create augmented examples with shuffled positions to learn position-independent relevance
+
+      **Calibration within the Transformer:**
+      Instead of a separate calibration layer, we build calibration into the model:
+      - Add a **temperature parameter** per output head that scales logits before sigmoid
+      - The temperature is learned during training with the calibration loss term
+      - This produces calibrated probabilities directly, avoiding the need for post-hoc recalibration
+
+      **Inference optimization:**
+      - Export to ONNX with fixed batch size of 30 (pad if fewer)
+      - Quantize attention weights to FP16 (compatible with CPU VNNI instructions)
+      - Total inference: 1.5ms on CPU, 0.5ms on GPU
+
+      Let us discuss the training strategy.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle the fact that Transformers are expensive compared to the tight latency budget?"
+      - speaker: candidate
+        text: "The key insight is that our Transformer is tiny -- only 2 layers, 4 heads, 32 dimensions, processing 20-30 ads. This is orders of magnitude smaller than language Transformers. A forward pass is essentially 2 small matrix multiplications plus attention computation over a 20x32 matrix. On optimized CPU with ONNX, this takes about 1.5ms, well within our 5ms budget."
+    next: train_calibration
+
+  - id: mod_pointwise
+    stage: model
+    type: info
+    label: "Pointwise Model Details"
+    speaker: interviewer
+    content: |
+      Let us detail the pointwise residual model and the critical calibration layer.
+
+      **Residual model architecture:**
+      ```
+      Input (25 features)
+           │
+           ▼
+      FC(64, BatchNorm, ReLU, Dropout=0.1)
+           │
+      FC(32, BatchNorm, ReLU, Dropout=0.1)
+           │
+      FC(1) → delta (logit space correction)
+           │
+           ▼
+      logit_out = logit(ranker_pCTR) + delta
+      pCTR_raw = sigmoid(logit_out)
+      ```
+
+      **Training loss: Focal loss for calibration**
+      Standard log loss treats all examples equally, but most examples are easy negatives (CTR ~ 0.5%). **Focal loss** down-weights easy examples:
+      ```
+      FL(p, y) = -alpha * (1 - p_t)^gamma * log(p_t)
+      ```
+      With gamma=2.0, the model focuses on hard examples (close to the decision boundary), improving calibration in the challenging mid-range predictions.
+
+      **Isotonic regression calibration layer:**
+      After the model is trained, fit isotonic regression on a held-out calibration set:
+      ```python
+      from sklearn.isotonic import IsotonicRegression
+      ir = IsotonicRegression(out_of_bounds='clip')
+      ir.fit(model_pCTR_on_cal_set, actual_clicks_on_cal_set)
+      # At serving time:
+      calibrated = ir.predict(model_raw_pCTR)
+      ```
+
+      **Why isotonic regression (not Platt scaling)?**
+      - Platt scaling fits a single sigmoid: `p_cal = 1 / (1 + exp(-a*p - b))`. This assumes miscalibration is a simple linear transformation in logit space.
+      - Isotonic regression is **non-parametric** -- it can fix arbitrary monotonic miscalibrations.
+      - CTR models often have non-linear miscalibration patterns (overconfident on low-CTR ads, underconfident on high-CTR ads). Isotonic handles this.
+      - At 100K+ calibration examples, isotonic regression is strictly more flexible with no overfitting risk.
+
+      **Recalibration cadence:**
+      - Refit isotonic regression **every 6 hours** on the most recent data
+      - The calibration function shifts throughout the day (morning vs evening CTR patterns differ)
+      - Store the last 24 calibration functions; if the latest one fails quality checks, fall back to the most recent good one
+
+      Let us discuss training strategy.
+    dialogue:
+      - speaker: interviewer
+        text: "Could you use temperature scaling instead of isotonic regression?"
+      - speaker: candidate
+        text: "Temperature scaling is simpler -- just a single parameter T that divides the logits before sigmoid. It works well when miscalibration is uniform across the prediction range. But in practice, CTR models are often miscalibrated differently at different probability ranges. For example, the model might be well-calibrated for pCTR between 1-5% but overconfident below 0.5%. Isotonic regression handles this heterogeneous miscalibration much better."
+    next: train_calibration
+
+  # ============ TRAINING ============
+  - id: train_calibration
+    stage: training
+    type: question
+    label: "Training & Calibration Strategy"
+    speaker: interviewer
+    content: |
+      How should we train the re-ranking model, and how should calibration be incorporated into the training pipeline?
+    choices:
+      - label: "Joint training with calibration-aware loss"
+        answer: |
+          I would use **joint training** where the calibration objective is part of the training loss itself, rather than a separate post-hoc step.
+
+          **Why joint training:**
+          - Post-hoc calibration (isotonic regression) treats symptoms, not causes -- the model's internal representations are not calibration-aware
+          - Joint training produces a model that is **intrinsically calibrated**, more robust to distribution shift
+          - Facebook's 2020 paper showed that calibration-aware training reduced ECE by **40% compared to post-hoc calibration alone**
+
+          **Combined loss function:**
+          ```
+          L = L_ranking + lambda_cal * L_calibration + lambda_reg * L_regularization
+          ```
+
+          **L_ranking:** Standard log loss (or ListNet for listwise model)
+          **L_calibration (MMCE -- Maximum Mean Calibration Error):**
+          ```
+          MMCE = || E[y | f(x)] - f(x) ||_H  (in RKHS)
+          ```
+          MMCE is a **differentiable, kernel-based calibration loss** that can be backpropagated through the model. Unlike ECE (which requires binning and is non-differentiable), MMCE gives smooth gradients.
+
+          **Training pipeline:**
+          ```
+          Day N:
+            1. Collect training data: last 14 days of impression slates
+            2. Split: 80% train, 10% calibration validation, 10% final test
+            3. Train with joint loss for 5 epochs (warm-start from Day N-1)
+            4. Evaluate ECE on calibration validation set
+            5. If ECE > 0.005, increase lambda_cal and retrain
+            6. Final evaluation on test set: NDCG, ECE, revenue lift
+            7. Deploy with canary (5% traffic for 4 hours)
+          ```
+
+          **Lambda scheduling:**
+          - Start training with lambda_cal = 0.01 (ranking-focused)
+          - After 3 epochs, increase to lambda_cal = 0.1 (calibration refinement)
+          - This two-phase approach ensures the model first learns to rank well, then refines its probability estimates
+
+          **Trade-off:** Joint training is more complex to tune (lambda scheduling, MMCE kernel selection). But it produces a single model that is both a good ranker and well-calibrated, simplifying the production system.
+        next: deploy_question
+      - label: "Separate training + post-hoc calibration"
+        answer: |
+          I would **separate the concerns** -- train the re-ranking model purely for ranking quality, then apply post-hoc calibration as an independent step.
+
+          **Why separate:**
+          - **Modularity:** Can upgrade the ranking model without changing calibration, and vice versa
+          - **Simplicity:** Each component has a single clear objective. The ranker optimizes AUC/NDCG, the calibrator optimizes ECE.
+          - **Industry standard:** Google, Microsoft, and Meta all use post-hoc calibration in production. It is well-understood and battle-tested.
+          - **Flexibility:** Can apply different calibration strategies per slice (e.g., different calibration for mobile vs desktop)
+
+          **Training pipeline:**
+          ```
+          Phase 1: Re-ranking model (daily)
+            - Train on 14 days of data with pure ranking loss (log loss or LambdaLoss)
+            - Evaluate AUC, NDCG on held-out day
+            - The model outputs raw scores (not necessarily calibrated)
+
+          Phase 2: Calibration model (every 6 hours)
+            - Take the re-ranking model's raw predictions on the last 24 hours
+            - Fit isotonic regression (global)
+            - Fit per-slice calibrators: per-position, per-device, per-ad-vertical
+            - Validate ECE < 0.005 on held-out calibration data
+          ```
+
+          **Hierarchical calibration (key innovation):**
+          ```
+          raw_pCTR → global_calibration → slice_calibration → final_pCTR
+          ```
+          1. **Global calibration:** Isotonic regression on all data. Fixes the overall probability scale.
+          2. **Slice calibration:** Per-position, per-device residual calibrators that fix slice-specific miscalibration.
+          3. **Blending:** For slices with insufficient data, blend with global calibration:
+             `final = w * slice_cal + (1-w) * global_cal` where w = min(1, n_slice / 100K)
+
+          **Recalibration frequency:**
+          - Global: every 6 hours
+          - Per-slice: daily (needs more data for stability)
+          - Emergency recalibration: triggered if real-time ECE monitoring detects > 0.01
+
+          **Trade-off:** Post-hoc calibration can only fix monotonic miscalibrations (if the raw ranking is wrong, calibration cannot help). Also, the calibration layer adds a dependency -- if the calibration data pipeline fails, we must fall back to uncalibrated predictions.
+        next: deploy_question
+
+  # ============ DEPLOYMENT ============
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Serving Architecture"
+    speaker: interviewer
+    content: |
+      How should we deploy the re-ranking model in the ad serving pipeline?
+    choices:
+      - label: "Inline re-ranker in the ad server"
+        answer: |
+          I would deploy the re-ranker **inline within the ad server process**, running as a co-located model in the same serving instance.
+
+          **Why inline:**
+          - **Minimal latency overhead:** No network hop to a separate model service. Function call latency only (~0.1ms).
+          - **Co-location with features:** Ad server already has all the ad and user features in memory from the main ranking call.
+          - **Atomic execution:** Re-ranking + calibration + auction computation happen in a single process with no serialization overhead.
+          - **Simpler operational model:** One deployment unit instead of two separate services.
+
+          **Architecture:**
+          ```
+          Ad Server Process:
+          ┌─────────────────────────────────────────────┐
+          │  Ad Request                                   │
+          │       │                                       │
+          │       ▼                                       │
+          │  Main Ranker (5ms) → 20 candidates            │
+          │       │                                       │
+          │       ▼                                       │
+          │  Re-ranker (2ms)                              │
+          │   - Feature computation (0.5ms)               │
+          │   - Model inference (1.0ms)                   │
+          │   - Calibration (0.3ms)                       │
+          │   - Sorting (0.2ms)                           │
+          │       │                                       │
+          │       ▼                                       │
+          │  Auction & Pricing (1ms)                      │
+          │       │                                       │
+          │       ▼                                       │
+          │  Ad Response (top 3-5 ads)                    │
+          └─────────────────────────────────────────────┘
+          ```
+
+          **Model loading:**
+          - Re-ranker model loaded into each ad server instance at startup
+          - Model file is small: ~2MB for a pointwise model, ~10MB for a Transformer
+          - Model updates deployed via rolling restart (blue-green deployment)
+          - Calibration parameters updated in-place every 6 hours via shared config push
+
+          **Scaling:**
+          - Ad servers already scale horizontally (100-1000 instances)
+          - Re-ranker adds ~5% CPU overhead per ad server
+          - No additional scaling needed -- re-ranker scales with the ad server fleet
+
+          **Trade-off:** Tightly coupled -- updating the re-ranker requires deploying to all ad server instances. But the latency and operational simplicity benefits outweigh this coupling for a model this small and stable.
+        next: deploy_serving
+      - label: "Sidecar microservice with gRPC"
+        answer: |
+          I would deploy the re-ranker as a **sidecar microservice** communicating with the ad server via gRPC.
+
+          **Why sidecar:**
+          - **Independent deployment:** Can update the re-ranker without touching the ad server code
+          - **Language flexibility:** Re-ranker can use Python/TorchServe while the ad server is in C++/Java
+          - **Resource isolation:** Re-ranker gets its own CPU/memory budget, preventing interference with the main ranker
+          - **A/B testing:** Easy to route traffic between re-ranker versions without modifying the ad server
+
+          **Architecture:**
+          ```
+          Ad Server Pod (Kubernetes):
+          ┌─────────────────────────────────────────────┐
+          │                                               │
+          │  ┌─────────────┐    gRPC     ┌─────────────┐ │
+          │  │  Ad Server   │ ────────── │  Re-ranker   │ │
+          │  │  Container   │  (< 1ms)   │  Sidecar     │ │
+          │  │              │            │              │ │
+          │  │  Main Ranker │            │  Model + Cal │ │
+          │  │  Auction     │            │  ONNX Runtime│ │
+          │  └─────────────┘            └─────────────┘ │
+          │                                               │
+          └─────────────────────────────────────────────┘
+          ```
+
+          **gRPC communication:**
+          - Sidecar runs on `localhost` → network latency is ~0.2ms
+          - Protobuf serialization of 20 ads with features: ~0.3ms
+          - Total communication overhead: ~0.5ms
+          - Still well within the 5ms re-ranking budget
+
+          **Model serving in sidecar:**
+          - ONNX Runtime with CPU execution provider
+          - Model loaded at startup, kept in memory
+          - Health check endpoint for Kubernetes liveness/readiness probes
+          - Calibration parameters loaded from Redis, refreshed every 6 hours
+
+          **A/B testing capability:**
+          - Route 5% of pods to new re-ranker version (canary)
+          - Feature flags control which re-ranker configuration each pod uses
+          - Can test calibration strategies independently from the ranking model
+
+          **Trade-off:** The gRPC communication adds ~0.5ms latency overhead compared to inline deployment. For a system where every millisecond counts, this is significant. However, the operational flexibility (independent deployments, easy A/B testing) is often worth the latency cost.
+        next: deploy_serving
+
+  - id: deploy_serving
+    stage: deployment
+    type: info
+    label: "Calibration Serving Details"
+    speaker: interviewer
+    content: |
+      Let us discuss the critical production details for serving calibrated predictions.
+
+      **Calibration serving pipeline:**
+      ```
+      Model pCTR → Calibration Layer → Position Adjustment → Auction
+      ```
+
+      **Step 1: Calibration layer at serving time**
+      - Isotonic regression is stored as a **lookup table** (1000 breakpoints)
+      - At inference: binary search on the table gives calibrated value in O(log n) = ~10 lookups
+      - Latency: < 0.01ms per ad. Negligible.
+
+      **Step 2: Position-aware adjustment**
+      - After calibration, adjust for the ad's assigned position:
+        `pCTR_final = calibrated_pCTR * examination_probability[position][device]`
+      - This gives the **position-specific click probability** that the auction needs
+
+      **Consistency guarantees:**
+      - **Same model version** must be used for all ads in a single request
+      - **Atomic calibration updates:** New calibration parameters are loaded atomically to prevent inconsistent pricing within a request
+      - **Deterministic scoring:** Given the same inputs, the re-ranker always produces the same output (no randomness at serving time)
+
+      **Monitoring re-ranking quality:**
+      - **Reorder rate:** What fraction of ads change position from the main ranker? (Healthy: 30-50%. Below 10% means the re-ranker is not adding value. Above 80% means it is fighting the main ranker.)
+      - **Position-wise calibration error:** Monitored per-position per-hour
+      - **Revenue delta:** Revenue from re-ranked ordering vs original ordering (computed counterfactually)
+      - **Latency P99:** Must stay below 5ms. Alert if exceeding 3ms.
+
+      **Fallback strategy:**
+      If the re-ranker fails (timeout, error):
+      - Fall back to the main ranker's ordering with a global calibration multiplier
+      - Log the fallback event for monitoring
+      - Fallback rate should be < 0.1% of requests
+
+      Let us discuss comprehensive monitoring.
+    dialogue:
+      - speaker: interviewer
+        text: "What happens if calibration becomes stale?"
+      - speaker: candidate
+        text: "Stale calibration is a serious issue. If the calibration parameters are more than 12 hours old, we trigger an alert. Beyond 24 hours, we automatically fall back to a conservative calibration that slightly underestimates CTR -- this means we charge advertisers less than optimal, losing some revenue, but it is better than overcharging and damaging advertiser trust. We monitor the 'calibration freshness' metric on every dashboard."
+    next: mon_strategy
+
+  # ============ MONITORING ============
+  - id: mon_strategy
+    stage: monitoring
+    type: question
+    label: "Monitoring Strategy"
+    speaker: interviewer
+    content: |
+      What monitoring would you set up specifically for the re-ranking and calibration system?
+    choices:
+      - label: "Calibration-focused monitoring"
+        answer: |
+          I would build monitoring centered on **calibration health**, since miscalibration has the most direct business impact.
+
+          **Real-time calibration monitoring:**
+
+          | Metric | Granularity | Alert Threshold | Action |
+          |--------|------------|----------------|--------|
+          | **Global ECE** | Hourly | > 0.008 | Trigger recalibration |
+          | **Per-position ECE** | Per position, hourly | > 0.015 | Investigate position model |
+          | **Calibration ratio** | Hourly | Outside [0.92, 1.08] | Emergency recalibration |
+          | **CPC deviation** | Per advertiser tier | > 15% from forecast | Alert ads ops team |
+          | **Reliability diagram drift** | Daily | Shape change > threshold | Investigate data shift |
+
+          **Calibration ratio (most important single metric):**
+          ```
+          cal_ratio = mean(predicted_CTR) / mean(actual_CTR)
+          ```
+          - cal_ratio = 1.0: perfectly calibrated
+          - cal_ratio = 1.1: model predicts 10% higher than reality (advertisers overcharged)
+          - cal_ratio = 0.9: model predicts 10% lower (platform losing revenue)
+          - Alert band: [0.92, 1.08]. Outside this band indicates a systemic issue.
+
+          **Per-slice calibration dashboard:**
+          - Break down calibration by: **position**, **device**, **ad vertical**, **query type**, **time of day**
+          - Some slices may be miscalibrated even when the global calibration looks good
+          - Example: "Finance ads on mobile at position 3 have ECE=0.03" -- the global ECE hides this slice issue
+
+          **Revenue attribution monitoring:**
+          - Track revenue delta: `revenue(reranked) - revenue(original_order)` per hour
+          - If delta becomes negative consistently, the re-ranker is actively harming revenue
+          - Break down by query volume tier (high/medium/low traffic queries)
+
+          **Automated remediation:**
+          - ECE > 0.008 for 2 hours → trigger automatic recalibration job
+          - ECE > 0.015 for 1 hour → automatic fallback to previous calibration
+          - Cal_ratio outside [0.85, 1.15] → page on-call engineer immediately
+        next: mon_terminal_cal
+      - label: "End-to-end pipeline monitoring"
+        answer: |
+          I would set up **end-to-end pipeline monitoring** that tracks the re-ranker's impact across the entire ad serving pipeline.
+
+          **Pipeline health monitoring:**
+
+          | Component | Metric | Alert |
+          |-----------|--------|-------|
+          | Feature pipeline | Feature freshness, missing rate | Any feature > 30 min stale |
+          | Model inference | P99 latency, error rate | > 3ms or > 0.01% errors |
+          | Calibration layer | Calibration age, lookup failures | > 12 hours old |
+          | Auction output | Price distribution, auction validity | Negative prices or outliers |
+
+          **Re-ranker effectiveness metrics:**
+
+          | Metric | What It Shows | Healthy Range |
+          |--------|--------------|--------------|
+          | **Reorder rate** | How often re-ranker changes the ordering | 30-50% |
+          | **Top-1 agreement** | Does the same ad stay in position 1? | 60-80% |
+          | **Revenue lift** | Revenue gain vs no re-ranking | 1-5% |
+          | **CTR lift** | Whole-page CTR improvement | 0.5-2% |
+          | **Calibration quality** | ECE across all slices | < 0.005 |
+
+          **Advertiser-facing monitoring:**
+          - **Price stability index:** Coefficient of variation of CPC per advertiser per day
+          - **Budget pacing accuracy:** Are budgets spending evenly or in bursts?
+          - **Win rate consistency:** Does an advertiser's auction win rate match their bid competitiveness?
+          - If price instability increases, it often indicates a calibration issue
+
+          **A/B test monitoring (always-on):**
+          - Permanently hold back 2% of traffic with re-ranking disabled (control)
+          - Continuously measure re-ranker's incremental value
+          - If the control outperforms treatment for > 24 hours, automatically disable re-ranking
+
+          **Weekly calibration review:**
+          - Reliability diagram evolution over the past week
+          - Per-vertical calibration drift analysis
+          - Position bias estimation accuracy check (compare estimated vs observed examination rates)
+          - Recommendation report for calibration parameter tuning
+        next: mon_terminal_e2e
+
+  - id: mon_terminal_cal
+    stage: monitoring
+    type: terminal
+    label: "Calibration-Focused Path Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You have designed a comprehensive **ads re-ranking system with probability calibration**.
+
+      **Your design summary:**
+      - **Problem:** Re-rank 10-30 ad candidates with calibrated click probabilities for auction pricing
+      - **Metrics:** ECE < 0.005 as calibration target, revenue lift as business metric, with per-position and per-slice evaluation
+      - **Data:** List-level training data with careful position bias debiasing using randomized traffic
+      - **Features:** List-level interaction features or enhanced pointwise features with position modeling
+      - **Model:** Transformer-based listwise re-ranker or pointwise residual model with calibration layer
+      - **Training:** Joint calibration-aware training or separate ranking + post-hoc calibration
+      - **Deployment:** Inline in ad server or sidecar microservice with atomic calibration updates
+      - **Monitoring:** Real-time calibration ratio tracking, per-slice ECE, automated recalibration triggers
+
+      **Key strengths:**
+      - Deep understanding of why calibration matters in ad auctions
+      - Practical position bias handling with randomization budget
+      - Automated remediation for calibration drift
+
+      **Areas for further exploration:**
+      - Multi-task re-ranking: optimizing CTR, CVR, and engagement jointly
+      - Contextual bandits for exploration within re-ranking
+      - Fairness constraints across advertiser sizes
+      - User-level calibration (personalized calibration per user segment)
+
+      This design shows mastery of one of the most technically nuanced problems in ad systems. Outstanding work!
+
+  - id: mon_terminal_e2e
+    stage: monitoring
+    type: terminal
+    label: "E2E Pipeline Path Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You have designed a comprehensive **ads re-ranking system with probability calibration**.
+
+      **Your design summary:**
+      - **Problem:** Build the final-stage ad re-ranker that determines which ads users see and how much advertisers pay
+      - **Metrics:** Balanced evaluation of ranking quality (NDCG), calibration (ECE), revenue, and user experience
+      - **Data:** Slate-level training data with position bias correction from randomized traffic experiments
+      - **Features:** List-level or pointwise features focused on inter-ad interactions and position effects
+      - **Model:** Listwise Transformer or pointwise residual model with dedicated calibration component
+      - **Training:** Joint training with calibration loss or modular training with post-hoc calibration
+      - **Deployment:** Inline or sidecar serving with calibration freshness guarantees
+      - **Monitoring:** End-to-end pipeline health, re-ranker effectiveness tracking, advertiser impact analysis
+
+      **Key strengths:**
+      - Holistic view of the re-ranker's role in the ad serving pipeline
+      - Comprehensive monitoring from model health to advertiser satisfaction
+      - Always-on A/B testing to validate the re-ranker's value
+
+      **Areas for further exploration:**
+      - Reinforcement learning for re-ranking (learn slate value over multiple interactions)
+      - Dynamic calibration that adapts in real-time based on streaming data
+      - Cross-platform calibration (different models for web vs app vs email)
+      - Auction mechanism design changes (from GSP to VCG or first-price)
+
+      This demonstrates excellent systems thinking -- connecting model quality to business impact through the entire pipeline. Great job!

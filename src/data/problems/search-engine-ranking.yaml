@@ -1,0 +1,814 @@
+id: search-engine-ranking
+title: "Global Search Engine Ranking"
+description: "Build a document retrieval and ranking system for a global search engine."
+companies: ["Google", "Microsoft", "Baidu"]
+domains: ["NLP", "Ranking/Search"]
+root: pd_start
+
+nodes:
+  # ============ PROBLEM DEFINITION ============
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design the **document retrieval and ranking system** for a global search engine like Google or Bing.
+
+      **Business context:**
+      - Google processes ~**8.5 billion searches per day** (99,000 queries/second)
+      - The web index contains ~**hundreds of billions of documents** (~400B+ URLs discovered, ~60B+ indexed pages)
+      - Users expect relevant results in **<200ms end-to-end** (including network latency)
+      - Revenue is driven by ad engagement, which depends on **organic result quality** keeping users on the platform
+
+      **Core problem:** Given a user query (e.g., "best noise cancelling headphones 2026"), retrieve and rank the most relevant documents from an index of hundreds of billions of web pages, returning the top 10 results in under 200ms.
+
+      **Key challenges:**
+      - **Scale**: Hundreds of billions of documents, tens of thousands of queries per second
+      - **Relevance**: Understanding user intent (informational vs. navigational vs. transactional)
+      - **Freshness**: Breaking news must appear within minutes; evergreen content should remain stable
+      - **Quality**: Combating spam, SEO manipulation, and low-quality content farms
+      - **Multilingual**: Supporting 100+ languages with varying resource levels
+
+      Let's start by deciding how to architect the retrieval pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "Let's design the ranking system for a global search engine. Where would you start?"
+      - speaker: candidate
+        text: "I'd start by understanding the scale constraints. With billions of documents, we can't score every document for every query. We need a multi-stage pipeline."
+      - speaker: interviewer
+        text: "Good. What stages would that pipeline have?"
+      - speaker: candidate
+        text: "Typically: candidate retrieval, initial ranking, and final re-ranking. Each stage reduces the candidate set while increasing scoring complexity."
+    next: pd_formulation
+
+  - id: pd_formulation
+    stage: problem_definition
+    type: question
+    label: "Retrieval Architecture"
+    speaker: interviewer
+    content: |
+      How would you architect the retrieval pipeline? The fundamental tension is between **recall** (finding all relevant documents) and **latency** (responding in <200ms). No single model can score hundreds of billions of documents in real time.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you balance recall and latency when you have hundreds of billions of documents?"
+      - speaker: candidate
+        text: "We need a funnel architecture that progressively narrows candidates while increasing scoring sophistication."
+      - speaker: interviewer
+        text: "What retrieval strategies would you consider for the first stage?"
+    choices:
+      - label: "Traditional inverted index (BM25 + boolean retrieval)"
+        answer: |
+          I'd start with a **traditional inverted index** using **BM25** as the primary retrieval algorithm:
+
+          **Why inverted index + BM25?**
+          - **Proven at web scale**: Google's original architecture, Bing, and every major search engine uses inverted indexes as the foundation
+          - **Extremely fast**: BM25 scoring over a well-sharded inverted index can retrieve top-1000 from billions of documents in **<50ms**
+          - **Interpretable**: Term frequency, document frequency, field weights are all understandable
+          - **No training required**: BM25 works out-of-the-box -- critical for bootstrapping and tail queries
+
+          **Architecture:**
+          ```
+          Query → Query Processing → Inverted Index Lookup → BM25 Scoring → Top 1000 candidates
+          ```
+
+          **BM25 scoring:**
+          ```
+          score(q, d) = SUM_i [ IDF(qi) * (tf(qi,d) * (k1+1)) / (tf(qi,d) + k1*(1-b+b*|d|/avgdl)) ]
+          ```
+          Typical parameters: k1=1.2, b=0.75
+
+          **Index structure:**
+          - **Inverted index**: term → [(docID, tf, positions), ...] sorted by docID for fast intersection
+          - **Sharded across ~10,000+ machines** by document hash
+          - Each shard holds ~10-50M documents and fits in memory
+          - Query broadcast to all shards, top results merged
+
+          **Trade-off:** BM25 is a **lexical matching** algorithm -- it fails on semantic similarity. "Best headphones" won't match a document about "top-rated audio equipment" unless the exact terms overlap. We address this with query expansion and a neural re-ranker in later stages.
+
+          **BM25 recall baseline:** BM25 recall@1000 is typically **60-75%** on standard benchmarks (TREC, MS MARCO). Good enough for a first stage, but needs neural augmentation.
+        next: met_question
+      - label: "Hybrid retrieval (BM25 + dense retrieval with bi-encoders)"
+        answer: |
+          I'd use a **hybrid retrieval** approach combining **BM25** (lexical) and **dense retrieval** (semantic) for maximum recall:
+
+          **Why hybrid?**
+          - BM25 excels at **exact term matching** but misses semantic similarity
+          - Dense retrieval (bi-encoder embeddings) captures **semantic meaning** but can miss exact keyword matches
+          - Combining both gives **5-15% higher recall@1000** than either alone (Microsoft research shows this on MS MARCO)
+
+          **Architecture:**
+          ```
+          Query → ┌── BM25 Retrieval (inverted index) → Top 1000
+                  │
+                  └── Dense Retrieval (ANN search) → Top 1000
+                  │
+                  └── Merge & Deduplicate → Top 1500 candidates
+          ```
+
+          **Dense retrieval component:**
+          - **Query encoder**: Fine-tuned BERT (or DistilBERT for speed) encodes query into 768-dim vector
+          - **Document encoder**: Same architecture, pre-computes embeddings for all indexed documents
+          - **ANN index**: **FAISS** or **ScaNN** for approximate nearest neighbor search over ~60B document vectors
+          - Retrieval: cosine similarity between query embedding and document embeddings, top-1000 in <30ms
+
+          **Merging strategy:**
+          - **Reciprocal Rank Fusion (RRF)**: Combine rankings from BM25 and dense retrieval
+          - `RRF_score(d) = 1/(k + rank_bm25(d)) + 1/(k + rank_dense(d))`, k=60
+          - Documents appearing in both lists get boosted; unique-to-one-list documents are included at lower priority
+
+          **Trade-off:** Dense retrieval at web scale is **extremely expensive** in storage and compute:
+          - 60B documents * 768 dims * 4 bytes = ~180TB of embeddings
+          - ANN search requires distributed GPU infrastructure
+          - But the recall improvement (75% BM25 → 85% hybrid) is significant for search quality
+
+          **ColBERT alternative:** Instead of single-vector dense retrieval, use **ColBERT** (multi-vector late interaction) which stores per-token embeddings and allows efficient MaxSim retrieval. Better quality but even more storage-intensive.
+        next: met_question
+
+  # ============ METRICS ============
+  - id: met_question
+    stage: metrics
+    type: question
+    label: "Evaluation Metrics"
+    speaker: interviewer
+    content: |
+      How would you evaluate the search ranking quality? We need both offline metrics (for model development and regression testing) and online metrics (for production evaluation and A/B testing).
+    dialogue:
+      - speaker: interviewer
+        text: "What metrics would you use to evaluate search quality?"
+      - speaker: candidate
+        text: "The gold standard is NDCG, but we also need engagement metrics and user satisfaction signals."
+      - speaker: interviewer
+        text: "How do you reconcile offline relevance metrics with online engagement?"
+    choices:
+      - label: "Relevance-centric (NDCG, MAP, judged quality)"
+        answer: |
+          I'd prioritize **relevance quality** measured through expert judgments and information retrieval metrics:
+
+          **Primary offline metrics:**
+          - **NDCG@10** (Normalized Discounted Cumulative Gain): The industry-standard metric for search ranking quality. Measures how well we rank documents by graded relevance (Perfect=4, Excellent=3, Good=2, Fair=1, Bad=0). Google reportedly targets **NDCG@10 > 0.45** on diverse query sets
+          - **MAP (Mean Average Precision)**: Captures precision at every recall level. Better than NDCG for navigational queries where there's one right answer
+          - **MRR (Mean Reciprocal Rank)**: For navigational queries -- where does the right page appear?
+
+          **Human judgment pipeline:**
+          - **Search quality raters** (Google has ~16,000+ raters globally) evaluate query-result pairs on a 5-point scale
+          - Raters follow detailed guidelines (Google's Search Quality Evaluator Guidelines are 170+ pages)
+          - Evaluate along dimensions: relevance, authority, freshness, content quality (E-E-A-T)
+          - Weekly evaluation on ~10,000 query samples across query categories
+
+          **Offline regression testing:**
+          - **Golden set**: ~50,000 human-judged query-document pairs, refreshed quarterly
+          - Every model change must not degrade NDCG@10 on the golden set by more than 0.5%
+          - **Side-by-side comparisons**: Show raters results from old vs. new model, measure win rate
+          - **Slice analysis**: Break down by query type (informational, navigational, transactional), query length, language
+
+          **Why relevance-centric?** Click-based metrics have bias issues (position bias, attractive snippet bias). Human judgments provide ground truth. Google's internal research shows that **1 point NDCG improvement correlates with ~0.5% session-level satisfaction increase**.
+        next: data_pipeline
+      - label: "Engagement-centric (CTR, dwell time, satisfaction)"
+        answer: |
+          I'd optimize for **user engagement and satisfaction signals** that measure real-world impact:
+
+          **Primary online metrics:**
+          - **Good Click Rate**: Fraction of results that receive clicks with dwell time >30 seconds (filters out pogosticking/bouncing). Target: **>35%** for position 1
+          - **Abandonment Rate**: Fraction of queries where the user immediately refines or leaves. Lower is better. Target: **<25%** for informational queries
+          - **Session Success Rate**: Did the user find what they needed? Measured by: no reformulation, reasonable dwell time, or explicit satisfaction signal
+          - **Time to First Good Click**: How quickly users find a satisfying result. Faster = better ranking
+
+          **Behavioral signals (implicit feedback):**
+          - **Click-through Rate (CTR)** per position: Measures attractiveness of results
+          - **Dwell time**: Time spent on clicked result before returning to SERP. >30s generally indicates satisfaction
+          - **Pogostick rate**: User clicks result, immediately returns, clicks another result. Indicates first result was wrong
+          - **Query reformulation rate**: User modifies query. Could indicate failure (or natural exploration)
+
+          **Satisfaction-specific metrics:**
+          - **Search happiness** surveys: Random 0.1% of users get a "Was this search helpful?" prompt. Provides unbiased satisfaction signal
+          - **Long-click rate**: Clicks where user doesn't return to SERP (they found what they needed)
+          - **Task completion rate**: For multi-query sessions, did the user complete their information need?
+
+          **Why engagement-centric?**
+          - Judges are expensive and their assessments don't always match user preferences
+          - Engagement signals capture **real user satisfaction**, not expert opinion
+          - Scale: billions of implicit feedback signals per day vs. thousands of human judgments
+          - Enables **online learning** and rapid iteration
+
+          **Trade-off:** Engagement metrics have biases (position bias, snippet attractiveness). We use **causal methods** (randomized interleaving, propensity scoring) to debias. Also, engagement can be gamed -- a clickbait title gets clicks but doesn't satisfy. That's why we use **dwell time** as a quality filter.
+        next: data_pipeline
+
+  # ============ DATA ============
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline & Web Crawling"
+    speaker: interviewer
+    content: |
+      Let's discuss the data pipeline. For a global search engine, this starts with **web crawling** and extends through document processing, indexing, and training data creation.
+
+      **Web crawling at scale:**
+
+      | Component | Scale | Details |
+      |-----------|-------|---------|
+      | **URLs discovered** | ~400B+ | URLs seen across the web |
+      | **Pages crawled** | ~100B+ per month | Googlebot reportedly crawls ~100B pages/month |
+      | **Index size** | ~60B+ pages | Pages deemed worthy of indexing |
+      | **Index storage** | ~100+ PB | Compressed web pages, metadata, embeddings |
+      | **Crawl bandwidth** | ~10+ Gbps | Distributed across global crawl infrastructure |
+
+      **Crawl prioritization:**
+      - **URL priority scoring**: Combine PageRank, crawl history (pages that change frequently get crawled more often), and site authority
+      - **Freshness tiers**: News sites every 5-15 minutes, popular sites daily, long-tail pages weekly/monthly
+      - **Politeness**: Respect robots.txt, rate-limit per domain, avoid overloading small servers
+
+      **Document processing pipeline:**
+      1. **Parsing**: Extract text, titles, headings, links, metadata from HTML (handle JavaScript rendering for ~30% of modern web)
+      2. **Deduplication**: Near-duplicate detection using SimHash/MinHash to avoid indexing copies. ~30% of web pages are near-duplicates
+      3. **Language detection**: Identify document language for language-specific processing
+      4. **Quality scoring**: Spam detection, content farm filtering, E-E-A-T signals (expertise, experience, authoritativeness, trustworthiness)
+      5. **Indexing**: Build inverted index (terms → document postings) and forward index (document → features)
+
+      **Training data for ranking models:**
+      - **Click logs**: ~8.5B queries/day with click positions, dwell times, and user behavior
+      - **Human judgments**: ~100K+ judged query-document pairs per month from quality raters
+      - **Interleaving experiments**: Online experiments comparing ranking models
+      - **Self-supervised signals**: Query-document pairs from anchor text, title matching
+    dialogue:
+      - speaker: interviewer
+        text: "What does the data pipeline look like for a search engine?"
+      - speaker: candidate
+        text: "It starts with web crawling at massive scale, then document processing, deduplication, quality filtering, and indexing."
+      - speaker: interviewer
+        text: "How do you handle the freshness challenge? News must appear within minutes."
+      - speaker: candidate
+        text: "Tiered crawling -- news sites every 5-15 minutes with a fast-indexing pipeline, while long-tail pages are crawled weekly."
+      - speaker: interviewer
+        text: "What about training data for the ranking models?"
+    next: feat_question
+
+  # ============ FEATURES ============
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Ranking Features"
+    speaker: interviewer
+    content: |
+      What features would you use for the ranking model? Think about the full spectrum -- query features, document features, and query-document interaction features.
+    dialogue:
+      - speaker: interviewer
+        text: "What features are most important for web search ranking?"
+      - speaker: candidate
+        text: "We need three categories: query understanding features, document quality features, and query-document relevance features."
+      - speaker: interviewer
+        text: "Which category contributes most to ranking quality?"
+    choices:
+      - label: "Traditional IR features + link analysis (PageRank, anchor text)"
+        answer: |
+          I'd build on **proven traditional IR features** augmented with **link graph analysis**:
+
+          **Query features (~15 features):**
+          - **Query length** (terms, characters): Short queries are ambiguous, long queries are specific
+          - **Query type classification**: Informational, navigational, transactional, local (trained classifier)
+          - **Query frequency**: How common is this query? Head queries vs. tail queries require different strategies
+          - **Query language**: Detected language for multilingual handling
+          - **Seasonal signal**: Is this query trending (e.g., "election results") or evergreen ("how to boil eggs")?
+
+          **Document quality features (~25 features):**
+          - **PageRank**: The classic link-based authority signal. Pages with high inbound link quality rank higher. Google's original innovation and still a top-10 feature
+          - **Domain authority**: Aggregated link signals at domain level (cnn.com vs. random-blog.xyz)
+          - **Anchor text**: What do linking pages call this document? Anchor text is an external "vote" for relevance
+          - **Content freshness**: Last-modified date, content change rate, temporal signals in text
+          - **Content quality**: Reading level, spelling errors, ad density, content length, E-E-A-T signals
+          - **Spam score**: Classifier output for link spam, keyword stuffing, cloaking, thin content
+
+          **Query-document interaction features (~20 features):**
+          - **BM25 score**: Term frequency-based relevance across title, body, URL, anchor text
+          - **TF-IDF similarity**: Classic vector-space relevance
+          - **Exact match signals**: Does query appear in title? In URL? In H1 heading?
+          - **Term proximity**: How close are query terms to each other in the document?
+          - **Field-weighted relevance**: Title match weighted 5x body match, URL match weighted 3x
+
+          **Why traditional features?**
+          - PageRank alone provides a strong **baseline authority signal** that neural models struggle to replicate
+          - BM25 + PageRank gives a surprisingly competitive ranking (~70% of neural model quality)
+          - These features are **interpretable** and **debuggable** -- critical for a system serving billions
+          - ~60 features total, fast to compute, no GPU required
+
+          **Historical click features:**
+          - CTR for this (query, URL) pair from click logs
+          - Average dwell time for this URL from this query
+          - These are the **most predictive single features** but require sufficient query volume
+        next: mod_question
+      - label: "Neural features (BERT embeddings, semantic similarity)"
+        answer: |
+          I'd invest heavily in **neural understanding features** that capture deep semantics:
+
+          **Query understanding features (~10 learned features):**
+          - **Query embedding**: BERT-encoded query vector (768-dim) capturing intent
+          - **Query entity detection**: Recognized entities (people, places, products) and their types using NER
+          - **Query intent embedding**: Fine-tuned model output classifying navigational/informational/transactional
+          - **Query reformulation embedding**: Encoding of what users typically search after this query (learned from session data)
+
+          **Document understanding features (~15 learned features):**
+          - **Document embedding**: BERT-encoded representation of title + first 512 tokens
+          - **Passage embeddings**: Top-3 most relevant passages identified by a passage retrieval model, each embedded
+          - **Entity-level features**: Knowledge graph entities mentioned in the document, entity salience scores
+          - **Content quality model output**: Neural classifier for content quality (trained on rater judgments)
+          - **Topic model output**: Learned topic distribution over ~1000 latent topics
+
+          **Query-document neural interaction features (~10 features):**
+          - **Cross-encoder relevance score**: Fine-tuned BERT that takes (query, document_snippet) as input and outputs relevance probability. This is the **most powerful single feature** but expensive (~30ms per document)
+          - **Semantic similarity**: Cosine similarity between query embedding and document embedding
+          - **Passage-level relevance**: Max relevance score across document passages (for long documents, different passages may answer different aspects)
+          - **Entity overlap**: Do query entities match document entities? Weighted by entity importance
+
+          **Why neural features?**
+          - Cross-encoder BERT relevance scores improve **NDCG@10 by 8-15%** over BM25+PageRank (per MS MARCO leaderboard results)
+          - Semantic matching handles vocabulary mismatch -- "cheap flights" matches "affordable airfare"
+          - Entity understanding enables knowledge graph integration
+          - Neural features capture **user intent** beyond keyword matching
+
+          **Trade-off:** BERT cross-encoder at 30ms/document can only score ~100-500 candidates (not billions). This is why we need the multi-stage pipeline: BM25 retrieves 1000 candidates, then BERT re-ranks the top 100-500.
+
+          **Practical consideration:** Pre-compute document embeddings offline (bi-encoder). Only run the cross-encoder at serving time for the top candidates.
+        next: mod_question
+
+  # ============ MODEL ============
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Ranking Model Architecture"
+    speaker: interviewer
+    content: |
+      Now let's design the ranking model. Given our multi-stage pipeline, what model would you use for the final ranking stage?
+    dialogue:
+      - speaker: interviewer
+        text: "What model architecture would you use for the ranking stage?"
+      - speaker: candidate
+        text: "We need a model that can handle hundreds of features and learn complex relevance patterns from click data."
+      - speaker: interviewer
+        text: "How do you handle the latency constraints? You can't run a huge model on thousands of documents."
+    choices:
+      - label: "Learning-to-Rank with GBDT (LambdaMART / XGBoost)"
+        answer: |
+          I'd use **LambdaMART** (gradient boosted decision trees optimized for ranking) as the primary ranker:
+
+          **Why LambdaMART?**
+          - **Directly optimizes NDCG**: Unlike pointwise regression, LambdaMART's lambda gradients are derived from the **change in NDCG** when swapping document pairs. This is the key innovation
+          - **Handles heterogeneous features**: Naturally mixes numerical (BM25 score), categorical (query type), and count features (PageRank) without normalization
+          - **Extremely fast inference**: Score 1000 documents in <5ms on CPU
+          - **Production-proven**: Used by Bing, Yahoo, Yandex, and was Google's primary ranker before neural models
+
+          **Model configuration:**
+          - **Algorithm**: LightGBM with `lambdarank` objective, `ndcg` eval metric
+          - **Trees**: 1000 trees, max depth 10, learning rate 0.05, leaf regularization
+          - **Features**: ~80 features (traditional IR + click features + some neural model outputs as features)
+          - **Training data**: ~100M (query, document, relevance_label) triples from click logs + human judgments
+          - **Listwise training**: Group by query, optimize ranking within each query's candidate set
+
+          **Multi-stage architecture:**
+          ```
+          Stage 1: BM25 retrieval → Top 1000          (~50ms, inverted index)
+          Stage 2: Lightweight LambdaMART → Top 100    (~5ms, ~20 features)
+          Stage 3: Full LambdaMART → Top 20            (~3ms, ~80 features)
+          Stage 4: Business rules + diversity → Top 10  (~2ms)
+          ```
+
+          **Feature importance (typical for web search):**
+
+          | Feature | Importance |
+          |---------|-----------|
+          | Historical CTR for (query, URL) | ~25% |
+          | BM25 title score | ~15% |
+          | PageRank / domain authority | ~12% |
+          | Query-document BERT similarity | ~10% |
+          | Dwell time signals | ~8% |
+          | Freshness | ~5% |
+          | Other (30+ features) | ~25% |
+
+          **Advantage:** LambdaMART with good features and click data is **surprisingly hard to beat** with neural models, especially for head queries where click data is abundant.
+        next: train_pipeline
+      - label: "Neural ranker (cross-encoder BERT / Transformer)"
+        answer: |
+          I'd use a **cross-encoder Transformer** as the final-stage ranker for maximum relevance quality:
+
+          **Architecture: Cross-Encoder BERT Ranker**
+          ```
+          Input: [CLS] query [SEP] document_title document_snippet [SEP]
+                                    │
+                            BERT (12-layer, 110M params)
+                                    │
+                            [CLS] pooled output (768-dim)
+                                    │
+                            FC(768 → 256) → ReLU → FC(256 → 1)
+                                    │
+                            Relevance Score (0-1)
+          ```
+
+          **Why cross-encoder?**
+          - **Deep query-document interaction**: Unlike bi-encoders, the cross-encoder sees query and document **together**, enabling attention between query terms and document content
+          - **State-of-the-art relevance**: Cross-encoder BERT models dominate the MS MARCO leaderboard, with **NDCG@10 ~0.39** vs. BM25's ~0.23
+          - **Handles semantic matching**: "How to fix a leaky faucet" matches a document about "plumbing repair techniques" through learned semantic understanding
+          - **Zero-shot transfer**: Fine-tuned on English, transfers reasonably to other languages via multilingual BERT
+
+          **Multi-stage pipeline (critical for latency):**
+          ```
+          Stage 1: BM25 + Dense retrieval → Top 1000       (~50ms)
+          Stage 2: Lightweight bi-encoder re-rank → Top 100  (~10ms, batch GPU)
+          Stage 3: Cross-encoder BERT → Top 20               (~30ms, batch GPU)
+          Stage 4: Diversity + freshness boost → Top 10      (~2ms)
+          ```
+
+          **Latency management:**
+          - Cross-encoder runs on **top 100 documents only** (not 1000, not 1M)
+          - Batch inference: Score 100 documents in one GPU forward pass → ~30ms total
+          - Use **DistilBERT** (6 layers, 66M params) for 2x speedup with ~3% quality loss
+          - **ONNX optimization** + INT8 quantization → additional 2-3x speedup
+          - **Model distillation**: Train a smaller student model on cross-encoder teacher scores
+
+          **Training:**
+          - **Pre-training**: Start from BERT-base pre-trained on web text
+          - **Fine-tuning**: MS MARCO passage ranking dataset (8.8M passages, 500K queries) + proprietary click data
+          - **Hard negative mining**: Train with negatives that BM25 ranks highly but are irrelevant (harder training signal)
+          - **Knowledge distillation**: Distill from a larger 24-layer model to 12-layer for serving
+
+          **Trade-off:** Requires GPU infrastructure for inference (~$0.001 per query at 100 docs/query). At 8.5B queries/day, that's ~$8.5M/day in GPU costs. Justifiable only if the quality improvement drives proportional revenue.
+        next: train_pipeline
+
+  # ============ TRAINING ============
+  - id: train_pipeline
+    stage: training
+    type: info
+    label: "Training Pipeline"
+    speaker: interviewer
+    content: |
+      Let's design the training pipeline for the search ranking model. Training data quality is the **single biggest lever** for ranking quality.
+
+      **Training data sources and labels:**
+
+      **1. Click-based labels (primary, high volume):**
+      - (query, clicked_document) = positive label
+      - (query, shown_but_not_clicked) = negative label (with caveats)
+      - **Volume**: Billions of labeled pairs per day
+      - **Bias correction needed**: Position bias (higher positions get more clicks regardless of relevance)
+
+      **Position bias correction methods:**
+
+      | Method | How It Works | Quality |
+      |--------|-------------|---------|
+      | **Inverse Propensity Scoring (IPS)** | Weight by 1/P(click given position). Estimated from randomization experiments | Good |
+      | **Position as feature** | Include position during training, set to 0 at inference | Simple, effective |
+      | **Unbiased LTR** | Dual learning framework that jointly estimates bias and relevance | Best, complex |
+      | **Result randomization** | Randomly swap pairs at positions 1-3 for 1% traffic → unbiased labels | Gold standard |
+
+      **2. Human judgment labels (gold standard, low volume):**
+      - Professional raters evaluate (query, document) pairs on 5-point scale
+      - ~100K+ judgments per month, carefully sampled across query types
+      - Used for offline evaluation (golden set) and calibrating click-based labels
+
+      **3. Self-supervised pre-training:**
+      - **Inverse Cloze Task (ICT)**: Given a passage, use its context sentences as query
+      - **Representative Word Prediction (RWP)**: Predict which words in a document would make good queries
+      - Used to pre-train dense retrieval models before fine-tuning on click data
+
+      **Training pipeline (daily):**
+      1. **Data extraction**: Sample yesterday's click logs, apply bot filtering, session-level aggregation
+      2. **Label creation**: Click = positive, impression-but-no-click = negative, apply IPS weights
+      3. **Feature computation**: Run Spark jobs to compute ~80 features per (query, document) pair
+      4. **Training**: LambdaMART (~30 min on 100 machines) or BERT fine-tuning (~4 hours on 64 GPUs)
+      5. **Evaluation**: Compare against golden set, side-by-side with current production model
+      6. **Deployment gate**: Must improve NDCG@10 by >0.2% and pass all guardrails
+    dialogue:
+      - speaker: interviewer
+        text: "How do you construct training data for the ranker?"
+      - speaker: candidate
+        text: "Primarily from click logs, with position bias correction. Supplemented by human judgments as gold standard."
+      - speaker: interviewer
+        text: "Position bias is crucial. How specifically do you handle it?"
+      - speaker: candidate
+        text: "Three methods: inverse propensity scoring from randomization experiments, position as a training feature set to zero at inference, and result randomization for 1% of traffic."
+      - speaker: interviewer
+        text: "Good. What's the training frequency?"
+    next: deploy_question
+
+  # ============ DEPLOYMENT ============
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Serving Architecture"
+    speaker: interviewer
+    content: |
+      How would you architect the serving infrastructure for a global search engine? Remember: <200ms end-to-end, 99,000 queries/second, global availability.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you serve search results at this scale?"
+      - speaker: candidate
+        text: "The index must be distributed across thousands of machines. The key decisions are sharding strategy and the caching architecture."
+      - speaker: interviewer
+        text: "What sharding strategies would you consider?"
+    choices:
+      - label: "Document-sharded index with scatter-gather"
+        answer: |
+          I'd use **document-based sharding** with a **scatter-gather** query pattern:
+
+          **Architecture:**
+          ```
+          User Query
+               │
+               ▼
+          Query Processing (~10ms)
+          [spell check, query expansion, intent classification]
+               │
+               ▼
+          Scatter to all Index Shards (broadcast)
+               │
+          ┌────┼────┬────┬── ... ──┐
+          │    │    │    │         │
+          Shard 1  Shard 2  Shard 3 ... Shard N
+          (each: BM25 + lightweight rank, ~30ms)
+               │    │    │    │         │
+               └────┼────┴────┴── ... ──┘
+                    │
+                    ▼
+          Merge top results from all shards (~5ms)
+               │
+               ▼
+          Final ranking model (top 100-500, ~30ms)
+               │
+               ▼
+          Post-processing (~5ms)
+          [snippets, dedup, diversity, ads insertion]
+               │
+               ▼
+          Response (<100ms total server-side)
+          ```
+
+          **Sharding strategy:**
+          - **~10,000-20,000 shards**, each holding ~5-10M documents
+          - Documents assigned to shards by hash of URL (uniform distribution)
+          - Each shard is **replicated 3-10x** for redundancy and load distribution
+          - Query broadcast to ALL shards; each returns its top ~100 results; coordinator merges
+
+          **Why document-sharding?**
+          - **Simple**: Each shard is a complete mini-search-engine
+          - **Load balanced**: Uniform document distribution means uniform query cost
+          - **Scalable**: Add more shards to handle more documents
+          - **Fault tolerant**: If one shard replica is down, others serve the query
+
+          **Latency breakdown:**
+          - Query processing: ~10ms
+          - Scatter to shards: ~5ms (network)
+          - Per-shard BM25 + lightweight rank: ~30ms (parallel across shards)
+          - Merge: ~5ms
+          - Final neural re-rank (GPU): ~30ms
+          - Post-processing (snippets): ~5ms
+          - **Total: ~85ms server-side** (well within budget)
+
+          **Trade-off:** Every query hits ALL shards, which means high fan-out. A single slow shard can increase tail latency. Mitigate with **hedged requests** (send request to 2 replicas, take the faster response) and **timeout thresholds** (skip shard if no response in 50ms).
+        next: deploy_freshness
+      - label: "Tiered index with query routing"
+        answer: |
+          I'd use a **tiered index architecture** where different quality tiers of documents are stored separately, and queries are routed to the appropriate tiers:
+
+          **Tiered architecture:**
+          ```
+          User Query
+               │
+               ▼
+          Query Router
+          (decides which tiers to search based on query type)
+               │
+          ┌────┼────────────┐
+          │    │             │
+          Tier 0         Tier 1         Tier 2
+          (~1B pages)    (~10B pages)   (~50B pages)
+          Highest quality Medium quality Long-tail
+          Always searched Sometimes searched Rarely searched
+          In-memory      SSD-based      Disk-based
+          ```
+
+          **Tier definitions:**
+          - **Tier 0 (Base)**: ~1B highest-quality pages. Always searched. Includes top domains (wikipedia, major news, popular sites). Fits in memory for fastest retrieval
+          - **Tier 1 (Extended)**: ~10B additional pages. Searched when Tier 0 doesn't have enough results or for longer/specific queries
+          - **Tier 2 (Long-tail)**: ~50B pages. Only searched for very specific/rare queries that don't find results in higher tiers
+
+          **Query routing logic:**
+          - Short, common queries (e.g., "weather"): Tier 0 only (fastest path, ~30ms)
+          - Medium queries (e.g., "best hiking trails near Portland"): Tier 0 + Tier 1 (~60ms)
+          - Long-tail queries (e.g., "how to fix 2019 Honda Civic brake light replacement"): All tiers (~100ms)
+          - If Tier 0 result quality score < threshold → extend to Tier 1
+
+          **Advantages:**
+          - **~60% of queries** are answered by Tier 0 alone → much faster average latency
+          - **Less infrastructure**: Not every query needs to search all 60B documents
+          - **Cost efficient**: Tier 0 on expensive high-memory machines, Tier 2 on cheaper SSD/disk machines
+          - **Quality bias**: By putting the best documents in Tier 0, we ensure head queries are always fast and high-quality
+
+          **Per-tier infrastructure:**
+
+          | Tier | Documents | Shards | Storage | Avg Latency |
+          |------|-----------|--------|---------|-------------|
+          | Tier 0 | ~1B | ~1,000 | Memory | ~20ms |
+          | Tier 1 | ~10B | ~5,000 | SSD | ~40ms |
+          | Tier 2 | ~50B | ~15,000 | SSD+Disk | ~80ms |
+
+          **Trade-off:** Complex query routing logic. Risk of missing a relevant document because it's in a lower tier that wasn't searched. Mitigate by ensuring tier assignment is based on **document quality, not just popularity**.
+        next: deploy_freshness
+
+  - id: deploy_freshness
+    stage: deployment
+    type: info
+    label: "Freshness & Real-time Indexing"
+    speaker: interviewer
+    content: |
+      A critical aspect of search engine deployment: **freshness**. When breaking news happens, users expect results within minutes.
+
+      **Real-time indexing pipeline:**
+
+      **Standard index (hourly updates):**
+      - Batch crawler discovers and processes pages continuously
+      - New/updated pages go through the full processing pipeline (parse, dedup, quality score, index)
+      - Index segments are rebuilt and pushed to serving infrastructure every 1-6 hours
+
+      **Real-time index (minute-level updates):**
+      ```
+      Breaking event detected
+           │
+           ▼
+      Fast crawler (news seeds, social signals)
+           │
+           ▼
+      Lightweight processing (skip heavy quality analysis)
+           │
+           ▼
+      Real-time index shard (in-memory, <5 min from crawl to searchable)
+           │
+           ▼
+      Merge with main index (eventually)
+      ```
+
+      **Freshness signals for ranking:**
+      - **Document age**: When was the content published or last modified?
+      - **Query-deserves-freshness (QDF)**: Detect queries with a spike in search volume (breaking news) and temporarily boost fresh documents. Google's QDF algorithm detects spikes in query volume, news article volume, and blog/social mentions
+      - **Content change rate**: Documents that update frequently (news sites) get a freshness boost; static pages (Wikipedia) don't need it
+
+      **Freshness vs. quality trade-off:**
+      - For "election results 2026": freshness dominates -- show the latest results even from new/unproven sources
+      - For "how to tie a tie": freshness irrelevant -- show the highest-quality evergreen content
+      - The ranking model must learn this trade-off based on query type and temporal signals
+
+      **Global deployment:**
+      - Data centers in 20+ regions worldwide
+      - Each region has a full copy of the index
+      - Index updates propagated via asynchronous replication
+      - User routed to nearest data center via DNS/CDN
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle freshness in search results?"
+      - speaker: candidate
+        text: "Dual-track indexing: a batch pipeline for the main index updated hourly, and a real-time pipeline for breaking content updated within minutes."
+      - speaker: interviewer
+        text: "How do you decide when to boost fresh content versus showing established quality pages?"
+      - speaker: candidate
+        text: "Query-Deserves-Freshness detection: spike detection on query volume, news volume, and social signals. When a spike is detected, we temporarily boost fresh documents for that query."
+    next: mon_question
+
+  # ============ MONITORING ============
+  - id: mon_question
+    stage: monitoring
+    type: question
+    label: "Monitoring & Quality Assurance"
+    speaker: interviewer
+    content: |
+      What monitoring would you put in place for a global search engine ranking system?
+    dialogue:
+      - speaker: interviewer
+        text: "How do you monitor search quality at this scale?"
+      - speaker: candidate
+        text: "We need automated quality signals, human evaluation, and rapid detection of ranking regressions."
+      - speaker: interviewer
+        text: "What's your approach to detecting and fixing ranking failures?"
+    choices:
+      - label: "Multi-layered quality monitoring with automated regression detection"
+        answer: |
+          I'd build a **multi-layered monitoring system** for search quality:
+
+          **Layer 1 -- Real-time system health:**
+
+          | Metric | Alert Threshold | Action |
+          |--------|----------------|--------|
+          | P99 latency | >300ms | Scale serving infra |
+          | Index freshness lag | >30 min for Tier 0 | Alert indexing pipeline |
+          | Null result rate | >2% increase | Check index completeness |
+          | Error rate | >0.1% | Auto-rollback + page on-call |
+          | QPS anomaly | >20% deviation | Investigate traffic source |
+
+          **Layer 2 -- Ranking quality signals (hourly):**
+          - **Automated NDCG tracking** on a set of ~10K "canary queries" with known-good results. If NDCG drops >1%, automatic rollback
+          - **Click entropy**: Measure diversity of clicked positions. If users start clicking only position 1 or only position 5+, something is wrong
+          - **Good-click rate**: Track percentage of clicks with dwell time >30s. Drop indicates irrelevant results are being ranked highly
+          - **Pogostick rate**: Rapid back-to-SERP clicks indicate unsatisfying results
+
+          **Layer 3 -- Weekly human evaluation:**
+          - **Side-by-side evaluation**: Raters compare current results vs. last week on ~5000 queries
+          - **Category-level analysis**: Break down quality by query type (navigational, informational, local, news)
+          - **Failure mode taxonomy**: Classify ranking failures into categories (spam breakthrough, intent misunderstanding, freshness failure, authority mismatch)
+
+          **Automated regression detection:**
+          - Run **automated A/B test** between new model and production model on 5% of traffic
+          - Monitor all metrics with **sequential testing** (avoids waiting for fixed-duration experiments)
+          - If any guardrail metric degrades with p<0.01, auto-halt the experiment
+          - **Metric hierarchy**: Safety > Latency > Relevance (NDCG) > Engagement (CTR)
+
+          **Spam and abuse monitoring:**
+          - Track **new domains** appearing in top-10 results. Sudden new domain presence may indicate SEO manipulation
+          - Monitor **ranking volatility** per query. Stable queries that suddenly change may indicate spam
+          - Weekly **webspam report**: How many spam pages are in top-10 across sampled queries?
+        next: mon_terminal
+      - label: "Continuous experimentation with automated quality loops"
+        answer: |
+          I'd center monitoring around **continuous experimentation** and **automated quality improvement loops**:
+
+          **Always-on interleaving experiments:**
+          - **Team Draft Interleaving**: For every query, mix results from the production model and a challenger model. Track which model's results get more clicks
+          - This is Google's primary method for evaluating ranking changes
+          - **Advantage over A/B testing**: 10-100x more sensitive, detects smaller improvements
+          - Running constantly with every proposed model change
+
+          **Automated quality feedback loop:**
+          ```
+          Production model serves queries
+                    │
+                    ▼
+          Click/engagement signals collected
+                    │
+                    ▼
+          Automated failure detection
+          (queries with high abandon rate, no good clicks)
+                    │
+                    ▼
+          Failed queries sent to human raters (batch)
+                    │
+                    ▼
+          Rater judgments fed back into training data
+                    │
+                    ▼
+          Model retrained with improved labels
+                    │
+                    ▼
+          New model deployed via interleaving
+          ```
+
+          **Segment-level quality monitoring:**
+          - Break down all metrics by: **language** (100+ languages), **query category**, **device type**, **geography**
+          - Automated alerting when any segment degrades >2% even if global metrics are flat
+          - Special attention to **under-resourced languages** where model quality may degrade faster
+
+          **Long-term quality trends:**
+          - **Quarterly quality reviews** with detailed analysis of NDCG trends by query type
+          - **Search quality raters** provide structured feedback on emerging content quality issues (AI-generated content, new spam patterns)
+          - **Competitive benchmarking**: Periodically compare results against competitor search engines on standardized query sets
+
+          **Anti-abuse monitoring:**
+          - Real-time detection of **ranking manipulation campaigns** (sudden link building, coordinated queries)
+          - **Adversarial probing**: Automated systems try to game rankings using known SEO tricks; measure if defenses hold
+          - **Content farm detection**: Monitor for sites scaling AI-generated content to dominate rankings
+        next: mon_terminal
+
+  # ============ TERMINAL ============
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Design Complete"
+    speaker: interviewer
+    content: |
+      Outstanding work! You've designed a comprehensive **Global Search Engine Ranking** system.
+
+      **Your design covers:**
+      - **Retrieval architecture**: BM25 inverted index or hybrid BM25 + dense retrieval for maximum recall
+      - **Metrics**: Relevance-centric (NDCG, human judgments) or engagement-centric (CTR, dwell time, satisfaction)
+      - **Data pipeline**: Web crawling at 100B+ pages/month, document processing, click log collection
+      - **Features**: Traditional IR features + PageRank or neural features with BERT embeddings
+      - **Ranking model**: LambdaMART for speed and interpretability or cross-encoder BERT for maximum relevance
+      - **Training**: Click-based labels with position bias correction, supplemented by human judgments
+      - **Deployment**: Document-sharded scatter-gather or tiered index with query routing
+      - **Freshness**: Real-time indexing pipeline with QDF-based freshness boosting
+      - **Monitoring**: Multi-layered quality monitoring or continuous interleaving experimentation
+
+      **Key design strengths:**
+      - Multi-stage pipeline balances recall, relevance, and latency
+      - Position bias correction ensures training data quality
+      - Freshness system handles both breaking news and evergreen content
+      - Anti-spam and quality monitoring protect ranking integrity
+
+      **Areas for further exploration:**
+      - Knowledge graph integration for entity-rich queries
+      - Multimodal search (images, videos, structured data in SERPs)
+      - Personalization vs. universality trade-off in web search
+      - AI-generated content detection and handling
+
+      This demonstrates deep understanding of information retrieval at scale, the multi-stage ranking paradigm, and the operational challenges of serving billions of users. Exceptional design!
+    dialogue:
+      - speaker: interviewer
+        text: "Excellent design. You covered scale, relevance, freshness, and quality control. Any final thoughts?"
+      - speaker: candidate
+        text: "The most underrated aspect is training data quality. Position-debiased click logs with human judgment calibration are worth more than any model architecture improvement."
+      - speaker: interviewer
+        text: "That's a very mature insight. Well done!"

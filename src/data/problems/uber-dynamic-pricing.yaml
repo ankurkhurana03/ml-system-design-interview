@@ -1,0 +1,689 @@
+id: uber-dynamic-pricing
+title: "Uber Surge Pricing & Supply-Demand Balancing"
+description: "Build a dynamic pricing system for a ride-sharing service like Uber."
+companies: ["Uber", "Lyft", "DoorDash"]
+domains: ["RL", "Time Series", "Tabular/Structured"]
+root: pd_start
+
+nodes:
+  # ============ PROBLEM DEFINITION ============
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design a **surge pricing system** for a ride-sharing platform like Uber.
+
+      **Business context:**
+      - The platform handles **~20M rides/day** globally across ~10,000 hexagonal geo-zones (H3 resolution 7)
+      - Current rule-based surge multipliers (e.g., "2x when demand exceeds supply by 50%") are reactive and suboptimal
+      - Surge pricing serves a **dual purpose**: increase supply (incentivize drivers) and moderate demand (price-sensitive riders wait)
+      - Price must be returned in **<100ms** at ride request time
+      - Must comply with **price-gouging laws** and avoid discriminatory pricing
+
+      **The core challenge is a two-sided marketplace:**
+      - **Rider side**: Higher prices reduce demand, but riders need reliable availability
+      - **Driver side**: Higher prices attract more drivers, but excessive surge causes rider churn
+      - **Spatial dynamics**: Raising prices in Zone A pushes demand to Zone B (spillover)
+      - **Temporal dynamics**: Today's pricing affects tomorrow's rider/driver behavior
+
+      Unlike generic dynamic pricing (e-commerce, hotels), ride-sharing pricing must balance a **real-time, two-sided marketplace** with strong spatial-temporal coupling.
+    dialogue:
+      - speaker: interviewer
+        text: "Today we'll design a surge pricing system for a ride-sharing platform. The platform handles about 20 million rides per day."
+      - speaker: candidate
+        text: "Interesting. The key challenge is balancing the two-sided marketplace -- pricing affects both riders and drivers simultaneously."
+      - speaker: interviewer
+        text: "Exactly. And there are spatial dynamics too. Raising prices in one zone pushes demand to neighboring zones."
+      - speaker: candidate
+        text: "So we need to think about the system holistically, not just zone-by-zone."
+      - speaker: interviewer
+        text: "Right. And pricing decisions today affect rider and driver behavior tomorrow. Let's start scoping the problem."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: info
+    label: "Problem Scope"
+    speaker: interviewer
+    content: |
+      Let's define the specific scope:
+
+      **What we're building:**
+      - A system that outputs a **surge multiplier** (1.0x to 5.0x) for each geo-zone, updated every 2-5 minutes
+      - The multiplier applies to the base fare: `final_fare = base_fare * surge_multiplier`
+      - Must also consider **driver incentives**: bonuses to reposition drivers toward high-demand zones
+
+      **Key differences from generic dynamic pricing:**
+
+      | Aspect | E-commerce Pricing | Ride-sharing Surge |
+      |--------|-------------------|-------------------|
+      | Supply | Fixed inventory | Elastic (drivers go online/offline) |
+      | Demand response | Price up -> fewer sales | Price up -> demand shifts spatially |
+      | Time horizon | Minutes to hours | Seconds to minutes |
+      | Spatial coupling | None | Strong (neighboring zones interact) |
+      | Two-sided | No | Yes (must balance riders AND drivers) |
+
+      **Constraints:**
+      - Surge multiplier capped at 5.0x (regulatory compliance)
+      - No surge during declared emergencies (safety regulation)
+      - Must be explainable to riders ("prices are higher due to high demand in your area")
+      - Driver incentives budget: ~$50M/year per major city
+
+      How should we approach this ML problem?
+    dialogue:
+      - speaker: interviewer
+        text: "We're outputting a surge multiplier between 1.0x and 5.0x per geo-zone, updated every 2-5 minutes. Capped at 5x for regulatory compliance."
+      - speaker: candidate
+        text: "And we need to consider driver incentives too -- bonuses to reposition toward high-demand areas?"
+      - speaker: interviewer
+        text: "Yes, that's part of the system. The key difference from generic pricing is the two-sided marketplace with spatial coupling."
+      - speaker: candidate
+        text: "Right. Let's think about the ML approach."
+    next: pd_formulation
+
+  - id: pd_formulation
+    stage: problem_definition
+    type: question
+    label: "ML Approach"
+    speaker: interviewer
+    content: |
+      How should we frame the surge pricing problem? The choice of approach fundamentally shapes the system.
+    dialogue:
+      - speaker: interviewer
+        text: "How would you frame this ML problem? The approach fundamentally shapes the entire system."
+      - speaker: candidate
+        text: "The two main paradigms are reinforcement learning, which optimizes long-term marketplace health, and supervised learning, which predicts the optimal multiplier from historical data."
+      - speaker: interviewer
+        text: "Walk me through the trade-offs."
+    choices:
+      - label: "RL: Optimize long-term marketplace health via sequential decisions"
+        answer: |
+          I'd frame this as a **Reinforcement Learning** problem where the agent learns to set surge multipliers that optimize long-term marketplace outcomes.
+
+          **Why RL for ride-sharing specifically?**
+          - A price increase now may **reduce demand in 30 minutes** -- RL captures these temporal dynamics
+          - Driver repositioning takes 15-30 minutes -- RL plans ahead for where drivers will be, not just where they are
+          - The supply-demand equilibrium is a **sequential game** -- each pricing decision affects the next state
+          - RL naturally handles **multi-objective optimization**: revenue, rider retention, driver earnings, and spatial balance
+
+          **MDP Formulation:**
+          - **State**: Per-zone market conditions (demand, supply, S/D ratio, neighboring zones, time features)
+          - **Action**: Surge multiplier for each zone (discrete: {1.0, 1.2, 1.5, 1.8, 2.0, 2.5, 3.0, 4.0, 5.0})
+          - **Reward**: Weighted combination of ride completions, revenue, driver utilization, and price stability
+          - **Transition**: How the marketplace evolves after a pricing decision (demand response, driver repositioning)
+
+          **Key insight**: Uber's own engineering blog (2022) describes their move from rule-based to ML-based pricing, highlighting the sequential nature of the problem. A purely greedy price-setter would maximize short-term revenue but destroy rider trust over time.
+        next: met_rl
+      - label: "Supervised: Predict optimal multiplier from supply-demand features"
+        answer: |
+          I'd use **supervised learning** to predict the surge multiplier that maximizes a target outcome.
+
+          **Approach:**
+          - Collect historical data: (zone_state, multiplier_applied, outcome) tuples
+          - Define "optimal" multiplier using **counterfactual estimation**: for each zone-time, what multiplier would have maximized `revenue * completion_rate`?
+          - Train a regression model to predict this optimal multiplier from zone features
+
+          **Why supervised for ride-sharing?**
+          - **Simpler and faster to iterate** -- standard ML pipeline, no reward shaping or environment simulation
+          - **Leverages existing infrastructure** -- feature stores, model serving, monitoring tools all work
+          - **Interpretable**: SHAP values explain "why is surge 1.8x here?" -- critical for regulatory compliance
+          - **Lower risk**: No exploration needed; predictions stay within distribution of historical prices
+
+          **Practical advantage**: Most real-world ride-sharing pricing systems use supervised/rule-based approaches. Lyft's pricing system uses gradient boosting on supply-demand features. Starting with SL gives a strong baseline while collecting the data needed for future RL experiments.
+
+          **Limitation**: Treats each pricing decision independently -- doesn't model how price in Zone A at time T affects demand in Zone B at time T+10. But with frequent retraining (daily), the model captures slowly-evolving dynamics.
+        next: met_sl
+
+  # ============ METRICS (RL PATH) ============
+  - id: met_rl
+    stage: metrics
+    type: info
+    label: "RL Reward Design"
+    speaker: interviewer
+    content: |
+      For the RL approach, the **reward function IS the metric** -- it defines what the agent optimizes.
+
+      **Reward function design:**
+      ```
+      R(s, a, s') = w1*R_completions + w2*R_revenue + w3*R_stability + w4*R_driver_util + w5*R_fairness
+      ```
+
+      | Component | Formula | Weight | Rationale |
+      |-----------|---------|--------|-----------|
+      | **R_completions** | `completed_rides / requested_rides` | 2.0 | Marketplace health -- most important |
+      | **R_revenue** | `log(zone_revenue / baseline_revenue)` | 1.0 | Business sustainability |
+      | **R_stability** | `-abs(mult_t - mult_{t-1})` | 0.5 | Prevent price jitter (bad UX) |
+      | **R_driver_util** | `active_drivers_on_ride / total_online_drivers` | 1.0 | Driver efficiency |
+      | **R_fairness** | `-max(0, price_disparity - threshold)` | 1.5 | Regulatory and ethical compliance |
+
+      **Completion rate is weighted 2x** because marketplace death spirals start with riders leaving:
+      - Surge too high -> riders leave -> fewer rides -> drivers leave -> longer ETAs -> more riders leave
+
+      **Evaluation metrics (offline):**
+      - Cumulative discounted reward over episode (1 day per city)
+      - **Offline Policy Evaluation (OPE)** using Fitted Q Evaluation (FQE) -- most stable OPE method
+      - Counterfactual revenue estimation vs current production policy
+      - Price stability index: Variance of multipliers over rolling 30-minute windows
+
+      **Online evaluation (A/B):**
+      - Gross bookings, rider conversion rate, driver online hours, average ETA, rider retention (7d/30d)
+    dialogue:
+      - speaker: interviewer
+        text: "For RL, the reward function defines what we optimize. Completion rate is weighted 2x because marketplace death spirals start with riders leaving."
+      - speaker: candidate
+        text: "Makes sense. If surge is too aggressive, riders leave, then drivers leave too, and the marketplace collapses."
+      - speaker: interviewer
+        text: "Exactly. We also penalize price instability and fairness violations. For evaluation, we use Offline Policy Evaluation before deploying any new policy."
+      - speaker: candidate
+        text: "FQE is the right choice for OPE -- more stable than inverse propensity scoring."
+    next: data_pipeline
+
+  # ============ METRICS (SL PATH) ============
+  - id: met_sl
+    stage: metrics
+    type: info
+    label: "Supervised Metrics"
+    speaker: interviewer
+    content: |
+      For the supervised approach, we need clear offline and online metrics.
+
+      **Offline metrics (model quality):**
+      - **Weighted MAE on multiplier**: `sum(w_i * |predicted - optimal|)` where weights are proportional to zone ride volume. Errors in busy zones matter more.
+      - **Directional accuracy**: When the model says "surge up", was surging actually beneficial? Measures if the model correctly identifies when to surge vs not surge.
+      - **Revenue uplift estimate**: Using counterfactual estimation, what revenue would the model's prices have generated vs the baseline rule-based system?
+
+      **Online metrics (business impact):**
+
+      | Metric | Target | Why It Matters |
+      |--------|--------|---------------|
+      | **Gross bookings** | +3-5% vs baseline | Revenue |
+      | **Ride completion rate** | >92% | Marketplace health |
+      | **Rider conversion** | Price view -> request rate | Pricing acceptability |
+      | **Driver online hours** | +5% during peak | Supply attraction |
+      | **Average pickup ETA** | <5 min in urban | Supply-demand balance proxy |
+      | **Rider retention (30d)** | No degradation | Long-term health |
+      | **Price stability** | Multiplier variance <0.3 in 30-min window | User experience |
+
+      **Key insight:** The **ride completion rate** is the single most important guardrail. If it drops below 90%, the marketplace is failing regardless of revenue.
+
+      **A/B testing:** Run RL/SL model vs rule-based baseline on geographically isolated zones (not random -- prevents spillover contamination).
+    dialogue:
+      - speaker: interviewer
+        text: "For supervised learning, weighted MAE on the multiplier is our primary offline metric, with ride completion rate as the key guardrail."
+      - speaker: candidate
+        text: "Completion rate is critical. If it drops below 90%, the marketplace is failing even if revenue looks good."
+      - speaker: interviewer
+        text: "Exactly. And for A/B testing, we need geographically isolated zones to prevent spillover effects."
+    next: data_pipeline
+
+  # ============ DATA (CONVERGED) ============
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      Let's design the data pipeline. Both RL and SL approaches need the same underlying data.
+
+      **Data sources and volume:**
+
+      | Source | Data | Volume | Latency |
+      |--------|------|--------|---------|
+      | Ride events (Kafka) | Requests, matches, completions, cancellations | ~20M rides/day | Real-time |
+      | Driver telemetry | GPS pings, online/offline status, ride state | ~1B pings/day | Real-time |
+      | Rider app events | Opens, price views, ride requests, cancellations | ~100M events/day | Real-time |
+      | Weather API | Temperature, precipitation, visibility per city | Hourly | Batch |
+      | Event feeds | Concerts, sports, conferences, holidays | Daily | Batch |
+      | Historical pricing | Surge multipliers applied per zone per interval | ~100M records/day | Logged |
+
+      **Real-time aggregation (Apache Flink):**
+      Every 2 minutes per active zone, compute:
+      - `open_requests`: Unfulfilled ride requests in zone
+      - `available_drivers`: Online drivers not on a ride
+      - `en_route_drivers`: Drivers completing rides with ETA <10 min
+      - `sd_ratio`: open_requests / (available_drivers + 0.5 * en_route_drivers)
+      - `completion_rate_15min`: Rides completed / rides requested in last 15 min
+      - `avg_pickup_eta`: Mean time from match to pickup
+
+      **For RL:** Construct experience tuples (s_t, a_t, r_t, s_{t+1}) every 5 minutes per zone. Episode = 1 day in 1 city (resets at midnight).
+
+      **For SL:** Construct (zone_features, multiplier_applied, outcome) tuples. "Optimal" target derived from historical A/B data or counterfactual estimation.
+
+      **Data quality checks:** Missing zone data triggers historical backfill. GPS coverage <10 probes/zone/interval is flagged as low-confidence.
+    dialogue:
+      - speaker: interviewer
+        text: "Both approaches use the same data pipeline. Apache Flink aggregates real-time ride events into per-zone features every 2 minutes."
+      - speaker: candidate
+        text: "The S/D ratio is the core signal, but we need to include en-route drivers with ETA-weighted contributions."
+      - speaker: interviewer
+        text: "Good point. A driver finishing a ride in 3 minutes is effectively available supply. We also track completion rate and average pickup ETA per zone."
+    next: feat_question
+
+  # ============ FEATURES ============
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Engineering"
+    speaker: interviewer
+    content: |
+      What features would you include in the pricing model's input? Consider what signals best predict the optimal surge multiplier.
+    dialogue:
+      - speaker: interviewer
+        text: "What features should the pricing model see? Think about what signals best predict the right surge level."
+      - speaker: candidate
+        text: "I see two approaches -- focusing on the real-time marketplace signals, or building rich spatial features that capture the zone interactions."
+      - speaker: interviewer
+        text: "Tell me about the trade-offs."
+    choices:
+      - label: "Marketplace signals: S/D ratio + price elasticity + driver incentives"
+        answer: |
+          I'd focus on **marketplace dynamics features** that capture the two-sided nature of the platform.
+
+          **Supply-demand features (per zone):**
+          - Current S/D ratio + velocity (is it improving or worsening?)
+          - Open requests count (absolute demand level)
+          - Available driver count + en-route driver count
+          - Estimated time to next available driver (proxy for rider wait time)
+
+          **Price elasticity features:**
+          - Historical demand response to surge: At 1.5x, demand drops by ~20%; at 2.0x, by ~35%. These curves are **zone-specific** -- airport zones are less elastic (captive demand) than residential zones (riders wait or take transit)
+          - **Rider willingness-to-pay signals**: How many riders viewed the price but didn't request? This conversion rate is a real-time elasticity signal
+
+          **Driver behavior features:**
+          - Driver surge response: At 1.5x, 10% more drivers come online within 15 min. At 2.5x, 25% more. This is the **supply elasticity curve**
+          - Current driver incentive level in zone (bonuses affect supply independently of surge)
+          - Nearby zones' driver density (drivers may reposition toward higher surge)
+
+          **Temporal features:**
+          - Time of day (sinusoidal), day of week, holiday flag
+          - Minutes since last surge change (stability signal)
+          - Event proximity (concerts, sports games within 2 km)
+
+          These features directly model the **market clearing mechanism** -- how price changes affect both sides.
+        next: mod_question
+      - label: "Spatial features: Zone embeddings + neighbor interactions + network effects"
+        answer: |
+          I'd build **spatially-aware features** that capture how zones interact in the marketplace.
+
+          **Zone embedding features:**
+          - Each H3 hex zone gets a learned **16-dimensional embedding** capturing latent zone characteristics
+          - Embeddings learn to cluster: airports, downtown cores, residential areas, entertainment districts
+          - Zone type matters because elasticity differs: airport demand is inelastic (no alternatives), residential is elastic (riders wait or take transit)
+
+          **Neighbor interaction features:**
+          - S/D ratios of the 6 adjacent H3 zones (hexagonal grid neighbors)
+          - Surge multipliers of neighboring zones (riders compare and choose the cheaper pickup zone)
+          - **Supply gradient**: Are drivers flowing toward or away from this zone? Computed from driver trajectory vectors
+          - **Demand spillover estimate**: If Zone A surges, how much demand shifts to Zone B? Learned from historical data
+
+          **Network-level features:**
+          - City-wide average S/D ratio (global market health signal)
+          - Percentage of zones currently surging (is this localized or city-wide pressure?)
+          - Total active drivers city-wide / total demand city-wide (macro balance)
+          - Active driver distribution entropy (are drivers evenly spread or clustered?)
+
+          **Event features with spatial scope:**
+          - Events within 0.5, 1.0, 2.0 km radius (different radii capture different event sizes)
+          - Expected event end time (concerts ending cause demand spikes within 15 min)
+
+          **Why spatial?** Ride-sharing is fundamentally a **spatial marketplace**. Ignoring neighboring zones is like optimizing prices for one store while ignoring the competitor across the street.
+        next: mod_question
+
+  # ============ MODEL ============
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Model Architecture"
+    speaker: interviewer
+    content: |
+      What model architecture would you use for the surge pricing system?
+    dialogue:
+      - speaker: interviewer
+        text: "What model architecture would you choose? Remember we need sub-100ms latency for 10,000 zones."
+      - speaker: candidate
+        text: "The trade-off is between simpler models that are fast and interpretable versus deep models that capture spatial dynamics better."
+      - speaker: interviewer
+        text: "Walk me through your recommendation."
+    choices:
+      - label: "DQN with spatial attention for RL, or LightGBM for SL"
+        answer: |
+          For RL, I'd use a **Deep Q-Network (DQN)** with spatial attention. For SL, **LightGBM** with quantile regression.
+
+          **DQN Architecture (RL path):**
+          - **Input**: State vector (~50 dims) per zone including neighbor features
+          - **Network**: FC(256) -> LayerNorm -> ReLU -> FC(256) -> LayerNorm -> ReLU -> FC(128)
+          - **Spatial attention**: Each zone's embedding attends to 6 neighbor embeddings (multi-head, 2 heads). Learns "my optimal price depends on what's happening next door"
+          - **Output**: Q-values for 9 discrete actions {1.0, 1.2, 1.5, 1.8, 2.0, 2.5, 3.0, 4.0, 5.0}
+          - **Enhancements**: Double DQN (reduces overestimation), Dueling architecture (separate value + advantage), Per-zone models initially
+
+          **LightGBM Architecture (SL path):**
+          - ~200 features per zone including neighbor features and interaction terms
+          - **Quantile regression**: Train P25, P50, P75 models. P50 is point estimate; interval gives confidence
+          - One model per city (NYC, SF, London have different dynamics)
+          - SHAP values for explainability -- "surge is 1.8x because demand is 2.3x supply (+0.5) and it's raining (+0.3)"
+
+          **Both are small models**: DQN ~1M params, LightGBM ~5K trees. Inference <5ms per zone on CPU.
+          **Production recommendation**: Start with LightGBM (fast to build, interpretable), graduate to DQN after 3-6 months of data collection.
+        next: train_strategy
+      - label: "Multi-agent RL with mean-field approximation"
+        answer: |
+          I'd use **Multi-Agent Reinforcement Learning (MARL)** where each zone is a cooperative agent.
+
+          **Why MARL?**
+          Single-agent RL treating each zone independently ignores spatial coupling. When Zone A surges, demand and supply shift to neighboring zones. MARL models this **game-theoretic interaction** directly.
+
+          **Mean-Field Approximation:**
+          Instead of modeling all 10K agents (intractable), each agent considers:
+          - Its own state (local S/D, features)
+          - The **mean field** of its neighbors (average state/action of adjacent zones)
+          - This reduces the problem from 10K-agent to effectively single-agent with neighbor summary
+
+          **Architecture per agent:**
+          ```
+          Own state (30 dims) ──┐
+                                ├── FC(128) -> FC(64) -> Q-values (9 actions)
+          Neighbor mean (20 dims) ┘
+          ```
+
+          **Training with Independent Q-Learning + Communication:**
+          - Each zone agent independently updates its Q-function
+          - But state includes neighbor mean field -- implicitly communicates
+          - **Centralized training, decentralized execution (CTDE)**: Train with full state access, deploy with local observations only
+
+          **Convergence to Nash Equilibrium**: Under mean-field approximation, the agents converge to a Nash equilibrium where no single zone can unilaterally improve by changing its surge. This is exactly the stable pricing we want.
+
+          **Trade-off**: More complex to train and debug than single-agent. Start with single-agent DQN, migrate to MARL if spatial spillover is quantifiably hurting performance. **Uber research** (2019) explored MARL for fleet management with promising results.
+        next: train_strategy
+
+  # ============ TRAINING ============
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: interviewer
+    content: |
+      Let's discuss training strategy for the pricing model.
+
+      **For RL (offline training with CQL):**
+
+      **Pipeline (runs daily):**
+      1. Extract last 30 days of experience tuples from data warehouse
+      2. Data quality checks: action coverage (all 9 multiplier levels observed?), reward anomalies, distribution shift
+      3. Train CQL model: batch size 2048, LR 3e-4, cosine decay, ~500K steps (~4 hours on GPU)
+      4. **Offline Policy Evaluation (OPE)** using FQE: estimate new policy's performance without deployment
+      5. **Deployment gate**: New policy must show >=2% reward improvement via FQE AND <=1% completion rate degradation
+
+      **For SL (regression training):**
+      1. Extract features + optimal targets from last 90 days
+      2. Time-based split: Train months 1-2, validate month 3 week 1-2, test month 3 week 3-4
+      3. Train LightGBM with Optuna hyperparameter search (100 trials, ~2 hours)
+      4. Evaluate on business metrics: revenue uplift estimate, predicted completion rate
+      5. A/B test gate: Deploy to 5% of zones, compare for 1 week before full rollout
+
+      **Common considerations:**
+      - **Temporal splits only** -- never random shuffle (future data leaks to training)
+      - **Per-city models** initially. City dynamics differ too much for a single global model
+      - **Sliding window**: 30 days for RL (captures recent dynamics), 90 days for SL (needs more data for stable targets)
+      - **Handling non-stationarity**: Monitor KL-divergence of feature distributions weekly. Major drift triggers immediate retraining
+      - **Special events**: Maintain separate models or override rules for concerts, sports, holidays, emergencies
+    dialogue:
+      - speaker: interviewer
+        text: "For RL, we use offline training with CQL and gate deployment with Offline Policy Evaluation. For SL, standard regression training with time-based splits."
+      - speaker: candidate
+        text: "The OPE gating is critical for safety. We never want to deploy a policy that could tank completion rates."
+      - speaker: interviewer
+        text: "Exactly. And per-city models are important -- New York, San Francisco, and London have very different marketplace dynamics."
+      - speaker: candidate
+        text: "What about special events like concerts? Those create sudden demand spikes."
+      - speaker: interviewer
+        text: "Good question. We maintain separate handling for known events -- either specialized models or rule-based overrides. Let's discuss deployment."
+    next: deploy_question
+
+  # ============ DEPLOYMENT ============
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Deployment Architecture"
+    speaker: interviewer
+    content: |
+      How would you deploy the pricing system to serve 10,000 zones with <100ms latency?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you serve pricing decisions for 10,000 zones within 100 milliseconds?"
+      - speaker: candidate
+        text: "The key choice is between pre-computing prices per zone periodically, or doing real-time per-request inference."
+      - speaker: interviewer
+        text: "Consider the trade-offs for a marketplace that changes every few minutes."
+    choices:
+      - label: "Zone-level price cache updated every 60 seconds"
+        answer: |
+          I'd **pre-compute surge multipliers per zone** every 60 seconds and cache them.
+
+          **Architecture:**
+          ```
+          Every 60s:
+          Flink (aggregate features) -> Feature Store (Redis) -> ML Model -> Post-Processing -> Price Cache (Redis)
+
+          Per ride request:
+          Request -> Identify H3 zone -> Redis GET -> Return cached multiplier (<1ms)
+          ```
+
+          **Why zone-level caching?**
+          - All rides in the same zone within 60 seconds get the same multiplier -- this is **by design**. Different prices for concurrent riders in the same zone feels unfair
+          - Removes ML model from the critical path -- price lookup is a simple Redis GET
+          - Dramatically simpler serving infrastructure -- no GPU cluster needed for inference
+          - 60-second staleness is acceptable: supply-demand doesn't change dramatically second-to-second
+
+          **Post-processing pipeline (applied before caching):**
+          - **Smoothing**: `new_mult = 0.7 * model_output + 0.3 * previous_mult` -- prevents jitter
+          - **Regulatory caps**: Max 5.0x, lower during emergencies (auto-detected from news/city APIs)
+          - **Fairness filter**: If adjacent zones differ by >1.5x, smooth toward each other
+          - **Floor**: Minimum 1.0x (no discounts via surge)
+
+          **Fallback stack:**
+          1. Primary: ML-computed cached price
+          2. If stale >3 min: Rule-based S/D ratio formula
+          3. If data unavailable: Historical average for this (zone, day, hour)
+
+          **Scaling**: 10K zones * 20 bytes = 200KB total cache. Redis handles millions of reads/second. Zero scaling concern.
+        next: deploy_safety
+      - label: "Real-time per-request inference with personalization"
+        answer: |
+          I'd serve **real-time per-request inference** to enable rider-level personalization.
+
+          **Architecture:**
+          ```
+          Ride Request -> Feature Assembly (Redis <10ms) -> Model Inference (ONNX <10ms) -> Post-Process -> Surge
+          ```
+
+          **Why per-request?**
+          - Can incorporate **rider-specific signals**: loyalty tier, ride frequency, price sensitivity, trip purpose (business vs personal)
+          - Enables **trip-specific pricing**: A 40-mile highway trip has different economics than a 2-mile urban trip in the same zone
+          - Most recent market state -- not even 60 seconds stale
+          - Easier A/B testing -- route specific users to different models
+
+          **Personalization features (added per request):**
+          - Rider's historical acceptance rate at different surge levels
+          - Rider loyalty tier (Gold/Platinum members may get reduced surge)
+          - Trip distance and expected duration (longer trips can absorb more surge)
+          - Time since rider last opened app (freshness of intent signal)
+
+          **Model serving:**
+          - LightGBM compiled to **TreeLite** or ONNX for optimized inference (<5ms)
+          - Deployed on Kubernetes CPU pods (no GPU needed for tree models)
+          - Auto-scaling: HPA targeting <60% CPU, min 20 pods
+
+          **Fairness concern**: Personalized pricing risks discrimination. Mitigate with:
+          - No demographic features (age, gender, race) -- ever
+          - Audit price distribution across demographic groups weekly
+          - Cap personalization to +-10% of zone base surge
+
+          **Trade-off**: More complex infrastructure but enables rider-specific pricing that can increase conversion 5-10%.
+        next: deploy_safety
+
+  - id: deploy_safety
+    stage: deployment
+    type: info
+    label: "Safe Rollout Strategy"
+    speaker: interviewer
+    content: |
+      Before full deployment, we need a **safe rollout strategy**. Pricing errors directly affect revenue and user experience.
+
+      **Rollout phases:**
+
+      **Phase 1 -- Shadow Mode (2 weeks):**
+      - ML model runs alongside production, outputs logged but not used
+      - Compare ML recommendations vs rule-based system outcomes
+      - Validate: ML would have generated +3% revenue with stable completion rates
+      - Fix any edge cases (e.g., model suggesting 5x during low-demand periods)
+
+      **Phase 2 -- Limited A/B (4 weeks):**
+      - Deploy ML pricing to **5% of geographically isolated zones** (avoid spillover contamination)
+      - Compare vs rule-based control zones on: gross bookings, completion rate, driver earnings, rider retention
+      - Require statistical significance (p<0.05) before proceeding
+
+      **Phase 3 -- Gradual Expansion:**
+      - 5% -> 20% -> 50% -> 100% over 8 weeks
+      - At each stage, monitor for regressions
+      - **Automated rollback**: If completion rate drops >3% or rider complaints spike >2x, revert to rules within 5 minutes
+
+      **Continuous safe exploration (for RL):**
+      - Epsilon-greedy with bounded exploration: only explore prices within +-0.3 of policy recommendation
+      - Epsilon starts at 5%, decays to 1% over months
+      - Exploration data feeds back into next training cycle
+
+      **Driver incentive coordination:**
+      - Surge and driver bonuses must be coordinated -- high surge already attracts drivers, so bonuses should decrease
+      - Budget allocation: Optimize `surge_multiplier + bonus_multiplier` jointly, subject to budget constraint
+    dialogue:
+      - speaker: interviewer
+        text: "We deploy in phases: shadow mode first, then limited A/B on isolated zones, then gradual expansion with automated rollback."
+      - speaker: candidate
+        text: "Geographic isolation for A/B testing is critical -- otherwise spillover effects contaminate the results."
+      - speaker: interviewer
+        text: "Exactly. And for RL, bounded exploration keeps the agent learning without risking large marketplace disruptions."
+      - speaker: candidate
+        text: "The driver incentive coordination is interesting -- surge and bonuses need to work together, not independently."
+      - speaker: interviewer
+        text: "Right. Now let's discuss monitoring."
+    next: mon_question
+
+  # ============ MONITORING ============
+  - id: mon_question
+    stage: monitoring
+    type: question
+    label: "Monitoring Strategy"
+    speaker: interviewer
+    content: |
+      What would you monitor in production to ensure the pricing system is healthy?
+    dialogue:
+      - speaker: interviewer
+        text: "What monitoring would you implement? This system directly affects revenue and millions of riders and drivers."
+      - speaker: candidate
+        text: "We need both operational monitoring and business metric tracking."
+      - speaker: interviewer
+        text: "Walk me through your approach."
+    choices:
+      - label: "Three-layer monitoring: system, model, and business guardrails"
+        answer: |
+          I'd implement **three layers** of monitoring, each with escalating alert severity.
+
+          **Layer 1 -- System Health:**
+          - Model inference latency P99 <50ms (alert if >80ms)
+          - Cache hit rate >99% (alert if <95%)
+          - Feature freshness: All zone features <3 minutes old (alert if >5 min stale)
+          - Fallback rate: <2% of requests use rule-based fallback (alert if >5%)
+
+          **Layer 2 -- Model Performance:**
+          - **Average surge by city**: Should be 1.2-1.8x during peak, ~1.0x off-peak. Alert if city average >2.5x sustained 30 min (non-event)
+          - **Action distribution entropy**: If model collapses to always recommending one multiplier, something is wrong
+          - **OPE vs actual divergence**: Track gap between offline policy evaluation predictions and actual outcomes. If >10%, OPE methodology needs review
+          - **Reward trend**: Rolling 7-day average reward should be stable or improving
+
+          **Layer 3 -- Business Guardrails (auto-rollback triggers):**
+
+          | Guardrail | Threshold | Action |
+          |-----------|-----------|--------|
+          | Completion rate drop | >3% below baseline sustained 1 hour | **Auto-rollback** to rules |
+          | Rider complaints (pricing) | >2x normal rate | Page on-call, investigate |
+          | Rider retention (7d) | >1% degradation | Review and retrain |
+          | Driver earnings | >5% decrease vs baseline | Investigate pricing + incentive balance |
+          | Fairness audit | Price disparity across income zones >20% | Pause ML, revert to rules |
+
+          **Dashboards**: Real-time per-city heatmap showing surge levels, completion rates, revenue. Historical trend charts showing model version performance over time.
+        next: mon_terminal
+      - label: "Continuous A/B testing with marketplace health scorecards"
+        answer: |
+          I'd center monitoring on **marketplace health scorecards** and **always-on A/B testing**.
+
+          **Always-on A/B framework:**
+          - Permanently hold back 10% of zones as control (rule-based pricing)
+          - Continuously compare ML zones vs control on key metrics
+          - This catches both sudden failures and slow degradation that point metrics miss
+
+          **Marketplace Health Scorecard (updated hourly):**
+
+          | Metric | Green | Yellow | Red |
+          |--------|-------|--------|-----|
+          | Completion rate | >92% | 88-92% | <88% |
+          | Avg pickup ETA | <4 min | 4-7 min | >7 min |
+          | Rider conversion (view->request) | >60% | 50-60% | <50% |
+          | Driver utilization | >65% | 55-65% | <55% |
+          | Price stability (30-min variance) | <0.3 | 0.3-0.5 | >0.5 |
+          | Revenue vs baseline | >+2% | 0-2% | <0% |
+
+          **Rider and driver experience tracking:**
+          - NPS surveys triggered post-ride: "Was the price fair for your trip?"
+          - Driver satisfaction surveys: "Are surge incentives motivating you to drive more?"
+          - Support ticket analysis: NLP classification of "pricing" complaints with trend alerting
+
+          **Long-term health indicators:**
+          - Rider retention cohorts (weekly new rider 30-day retention rate)
+          - Driver churn rate (monthly)
+          - Market share vs competitors (quarterly)
+          - These lagging indicators catch problems that real-time metrics miss
+
+          **Feedback loop:** A/B results inform reward function tuning for RL, or feature engineering for SL. Quarterly review with business stakeholders on pricing strategy.
+        next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Surge Pricing System Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive **surge pricing system** for ride-sharing.
+
+      **Your key design decisions:**
+      - Framed as RL (sequential marketplace optimization) or supervised learning (predict optimal multiplier)
+      - Designed reward function or metrics balancing revenue, completion rate, stability, and fairness
+      - Built real-time data pipeline with Flink aggregating marketplace signals every 2 minutes
+      - Engineered marketplace signals or spatial features capturing zone interactions
+      - Selected DQN/MARL or LightGBM model architecture
+      - Deployed with zone-level caching or per-request inference with personalization
+      - Phased rollout with shadow mode, limited A/B, and automated rollback
+      - Monitored with three-layer alerting or marketplace health scorecards
+
+      **What makes this ride-sharing specific (not generic dynamic pricing):**
+      - **Two-sided marketplace**: Price affects both riders (demand) and drivers (supply)
+      - **Spatial coupling**: Neighboring zones interact -- can't optimize zones independently
+      - **Temporal dynamics**: Today's pricing affects tomorrow's rider/driver behavior
+      - **Real-time requirements**: <100ms latency, 2-minute update cycles
+      - **Fairness imperative**: Must avoid discriminatory pricing, comply with price-gouging laws
+
+      **Recommended evolution path:**
+      1. **v1 (Month 0-3)**: Rule-based with ML guardrails (LightGBM flags anomalies)
+      2. **v2 (Month 3-6)**: Supervised learning with zone-level caching
+      3. **v3 (Month 6-12)**: RL with offline training and constrained exploration
+      4. **v4 (Year 2+)**: Multi-agent RL with spatial coordination
+
+      This demonstrates deep understanding of marketplace dynamics, production ML at scale, and the balance between optimization and safety. Outstanding design!
+    dialogue:
+      - speaker: interviewer
+        text: "Outstanding work! You've covered the full system from marketplace dynamics through safe deployment and monitoring."
+      - speaker: candidate
+        text: "Thanks! The key insight is that surge pricing is really a marketplace coordination mechanism, not just a revenue maximizer."
+      - speaker: interviewer
+        text: "Exactly. And the phased rollout from rules to SL to RL shows good engineering judgment about managing risk while improving over time. Great job!"

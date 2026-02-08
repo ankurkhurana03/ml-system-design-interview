@@ -1,0 +1,733 @@
+id: insurance-claim-estimation
+title: "Insurance Claim Estimation from Photos"
+description: "Design a system to evaluate insurance claim sizes from photos of damaged objects."
+companies: ["Lemonade", "Allstate", "Progressive"]
+domains: ["Computer Vision", "Tabular/Structured"]
+root: pd_start
+
+nodes:
+  # ============ PROBLEM DEFINITION ============
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design a system that **estimates insurance claim amounts from photos** of damaged property.
+
+      **Business context:**
+      - Insurance companies process **~50M property/auto claims per year** in the US alone
+      - Traditional claims processing takes **7-14 days**: adjuster visits site, inspects damage, writes estimate, back-and-forth with repair shops
+      - **Lemonade** (insurtech) claims to process some claims in **<3 seconds** using AI
+      - The goal: Automate initial damage assessment from claimant-submitted photos, producing a **dollar estimate** that's accurate enough to fast-track simple claims
+
+      **Types of claims:**
+      - **Auto damage**: Dents, scratches, broken windshields, collision damage (most common)
+      - **Property damage**: Water damage, fire damage, storm damage, vandalism
+      - **Personal property**: Damaged electronics, furniture, jewelry
+
+      **Key challenges:**
+      - **Photo quality varies wildly**: From professional photos to blurry phone shots at night
+      - **Damage assessment requires domain expertise**: A scratch on a bumper might cost $300-$3,000 depending on the car make, paint type, and whether the bumper needs replacement vs repair
+      - **Fraud detection**: ~10% of claims contain some element of fraud (inflated damage, pre-existing damage, staged incidents)
+      - **Regulatory requirements**: Claims decisions must be explainable and auditable
+
+      Let's scope this system.
+    dialogue:
+      - speaker: interviewer
+        text: "Today we'll design a system that estimates insurance claim amounts from photos of damaged property. Insurance companies process about 50 million claims per year in the US."
+      - speaker: candidate
+        text: "Interesting. The key challenge is bridging the gap between visual damage assessment and dollar estimation, which traditionally requires human expertise."
+      - speaker: interviewer
+        text: "Exactly. And companies like Lemonade claim to process some claims in seconds using AI. We want to automate the initial damage assessment."
+      - speaker: candidate
+        text: "What about fraud? That must be a significant concern."
+      - speaker: interviewer
+        text: "About 10% of claims contain some element of fraud. The system needs to flag suspicious claims for human review. Let's scope the problem."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: info
+    label: "Problem Scope"
+    speaker: interviewer
+    content: |
+      **Refined scope -- Focus on auto damage claims:**
+      - Auto damage is the highest-volume, most standardized claim type
+      - **Input**: 3-10 photos of vehicle damage + claim metadata (vehicle make/model/year, location, date, incident description)
+      - **Output**: Estimated repair cost (dollar amount) + confidence level + damage breakdown (e.g., "bumper: $1,200, headlight: $400, labor: $800")
+
+      **System workflow:**
+      1. Claimant submits photos via mobile app
+      2. System validates photo quality (blur, lighting, coverage)
+      3. ML model detects and classifies damage regions
+      4. Cost estimation model maps damage to repair costs
+      5. **Routing decision**: Simple claims (<$3,000, high confidence) -> auto-approve; complex claims -> human adjuster
+
+      **Available data:**
+      - **Historical claims**: 5M resolved claims with photos, adjuster estimates, repair shop invoices, and final payout
+      - **Vehicle database**: Make/model/year, MSRP, paint codes, part prices (from Mitchell/CCC databases)
+      - **Repair shop data**: Labor rates by region, parts pricing, historical repair costs for similar damage
+      - **Photo metadata**: EXIF data (timestamp, location, device), photo resolution
+
+      **Key constraint:** The system is an **assistant**, not a replacement for human adjusters. It provides initial estimates to speed up processing. Complex or suspicious claims always go to humans.
+    dialogue:
+      - speaker: interviewer
+        text: "We'll focus on auto damage claims. The system takes 3-10 photos plus claim metadata and outputs an estimated repair cost with confidence."
+      - speaker: candidate
+        text: "And the routing decision is key -- simple claims get auto-approved, complex ones go to human adjusters."
+      - speaker: interviewer
+        text: "Exactly. This is an assistant, not a replacement. High confidence, low-cost claims can be fast-tracked. Everything else gets human review."
+    next: pd_formulation
+
+  - id: pd_formulation
+    stage: problem_definition
+    type: question
+    label: "ML Formulation"
+    speaker: interviewer
+    content: |
+      How should we structure the ML pipeline for estimating claim amounts from photos?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you structure the ML pipeline? This is a multi-step problem -- from photos to dollar estimates."
+      - speaker: candidate
+        text: "The two main approaches are a two-stage pipeline that first detects damage then estimates cost, or an end-to-end model that goes directly from photos to dollar amounts."
+      - speaker: interviewer
+        text: "Walk me through the trade-offs."
+    choices:
+      - label: "Two-stage: Damage detection + cost estimation pipeline"
+        answer: |
+          I'd build a **two-stage pipeline** separating damage detection from cost estimation.
+
+          **Stage 1 -- Damage Detection & Classification (Computer Vision):**
+          - Input: Vehicle photos (3-10 images per claim)
+          - Output: Detected damage regions with bounding boxes + damage type (dent, scratch, crack, shatter, deformation) + severity (minor, moderate, severe) + affected part (bumper, fender, door, hood, windshield)
+          - Model: Object detection model (YOLOv8 or Faster R-CNN) fine-tuned on damage annotations
+
+          **Stage 2 -- Cost Estimation (Tabular/Regression):**
+          - Input: Damage detections from Stage 1 + vehicle info (make/model/year) + regional labor rates
+          - Output: Estimated repair cost per damage item + total claim estimate
+          - Model: Gradient boosted regression using structured features
+
+          **Why two-stage?**
+          - **Interpretable**: "We detected a severe dent on the rear bumper ($1,200) and a cracked taillight ($400)" -- explainable to claimants and regulators
+          - **Modular**: Can improve damage detection independently from cost estimation
+          - **Leverages existing databases**: Stage 2 can look up part prices in Mitchell/CCC databases based on detected damage + vehicle type
+          - **Auditable**: Each stage's output can be reviewed by human adjusters
+
+          **Challenge**: Errors compound -- if Stage 1 misses a damage area, Stage 2 never estimates its cost. Need high recall in Stage 1 (catch all damage, even at cost of some false positives).
+        next: met_pipeline
+      - label: "End-to-end: Directly predict claim amount from photos"
+        answer: |
+          I'd build an **end-to-end model** that maps directly from photos to claim estimates.
+
+          **Architecture:**
+          - Input: Multiple photos of damaged vehicle + claim metadata (make/model/year, location)
+          - Backbone: Vision Transformer (ViT-L) or EfficientNet-V2 pretrained on ImageNet
+          - Multi-image fusion: Process each photo independently through the backbone, then fuse embeddings via attention pooling
+          - Metadata integration: Concatenate vehicle/claim features with visual embedding
+          - Output head: Regression predicting total repair cost + classification of cost bucket (low/medium/high)
+
+          **Why end-to-end?**
+          - **No annotation bottleneck**: Don't need expensive per-pixel damage annotations. Just need (photos, final_claim_amount) pairs which we have for 5M historical claims
+          - **Learns implicit features**: The model may discover visual patterns human annotators miss -- subtle frame damage visible as misalignment, paint inconsistencies indicating repainting (fraud signal)
+          - **Simpler pipeline**: One model to train, deploy, and monitor instead of two
+          - **Proven in similar domains**: Medical imaging uses end-to-end models to predict disease severity from images with excellent results
+
+          **Challenge**: End-to-end models are **less interpretable**. When the model estimates $5,000, it's hard to explain *why*. Regulators and adjusters may not accept "the neural network said so." Need to add interpretability layers (attention visualization, GradCAM).
+
+          **Hybrid approach**: Train end-to-end but add auxiliary heads for damage classification and part identification. These auxiliary outputs provide interpretability without requiring manual annotation of every damage region.
+        next: met_e2e
+
+  # ============ METRICS ============
+  - id: met_pipeline
+    stage: metrics
+    type: info
+    label: "Pipeline Metrics"
+    speaker: interviewer
+    content: |
+      For the two-stage pipeline, we need metrics for each stage plus overall system metrics.
+
+      **Stage 1 -- Damage Detection Metrics:**
+      - **mAP@0.5 (mean Average Precision)**: Standard object detection metric. Measures detection accuracy with IoU threshold of 0.5. Target: >0.75
+      - **Recall@0.5**: What percentage of actual damage regions do we detect? Target: >0.90 -- **high recall is critical** because missed damage directly causes under-estimation
+      - **Per-class precision/recall**: Track separately for each damage type (dents, scratches, cracks, shatter). Some types may be harder to detect
+      - **Part identification accuracy**: For each detected damage, do we correctly identify the vehicle part? Target: >85%
+
+      **Stage 2 -- Cost Estimation Metrics:**
+      - **MAE on repair cost**: Average absolute dollar error. Target: <$500 for claims <$5,000
+      - **MAPE**: Percentage error. Target: <20% overall, <15% for common damage types
+      - **Bias**: Systematic over or under-estimation? Under-estimation leads to customer complaints; over-estimation increases costs
+      - **Per-part accuracy**: MAE for bumper repairs, glass repairs, body panel repairs separately
+
+      **System-level metrics:**
+
+      | Metric | Target | Why It Matters |
+      |--------|--------|---------------|
+      | **Auto-approval rate** | 30-40% of claims | Efficiency gain |
+      | **Auto-approval accuracy** | <$300 error on auto-approved | Customer satisfaction |
+      | **Human review reduction** | -50% adjuster hours | Cost savings |
+      | **Processing time** | <30 seconds | Speed (vs 7-14 days) |
+      | **Customer satisfaction** | NPS >70 for auto-processed | Trust |
+      | **Fraud detection rate** | >80% of fraudulent claims flagged | Loss prevention |
+
+      The **auto-approval accuracy** is the most critical business metric. If we auto-approve a claim at $2,000 but actual repairs cost $5,000, the customer is underpaid and furious.
+    dialogue:
+      - speaker: interviewer
+        text: "For the two-stage pipeline, Stage 1 must have high recall -- missing damage directly causes underestimation."
+      - speaker: candidate
+        text: "Right, mAP and recall at IoU 0.5 for detection, then MAE and MAPE for cost estimation."
+      - speaker: interviewer
+        text: "The key business metric is auto-approval accuracy. If we auto-approve at $2,000 but repairs cost $5,000, the customer is underpaid."
+    next: data_pipeline
+
+  - id: met_e2e
+    stage: metrics
+    type: info
+    label: "End-to-End Metrics"
+    speaker: interviewer
+    content: |
+      For the end-to-end approach, metrics focus on the final dollar estimate quality.
+
+      **Primary metrics:**
+      - **MAE (Mean Absolute Error)**: Average dollar error across all claims. Target: <$600 overall
+      - **MAPE**: Target <25%. Note: MAPE is misleading for small claims ($50 error on $200 claim = 25% MAPE but is acceptable in practice)
+      - **Weighted MAE**: Weight by claim amount -- a $500 error on a $10,000 claim matters more than a $500 error on a $500 claim
+      - **Directional accuracy**: Does the model correctly predict whether a claim is above or below $3,000 (auto-approval threshold)?
+
+      **Distribution metrics:**
+      - **Quantile predictions**: Predict P10, P50, P90 of repair cost. The interval width indicates model uncertainty
+      - **Calibration**: For predicted P90, do 90% of actual costs fall below? Critical for setting claim reserves
+      - **Cost bucket accuracy**: Classify into Low (<$1K), Medium ($1-5K), High ($5-20K), Total loss (>$20K). Bucket accuracy target: >75%
+
+      **Interpretability metrics (for regulatory compliance):**
+      - **Attention heatmap quality**: Do attention maps highlight actual damage areas? Rated by human adjusters on a 1-5 scale
+      - **Explanation faithfulness**: If we mask the highlighted regions, does the prediction change appropriately? (Tests whether explanations are genuine, not post-hoc rationalization)
+
+      **System-level metrics:**
+      - Same as pipeline: auto-approval rate (30-40%), processing time (<30s), human review reduction (-50%)
+      - **Adjuster agreement**: How often does the ML estimate match the human adjuster's estimate within 20%? Target: >70% agreement
+      - **Appeal rate**: Do customers challenge ML-generated estimates more than human estimates? Should be comparable
+
+      **Fraud-specific metrics:**
+      - Precision and recall for fraud flagging. High recall (>80%) is more important than precision -- better to flag 100 claims and find 80 fraudulent than miss 20
+    dialogue:
+      - speaker: interviewer
+        text: "For end-to-end, MAE on dollar amount is primary. But we also need interpretability metrics for regulatory compliance."
+      - speaker: candidate
+        text: "Attention heatmaps should highlight actual damage areas. And explanation faithfulness tests whether the model is truly looking at damage or using shortcuts."
+      - speaker: interviewer
+        text: "Exactly. And the fraud metrics prioritize recall -- it's better to flag false positives than miss actual fraud."
+    next: data_pipeline
+
+  # ============ DATA (CONVERGED) ============
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      Let's design the data pipeline for claim estimation.
+
+      **Data sources:**
+
+      | Source | Key Fields | Volume |
+      |--------|-----------|--------|
+      | Claim photos | 3-10 photos per claim, varying quality | ~50M photos/year |
+      | Claim metadata | Vehicle make/model/year, incident description, date, location | ~5M claims/year |
+      | Adjuster estimates | Itemized damage assessment, repair/replace decisions | Structured, per-claim |
+      | Repair invoices | Actual repair costs, parts used, labor hours | Gold-standard labels |
+      | Vehicle database | Part numbers, OEM prices, paint codes | Reference data (Mitchell/CCC) |
+      | Regional rates | Labor rates by zip code, parts markup by region | Updated quarterly |
+
+      **Label construction (critical decision):**
+      - **Option 1: Adjuster estimate as label**: Available for all claims (5M). But adjusters have 10-15% error rate and systematic biases (some are conservative, others aggressive)
+      - **Option 2: Repair invoice as label**: Gold standard -- what it actually cost to fix. But only available for claims that went to repair shops (~60% of claims). Smaller dataset but more accurate
+      - **Recommendation**: Train on repair invoices as primary labels, use adjuster estimates as auxiliary labels for claims without invoices. Multi-task learning with both targets
+
+      **Photo quality challenges:**
+      - **Blur detection**: Reject photos with Laplacian variance < threshold. Request re-submission
+      - **Coverage validation**: Ensure photos show all sides of the vehicle (use a pose classifier to check coverage)
+      - **Lighting normalization**: Histogram equalization to handle under/over-exposed photos
+      - **Duplicate detection**: Same damage photographed from multiple angles is useful; but identical photos submitted twice should be flagged
+
+      **Annotation for detection models:**
+      - Need bounding box annotations of damage regions with type labels
+      - **Bootstrap approach**: Have adjusters annotate 50K claims (expensive). Train initial model. Use model to pre-annotate, have adjusters correct (much faster)
+      - Target: 200K annotated claims with ~500K damage bounding boxes
+
+      **Data quality:** Remove claims with: <3 photos, total loss (damage > vehicle value), incomplete metadata. Flag suspicious patterns (same photos submitted for different claims).
+    dialogue:
+      - speaker: interviewer
+        text: "For labels, repair invoices are the gold standard but only available for about 60% of claims. Adjuster estimates are available for all claims but have 10-15% error."
+      - speaker: candidate
+        text: "I'd use repair invoices as primary labels and adjuster estimates as auxiliary targets for the remaining claims."
+      - speaker: interviewer
+        text: "Good approach. For detection model training, we need bounding box annotations -- about 200K claims with annotated damage regions."
+      - speaker: candidate
+        text: "We can bootstrap: annotate 50K manually, train an initial model, then use the model to pre-annotate and have adjusters correct."
+    next: feat_question
+
+  # ============ FEATURES ============
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Strategy"
+    speaker: interviewer
+    content: |
+      What features would you engineer for the claim estimation system? Remember, we're combining visual information from photos with structured claim data.
+    dialogue:
+      - speaker: interviewer
+        text: "What features would you build? We're fusing visual information from photos with structured claim data."
+      - speaker: candidate
+        text: "The choice is between rich visual features from the damage detection model or emphasizing the structured vehicle and repair database features."
+      - speaker: interviewer
+        text: "Tell me about each approach."
+    choices:
+      - label: "Visual features: Damage embeddings + severity scores from detection"
+        answer: |
+          I'd extract **rich visual features** from the damage detection model as the primary signal for cost estimation.
+
+          **Damage detection outputs (per photo):**
+          - Bounding boxes with confidence scores for each damage region
+          - Damage type classification: dent, scratch, crack, shatter, deformation, missing part
+          - Severity classification: minor (cosmetic), moderate (functional), severe (structural)
+          - Affected vehicle part: bumper, fender, door panel, hood, trunk, roof, windshield, headlight, mirror
+
+          **Aggregated visual features (across all photos):**
+          - **Damage inventory**: Count of each (damage_type, severity, part) combination. E.g., "2 moderate dents on rear bumper, 1 severe crack on windshield"
+          - **Total damage area**: Estimated damaged area as percentage of vehicle surface (from bounding box sizes relative to vehicle size)
+          - **Maximum severity**: The most severe damage detected across all photos (determines if repair vs replace)
+          - **Damage spread**: How many distinct vehicle parts are damaged? (1 part vs 5 parts changes cost structure)
+
+          **Deep visual embeddings:**
+          - For each damage region, extract the penultimate layer embedding from the detection model (2048-dim)
+          - Pool across all damage regions to get a fixed-size "damage profile" vector
+          - This captures visual nuances that categorical labels miss (deep vs shallow dent, clean vs jagged crack)
+
+          **Photo quality features:**
+          - Average photo resolution, lighting score, blur score
+          - Number of photos submitted (more photos = more angles = more reliable detection)
+          - Photo coverage: Which vehicle angles are present? (front, rear, sides, damage close-ups)
+
+          These features provide a **detailed characterization of the damage** that directly maps to repair requirements.
+        next: mod_question
+      - label: "Structured features: Vehicle specs + repair database + market rates"
+        answer: |
+          I'd emphasize **structured features** from vehicle databases and repair market data.
+
+          **Vehicle specification features:**
+          - **Make/model/year**: Determines part prices. A BMW 5 Series bumper costs 3-5x a Honda Civic bumper
+          - **Vehicle segment**: Luxury, mid-range, economy. Determines labor complexity and paint quality
+          - **Body style**: Sedan, SUV, truck, coupe. Affects part availability and repair approach
+          - **Color and paint type**: Metallic, pearl, matte finishes cost 2-3x more to repair than solid colors
+          - **Vehicle age and mileage**: Older vehicles may not justify expensive repairs (total loss consideration)
+          - **OEM vs aftermarket parts availability**: If OEM parts are scarce, aftermarket alternatives change cost
+
+          **Repair database features (from Mitchell/CCC):**
+          - **Part prices**: OEM and aftermarket prices for each vehicle part. Updated monthly
+          - **Labor hours**: Standard repair time (in hours) for each damage type + vehicle type combination
+          - **Paint material costs**: Per-panel paint costs based on paint type and vehicle size
+          - **Repair vs replace thresholds**: Industry guidelines for when damage warrants part replacement vs repair
+
+          **Regional market features:**
+          - **Labor rate per hour**: Varies $50-$150/hr by zip code. Body shop labor is the largest cost component
+          - **Parts markup**: Dealer vs independent shop markup percentages
+          - **Supply chain factors**: Part availability in the region (backordered parts = higher costs)
+          - **Cost of living adjustment**: Urban vs rural repair cost differences
+
+          **Claim context features:**
+          - **Incident type**: Collision, vandalism, weather, theft recovery -- each has different damage patterns
+          - **Claimant history**: Number of prior claims, average claim size, time since last claim (fraud signal)
+          - **Policy details**: Deductible amount, coverage limits, policy age
+
+          These features capture the **economics of vehicle repair** which ultimately determines claim cost.
+        next: mod_question
+
+  # ============ MODEL ============
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Model Architecture"
+    speaker: interviewer
+    content: |
+      What model architecture would you choose for the claim estimation system?
+    dialogue:
+      - speaker: interviewer
+        text: "What model architecture would you use? This needs to combine visual and structured data effectively."
+      - speaker: candidate
+        text: "The main trade-off is between a vision-first approach using a fine-tuned CNN/ViT with metadata, or a tabular-first approach using damage detection outputs as features for gradient boosting."
+      - speaker: interviewer
+        text: "Walk me through your recommendation."
+    choices:
+      - label: "Multi-modal: Vision backbone + metadata fusion network"
+        answer: |
+          I'd build a **multi-modal architecture** that fuses visual embeddings with structured features.
+
+          **Architecture:**
+          ```
+          Photos (3-10) -> Image backbone (EfficientNet-V2-L, pretrained)
+               -> Per-image features (1280-dim each)
+               -> Attention pooling across images -> Fused visual embedding (512-dim)
+
+          Metadata -> Embedding layers (make/model/year, damage type)
+               -> FC(256) -> Metadata embedding (256-dim)
+
+          [Visual 512 | Metadata 256] -> Concat -> FC(512) -> FC(256) -> FC(1)
+                                                                    -> Quantile heads (P10, P50, P90)
+                                                                    -> Fraud classification head
+          ```
+
+          **Key design choices:**
+
+          **Multi-image attention pooling:**
+          - Each photo may show different damage from different angles
+          - Attention weights learn which photos are most informative ("close-up of damage" gets higher weight than "wide shot of car in parking lot")
+          - Handles variable number of photos (3-10) naturally
+
+          **Pretrained backbone with fine-tuning:**
+          - Start from EfficientNet-V2-L pretrained on ImageNet (general features)
+          - **Intermediate fine-tuning** on Stanford Cars + vehicle damage datasets before final fine-tuning on claim data
+          - Freeze early layers, fine-tune later layers + custom heads
+
+          **Multi-task learning:**
+          - **Primary task**: Predict repair cost (regression)
+          - **Auxiliary tasks**: Damage type classification, severity classification, fraud detection
+          - Auxiliary tasks provide richer gradients and improve the shared representation
+          - Auxiliary outputs also serve as interpretability aids
+
+          **Uncertainty estimation:**
+          - Quantile regression heads predict P10, P50, P90 of repair cost
+          - High uncertainty (wide P10-P90 interval) -> route to human adjuster
+          - **Monte Carlo dropout** at inference time for additional uncertainty estimate
+
+          **Model size**: ~200M parameters. Inference: ~500ms per claim on GPU (acceptable for <30s total processing target).
+        next: train_strategy
+      - label: "Two-model pipeline: YOLO detector + XGBoost cost estimator"
+        answer: |
+          I'd use a **two-model pipeline** with a specialized detector and a tabular cost estimator.
+
+          **Model 1 -- Damage Detector (YOLOv8-L):**
+          - Fine-tuned YOLOv8-Large on annotated damage images (200K claims, 500K bounding boxes)
+          - Outputs: Bounding boxes with class labels (dent/scratch/crack/shatter/deformation) + severity (minor/moderate/severe) + affected part + confidence score
+          - Post-processing: NMS (Non-Maximum Suppression) + confidence threshold (0.3 for high recall)
+          - Inference: ~100ms per photo -> ~500ms for 5 photos
+
+          **Model 2 -- Cost Estimator (XGBoost):**
+          - Input features (~100 dimensions):
+            - From detector: Damage inventory (count of each type-severity-part combo), total damage area fraction, max severity
+            - Vehicle: Make/model/year embedding, vehicle age, segment (luxury/economy)
+            - Repair market: Regional labor rate, part prices from Mitchell database, paint costs
+            - Claim context: Incident type, time of year
+          - Output: Predicted repair cost + quantile estimates (P10, P50, P90 via quantile regression)
+
+          **Why this pipeline?**
+          - **Best of both worlds**: YOLOv8 is state-of-the-art for object detection (fast, accurate). XGBoost is best-in-class for tabular regression
+          - **SHAP explanations**: XGBoost provides feature importance for every prediction. "This claim is $4,200 because: rear bumper replacement ($1,800 for 2024 BMW 3 Series) + paint ($600) + labor 8 hours at $125/hr ($1,000) + headlight ($800)"
+          - **Independently improvable**: Can swap YOLOv8 for newer detector without retraining cost model, and vice versa
+          - **Debuggable**: If cost estimate is wrong, check detector outputs first (missed damage?) then cost model (wrong part price?)
+
+          **Ensemble boost**: Train both XGBoost and a LightGBM. Average predictions. Ensemble typically reduces error 5-10% vs single model.
+
+          **Handling missing damage**: If a damage region is visible in one photo but occluded in another, YOLOv8 with multi-image NMS handles this -- keep the highest-confidence detection per region across all photos.
+        next: train_strategy
+
+  # ============ TRAINING ============
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: interviewer
+    content: |
+      Let's discuss training strategy for the claim estimation system.
+
+      **For the vision model (detector or end-to-end):**
+
+      **Transfer learning pipeline:**
+      1. **ImageNet pretraining** (available from model zoo) -- general visual features
+      2. **Domain adaptation** on vehicle images: Stanford Cars dataset (16K images) + vehicle damage datasets (CompCars, AI Damage Detection challenge). Teaches vehicle structure
+      3. **Fine-tuning on claim data**: 200K annotated claims. This stage teaches damage-specific features
+
+      **Data augmentation (critical for robustness):**
+      - **Geometric**: Random crop, rotation, flip, perspective warp -- handles different camera angles
+      - **Photometric**: Color jitter, brightness/contrast changes, noise injection -- handles varying photo quality
+      - **Domain-specific**: Random rain/fog overlay, varying lighting conditions, phone camera simulation
+      - **Cutout/masking**: Randomly mask image regions to prevent overfitting to background context
+
+      **For the cost estimation model:**
+      - **Train/test split**: Temporal split by claim date (train on years 1-4, test on year 5). Never random -- repair costs inflate over time
+      - **Loss function**: Huber loss (robust to outlier claims like total losses that slip through filters)
+      - **Target transformation**: Log-transform repair costs (right-skewed distribution). Predict log(cost), exponentiate at inference
+
+      **Handling class imbalance in damage detection:**
+      - Scratches are 5x more common than structural deformations
+      - Use **focal loss** to down-weight easy examples (clear scratches) and focus on hard examples (subtle structural damage)
+      - Oversample rare damage types during training
+
+      **Fraud-aware training:**
+      - Add a fraud classification head to the multi-task setup
+      - Labels: Claims flagged by Special Investigations Unit (SIU) as confirmed fraud
+      - The model learns both "what does real damage look like?" and "what does suspicious damage look like?"
+
+      **Validation strategy:**
+      - Hold out 20% of claims by date (most recent) for validation
+      - Evaluate separately on: low-cost (<$3K), medium ($3-10K), high (>$10K) claims
+      - Ensure validation set includes diverse vehicle types, damage types, and geographic regions
+    dialogue:
+      - speaker: interviewer
+        text: "Transfer learning is essential: ImageNet pretraining, domain adaptation on vehicle images, then fine-tuning on claim data."
+      - speaker: candidate
+        text: "And aggressive data augmentation handles the photo quality variation -- different camera angles, lighting conditions, resolution."
+      - speaker: interviewer
+        text: "For cost estimation, we use temporal splits and log-transform the target since repair costs are right-skewed."
+      - speaker: candidate
+        text: "The fraud-aware training is smart -- multi-task learning that teaches both damage assessment and suspicious pattern detection."
+      - speaker: interviewer
+        text: "Exactly. Let's discuss deployment."
+    next: deploy_question
+
+  # ============ DEPLOYMENT ============
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Deployment Architecture"
+    speaker: interviewer
+    content: |
+      How would you deploy this system to process claims in real-time from mobile app submissions?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you deploy this to handle real-time mobile submissions? Remember the target is under 30 seconds per claim."
+      - speaker: candidate
+        text: "The main architectural choice is between processing everything server-side or splitting work between the mobile device and the cloud."
+      - speaker: interviewer
+        text: "Consider the trade-offs for user experience and accuracy."
+    choices:
+      - label: "Cloud-based pipeline with async processing"
+        answer: |
+          I'd process everything **server-side** with an asynchronous pipeline for reliability and accuracy.
+
+          **Architecture:**
+          ```
+          Mobile App -> Photo Upload (S3) -> API Gateway -> Claim Processing Queue (SQS)
+               -> Lambda: Photo Validation -> GPU Service: Damage Detection
+               -> Cost Estimation Service -> Results API -> Push notification to user
+          ```
+
+          **Processing flow (target: <30 seconds end-to-end):**
+          1. **Photo upload** (5-10s): Claimant uploads 3-10 photos. Client-side pre-validation (resolution >1MP, not pure black/white)
+          2. **Photo quality check** (2s): Server validates blur, lighting, coverage. Request re-takes if quality is insufficient
+          3. **Damage detection** (3-5s): YOLOv8 or vision model processes all photos on GPU
+          4. **Cost estimation** (1s): XGBoost or regression model combines damage features + vehicle/market data
+          5. **Routing decision** (0.5s): Auto-approve if estimate <$3K and confidence >0.85, else route to human
+          6. **Result delivery** (1s): Push notification to claimant with estimate
+
+          **GPU infrastructure:**
+          - Model deployed on **NVIDIA T4 or A10** instances via TorchServe or Triton Inference Server
+          - Auto-scaling based on claim submission rate (peaks after storms, during commute hours)
+          - **GPU batching**: Accumulate photos from multiple claims, batch process for efficiency
+          - Minimum 2 replicas for availability
+
+          **Benefits of cloud-only:**
+          - Full model accuracy (no model compression artifacts)
+          - Single deployment target (easier to update models)
+          - All processing logged for audit trail (regulatory requirement)
+          - Can use larger, more accurate models since GPU compute is available
+
+          **Fallback**: If GPU service is down, queue claims for processing when service recovers. Notify user: "Your claim is being processed and you'll receive an estimate within 2 hours."
+        next: deploy_fraud
+      - label: "Edge + cloud hybrid: On-device guidance + cloud estimation"
+        answer: |
+          I'd use a **hybrid approach** with on-device photo guidance and cloud-based estimation.
+
+          **On-device (mobile app):**
+          - **Photo guidance model** (TFLite/CoreML, <30MB): Lightweight model that runs in real-time on the phone's camera feed
+            - Detects vehicle in frame, guides user to capture all angles ("Move left to capture the rear view")
+            - Real-time blur detection (reject blurry captures immediately)
+            - Basic damage detection: Highlights damage regions on screen so user knows to capture close-ups
+          - **Benefits**: Ensures photo quality at capture time (much better than rejecting after upload), interactive UX
+
+          **Cloud-side:**
+          - Full damage detection + cost estimation pipeline (same as cloud-only approach)
+          - But receives **higher quality photos** because on-device guidance ensured good angles and focus
+
+          **Architecture:**
+          ```
+          On-Device (TFLite):
+          Camera feed -> Guidance model -> Capture high-quality photos -> Upload to cloud
+
+          Cloud (GPU):
+          Photos + metadata -> Full pipeline -> Estimate -> Push to app
+          ```
+
+          **On-device model optimization:**
+          - **MobileNet-V3 backbone**: Designed for mobile inference (<10ms per frame)
+          - **Quantization**: INT8 quantization reduces model size from ~100MB to ~25MB with minimal accuracy loss
+          - **ONNX/TFLite export**: Cross-platform compatibility (iOS and Android)
+          - **Runs at 30fps**: Smooth real-time camera guidance
+
+          **Benefits of hybrid:**
+          - **Better photo quality**: Users capture the right angles with damage clearly visible. Reduces re-submission requests by 60%
+          - **Faster processing**: Cloud model runs faster on high-quality input images
+          - **Engaging UX**: Real-time AR overlay showing detected damage areas -- feels "smart"
+          - **Privacy**: Only final photos are uploaded, not continuous camera feed
+
+          **Trade-off**: More complex deployment (mobile + cloud). Model updates require app store releases for on-device model (mitigated with OTA model updates via Firebase ML).
+        next: deploy_fraud
+
+  - id: deploy_fraud
+    stage: deployment
+    type: info
+    label: "Fraud Detection Integration"
+    speaker: interviewer
+    content: |
+      Before monitoring, let's address the **fraud detection** component that's integrated into the deployment pipeline.
+
+      **Fraud signals the model can detect:**
+
+      | Signal | Detection Method | Prevalence |
+      |--------|-----------------|-----------|
+      | **Pre-existing damage** | Photo metadata analysis (EXIF dates inconsistent with claim date) | ~3% of claims |
+      | **Staged damage** | Unusual damage patterns (too uniform, inconsistent with incident type) | ~2% |
+      | **Inflated claims** | Damage visible in photos doesn't match claimed severity | ~4% |
+      | **Photo manipulation** | Error level analysis (ELA), metadata inconsistencies | ~1% |
+      | **Repeat fraud** | Same vehicle/claimant with suspiciously frequent claims | ~2% |
+
+      **Fraud scoring pipeline:**
+      1. **Photo forensics**: Run ELA (Error Level Analysis) to detect edited regions. Check EXIF metadata for timestamp/location consistency
+      2. **Damage consistency**: Does the damage match the reported incident type? Rear-end collision shouldn't have front damage
+      3. **Historical patterns**: Cross-reference claimant's history. Multiple claims in 12 months? Similar damage patterns?
+      4. **Cost anomaly**: Is the claimed amount significantly above the model's estimate? Flag if >2x model estimate
+      5. **Combined fraud score**: Ensemble the above signals into a single fraud probability. Score >0.7 -> route to Special Investigations Unit (SIU)
+
+      **Important**: The fraud model must be **carefully tuned for fairness**. Fraud flags must not correlate with protected attributes (race, zip code as proxy for income). Regular fairness audits required.
+
+      **Human-in-the-loop**: All fraud flags go to human investigators. The model suggests investigation, never makes accusation.
+    dialogue:
+      - speaker: interviewer
+        text: "Fraud detection is integrated into the pipeline. Photo forensics, damage consistency checks, and historical pattern analysis."
+      - speaker: candidate
+        text: "The EXIF metadata check is clever -- if the photo was taken 2 weeks before the reported incident, that's a strong fraud signal."
+      - speaker: interviewer
+        text: "Exactly. And the fairness consideration is critical -- fraud flags must not correlate with protected attributes."
+      - speaker: candidate
+        text: "All fraud flags go to human investigators. The model suggests, never accuses."
+      - speaker: interviewer
+        text: "Right. Now let's discuss monitoring."
+    next: mon_question
+
+  # ============ MONITORING ============
+  - id: mon_question
+    stage: monitoring
+    type: question
+    label: "Monitoring Strategy"
+    speaker: interviewer
+    content: |
+      What monitoring would you implement for the claim estimation system?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you monitor this system? It directly affects claim payouts and customer experience."
+      - speaker: candidate
+        text: "We need both operational monitoring and claim outcome tracking."
+      - speaker: interviewer
+        text: "Tell me your approach."
+    choices:
+      - label: "Claim accuracy monitoring with adjuster feedback loop"
+        answer: |
+          I'd implement **continuous accuracy monitoring** using human adjuster feedback and repair outcomes as ground truth.
+
+          **Accuracy tracking (as ground truth becomes available):**
+          - **ML estimate vs adjuster estimate**: For human-reviewed claims, compare ML's initial estimate with the adjuster's final estimate. Track agreement rate (within 20%) over time. Target: >70%
+          - **ML estimate vs repair invoice**: For completed repairs, compare ML estimate with actual cost. This is the ultimate accuracy metric. Track MAE and MAPE monthly
+          - **Auto-approved claim accuracy**: Specifically track claims that were auto-approved. If actual repair costs significantly exceed ML estimates, the auto-approval threshold is too aggressive
+
+          **Segment-level monitoring:**
+          - By **vehicle make/model**: Some vehicles may be systematically mispredicted (new models not in training data, luxury vehicles with expensive parts)
+          - By **damage type**: Track accuracy separately for dents, glass, structural damage. Identify weak spots
+          - By **claim amount bucket**: Low (<$3K), medium ($3-10K), high (>$10K). Most important to be accurate on medium claims (at the auto-approval boundary)
+
+          **Detection model monitoring:**
+          - **Missed damage rate**: Sample 100 claims weekly. Have adjusters review photos and ML detections. What percentage of damage regions did the model miss?
+          - **False positive rate**: How many non-damage regions were flagged as damage?
+          - **Part identification accuracy**: Is the model correctly identifying which vehicle part is damaged?
+
+          **Adjuster feedback loop:**
+          - When adjusters override ML estimates, log the override and reason
+          - Analyze overrides monthly: Are there systematic patterns? (e.g., model consistently underestimates Mercedes repairs)
+          - Use overrides as additional training data to improve the model
+
+          **Automated retraining:** Trigger when MAE increases >10% or when a new vehicle model year has consistently poor estimates.
+        next: mon_terminal
+      - label: "Business impact monitoring with customer satisfaction tracking"
+        answer: |
+          I'd focus monitoring on **business outcomes** and **customer experience** metrics.
+
+          **Claims processing metrics:**
+
+          | Metric | Before ML | Target | Alert Threshold |
+          |--------|-----------|--------|----------------|
+          | **Average processing time** | 10 days | <2 days | >3 days |
+          | **Auto-approval rate** | 0% | 35% | <25% or >45% |
+          | **Cost per claim** | $300 (adjuster time) | $80 (blended) | >$120 |
+          | **Adjuster workload** | 15 claims/day | 25 claims/day | <20 |
+
+          **Customer experience metrics:**
+          - **NPS for ML-processed claims**: Survey claimants whose claims were auto-processed. Target NPS >70. Compare with human-processed claims
+          - **Appeal rate**: Percentage of claimants who dispute the ML estimate. Should be comparable to human adjuster dispute rates (<5%)
+          - **Re-submission rate**: How often do claimants need to re-submit photos? Target <15% (indicates photo guidance is working)
+          - **Time-to-resolution satisfaction**: "Were you satisfied with how quickly your claim was processed?" Scale 1-5
+
+          **Financial impact tracking:**
+          - **Loss ratio impact**: Are ML-estimated claims resulting in higher or lower loss ratios vs human-estimated claims?
+          - **Leakage**: Are auto-approved claims systematically underpaid (claimant supplements the claim later) or overpaid (paying more than actual repair cost)?
+          - **Fraud savings**: Dollars saved by ML-flagged fraud investigations vs cost of running the fraud detection system
+
+          **A/B testing:**
+          - Route 50% of incoming claims to ML-assisted pipeline, 50% to traditional adjuster pipeline
+          - Compare: processing time, accuracy (vs repair invoices), customer satisfaction, cost per claim, fraud detection rate
+          - Run for 6+ months to capture seasonal patterns and diverse claim types
+
+          **Regulatory compliance monitoring:**
+          - Monthly fairness audit: Claim approval rates and payment amounts across demographic groups must not show disparate impact
+          - Model explanation quality audit: Sample 50 claims, have compliance team review whether explanations are sufficient
+          - Data retention and privacy compliance: Ensure photos and data are stored/deleted per regulation
+        next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Claim Estimation Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive **insurance claim estimation system** from photos.
+
+      **Your key design decisions:**
+      - Chose two-stage pipeline (detect + estimate) or end-to-end (photos -> dollars)
+      - Defined mAP/recall for detection + MAE/MAPE for cost, with auto-approval rate as business KPI
+      - Addressed photo quality, label construction (repair invoices vs adjuster estimates), and annotation bootstrapping
+      - Engineered visual features (damage embeddings, severity) or structured features (vehicle specs, repair databases, regional rates)
+      - Selected multi-modal fusion network or YOLO + XGBoost pipeline
+      - Deployed via cloud-only or edge+cloud hybrid with on-device photo guidance
+      - Integrated fraud detection with EXIF analysis, damage consistency, and pattern matching
+      - Monitored with adjuster feedback loop or business impact tracking
+
+      **What makes this problem unique:**
+      - **Multi-modal**: Requires fusing visual (photos) and structured (vehicle specs, repair prices) data
+      - **Domain expertise**: Mapping visual damage to dollar costs requires repair industry knowledge
+      - **Regulatory**: Claims decisions must be explainable, auditable, and fair across demographic groups
+      - **Fraud adversarial**: ~10% of claims have fraudulent elements. The system must be robust to manipulation
+      - **Human-in-the-loop**: This is an assistant, not a replacement. Complex claims always need human judgment
+
+      **Evolution path:**
+      1. **v1 (Month 0-4)**: YOLO damage detector + XGBoost cost estimator. Cloud-only. Conservative auto-approval (<$2K, >0.9 confidence)
+      2. **v2 (Month 4-8)**: Multi-modal fusion model. Fraud detection integration. Expand auto-approval threshold
+      3. **v3 (Month 8-12)**: On-device photo guidance. Probabilistic cost estimation. Adjuster feedback retraining
+      4. **v4 (Year 2+)**: Extend to property damage and personal property claims. Video damage assessment
+
+      This demonstrates understanding of production computer vision, multi-modal ML, domain-specific cost modeling, and the critical role of human oversight in high-stakes decisions. Great job!
+    dialogue:
+      - speaker: interviewer
+        text: "Excellent work! You've addressed the unique challenges of claim estimation -- multi-modal data, domain expertise, fraud, and regulatory requirements."
+      - speaker: candidate
+        text: "Thanks! The key insight is that this is fundamentally a human-in-the-loop system. The ML automates the routine cases to free up adjusters for the complex ones."
+      - speaker: interviewer
+        text: "Exactly. And the interpretability requirements -- being able to explain why we estimated $4,200 for this claim -- are just as important as accuracy. Great job!"

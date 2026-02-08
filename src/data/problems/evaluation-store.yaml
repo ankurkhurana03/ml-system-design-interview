@@ -1,0 +1,666 @@
+id: evaluation-store
+title: "Evaluation Store"
+description: "Create an evaluation store to track and compare model performance across experiments."
+companies: ["Google", "Netflix", "Airbnb"]
+domains: ["MLOps/Infrastructure"]
+root: pd_start
+
+nodes:
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design an **Evaluation Store** - a centralized system for tracking, comparing, and analyzing ML model performance across experiments, similar to what Google, Netflix, and Airbnb have built internally.
+
+      **Context**: The organization has **200+ ML models** across 15 teams. Each team runs **50-200 experiments per month** (hyperparameter tuning, feature changes, architecture changes, data updates). Current problems:
+
+      - **No single source of truth**: Evaluation results are scattered across Jupyter notebooks, spreadsheets, and Slack messages. Nobody can answer "what's the best model for fraud detection and why?"
+      - **Inconsistent evaluation**: Different teams evaluate on different test sets, with different metrics, making comparison impossible. The recommendation team uses NDCG@10, the search team uses MRR, and nobody is sure they're measuring on the same data
+      - **No regression detection**: When a model update is deployed, there's no systematic way to verify it didn't regress on important slices (e.g., improved overall accuracy but degraded for a minority user segment)
+      - **Evaluation debt**: Evaluation code is copy-pasted between notebooks, leading to bugs. A team recently discovered their evaluation metric had a bug for 6 months
+
+      **Scale:**
+      - 200+ models, 10,000+ experiments per month
+      - 500+ unique metric definitions
+      - Evaluation results on 50+ test datasets
+      - Need to store and query 3+ years of historical evaluation data
+      - 200 data scientists and ML engineers as users
+    dialogue:
+      - speaker: interviewer
+        text: "We're building an evaluation store. The core problem is that evaluation results are scattered and inconsistent across teams."
+      - speaker: candidate
+        text: "What's the impact of this inconsistency?"
+      - speaker: interviewer
+        text: "Real incidents. A model was deployed that regressed on a minority segment because evaluation only checked aggregate metrics. And a team ran on a buggy evaluation metric for 6 months."
+      - speaker: candidate
+        text: "So the evaluation store needs to standardize evaluation methodology, not just store results."
+      - speaker: interviewer
+        text: "Exactly. It's about evaluation quality and consistency, not just storage."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: question
+    label: "System Scope"
+    speaker: interviewer
+    content: |
+      What should the evaluation store's primary responsibility be? Should it focus on storing results or running evaluations?
+    dialogue:
+      - speaker: interviewer
+        text: "Should the evaluation store be a passive results database or an active evaluation execution engine?"
+      - speaker: candidate
+        text: "This is similar to the feature store debate - compute-centric versus storage-centric."
+    choices:
+      - label: "Active evaluation engine (compute + store)"
+        answer: |
+          I'd build an **active evaluation engine** that both runs evaluations and stores results. The store doesn't just record metrics - it computes them from standardized evaluation pipelines.
+
+          **Core idea**: Teams submit models (or predictions) to the evaluation store, and it runs standardized evaluation pipelines against registered test sets. Results are computed, validated, and stored - all from the same code, on the same data, every time.
+
+          **Why active?**
+          - **Eliminates inconsistency by design**: Every evaluation runs the same metric code on the same test data. Two teams comparing fraud models get exactly comparable results because the system, not humans, computed both
+          - **Catches bugs early**: Metric implementations are centralized, reviewed, and tested. When a metric bug is found, fixing it in one place recomputes all affected evaluations
+          - **Slice-level evaluation is automatic**: Every evaluation automatically computes metrics on predefined slices (demographic groups, geographic regions, device types). No team can accidentally skip slice analysis
+          - **Reproducibility**: Given a model version and test dataset version, the evaluation store produces exactly the same results every time
+
+          **Architecture**:
+          1. Model registry integration: Teams register models or submit prediction files
+          2. Evaluation pipeline: Standardized pipelines run metrics on registered test datasets
+          3. Slice analyzer: Automatically evaluates on predefined demographic and behavioral slices
+          4. Results store: Structured storage of all metrics with full provenance
+          5. Comparison engine: Statistical comparison tools for A/B model comparisons
+
+          **Trade-off**: Teams lose flexibility to run custom evaluations their way. Requires upfront investment in standardizing metrics and test sets. But the consistency guarantee is worth the rigidity for production-critical models.
+        next: met_framework
+      - label: "Results database with validation (store + validate)"
+        answer: |
+          I'd build a **results database with validation** - a system that stores evaluation results from any source but enforces quality standards through validation.
+
+          **Core idea**: Teams run evaluations in their preferred tools (notebooks, scripts, CI/CD pipelines) and push results to the evaluation store via an SDK. The store validates results against registered schemas, enriches them with metadata, and makes them searchable and comparable.
+
+          **Why store-with-validation?**
+          - **Lower adoption barrier**: Teams keep their existing evaluation workflows. Just add a `eval_store.log(results)` call at the end
+          - **Flexibility**: Supports any evaluation framework (scikit-learn, PyTorch, custom code). Not opinionated about how evaluation runs
+          - **Gradual standardization**: Start by collecting results, then gradually encourage standardization through tooling and best practices
+          - **Handles diverse model types**: Classification, regression, ranking, generative, RL - each has unique evaluation needs that a one-size-fits-all engine can't easily handle
+
+          **Validation layer:**
+          - **Schema validation**: Each metric has a registered schema (name, type, range, description). Results that don't match the schema are rejected
+          - **Test set fingerprinting**: When results are submitted, the test set is identified by a content hash. If two teams claim to evaluate on "fraud_test_v2" but their data hashes differ, the store flags it
+          - **Statistical validation**: Alert if results are statistically implausible (e.g., AUC > 1.0, accuracy jumps from 60% to 99% between experiments)
+          - **Slice requirements**: For production models, the store requires evaluation results on mandated slices. Submission is rejected if required slices are missing
+
+          **SDK for common frameworks:**
+          ```python
+          from eval_store import EvalStoreClient
+          client = EvalStoreClient()
+          client.log_evaluation(
+              model_id="fraud_v5",
+              dataset_id="fraud_test_2024q2",
+              metrics={"auc": 0.943, "precision@95recall": 0.87},
+              slices={"region": {"US": {"auc": 0.95}, "EU": {"auc": 0.92}}},
+              metadata={"git_sha": "abc123", "author": "alice"}
+          )
+          ```
+
+          **Trade-off**: Can't guarantee consistency as strongly as an active engine. Two teams might implement the same metric slightly differently. Mitigate with shared metric libraries and test set fingerprinting.
+        next: met_framework
+
+  - id: met_framework
+    stage: metrics
+    type: info
+    label: "Metrics Framework"
+    speaker: interviewer
+    content: |
+      Let's design the metrics framework - how metrics are defined, versioned, and computed.
+
+      **Metric registry:**
+      Every metric used in the organization is registered in a central catalog:
+      - **Name**: Unique identifier (e.g., `classification.auc_roc`, `ranking.ndcg@10`, `regression.rmse`)
+      - **Definition**: Mathematical definition in LaTeX + plain English description
+      - **Implementation**: Reference implementation in Python (the canonical code)
+      - **Parameters**: Configurable parameters (e.g., k for NDCG@k, threshold for precision@threshold)
+      - **Version**: Semantic versioning. Bug fixes increment patch, definition changes increment major
+      - **Owner**: Team responsible for maintaining the metric
+      - **Applicable model types**: Which model types this metric applies to (classification, ranking, etc.)
+
+      **Standard metric categories:**
+      - **Classification**: AUC-ROC, AUC-PR, precision, recall, F1, accuracy, log-loss, calibration error
+      - **Ranking**: NDCG@k, MRR, MAP, precision@k, recall@k
+      - **Regression**: RMSE, MAE, MAPE, R-squared, quantile loss
+      - **Generative**: BLEU, ROUGE, BERTScore, human evaluation scores, toxicity, hallucination rate
+      - **Fairness**: Demographic parity, equalized odds, calibration across groups
+      - **Operational**: Latency impact, model size, memory usage, throughput
+
+      **Metric suites**: Predefined bundles of metrics for common use cases:
+      - `binary_classification_suite`: AUC-ROC, AUC-PR, precision@0.5, recall@0.5, calibration_error, fairness_metrics
+      - `ranking_suite`: NDCG@5, NDCG@10, MRR, coverage, diversity
+      - `production_readiness_suite`: All domain metrics + latency + model_size + fairness
+
+      **Metric computation is deterministic**: Given the same predictions, test set, and metric version, the result is always identical. Random seeds are fixed. Bootstrapped confidence intervals use the same seeds.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle the 500+ unique metric definitions across the organization?"
+      - speaker: candidate
+        text: "A centralized metric registry with versioned definitions, reference implementations, and standard metric suites for common use cases."
+      - speaker: interviewer
+        text: "What about metric bugs? You mentioned a team had a buggy metric for 6 months."
+      - speaker: candidate
+        text: "Centralized reference implementations that are code-reviewed and tested. When a bug is found, fix it in one place and re-run affected evaluations. The metric version increments so everyone knows which version they used."
+      - speaker: interviewer
+        text: "Good. Deterministic computation is also important."
+      - speaker: candidate
+        text: "Absolutely. Same predictions, same test set, same metric version must always produce the same number. No randomness in evaluation."
+    next: data_management
+
+  - id: data_management
+    stage: data
+    type: info
+    label: "Test Set Management"
+    speaker: interviewer
+    content: |
+      Let's discuss how we manage the test datasets that evaluations run against.
+
+      **Test set registry:**
+      Each test dataset is a versioned, immutable artifact:
+      - **ID**: Unique identifier (e.g., `fraud_test_2024q2_v3`)
+      - **Content hash**: SHA-256 of the dataset content. Used to verify identity regardless of file location
+      - **Schema**: Column names, types, and descriptions. Label column explicitly identified
+      - **Size**: Number of examples, class distribution, slice composition
+      - **Slice definitions**: Predefined demographic and behavioral slices (e.g., "age_18_25", "device_mobile", "region_eu")
+      - **Creation metadata**: How it was created, from what source, by whom, any filtering/sampling applied
+      - **Temporal context**: Time period the data covers. Critical for detecting temporal leakage
+
+      **Test set versioning:**
+      - Test sets are **immutable** once registered. Creating a new version requires creating a new dataset with a new ID
+      - Version history tracks changes: "v3 added 10K examples from Q2 2024 to improve coverage of new fraud patterns"
+      - Old versions are preserved for reproducibility. Can always re-evaluate against the same test set
+
+      **Slice definitions** (critical for fairness and robustness):
+      - **Demographic slices**: Age groups, gender, geographic region, language
+      - **Behavioral slices**: New vs. returning users, high-value vs. low-value, mobile vs. desktop
+      - **Temporal slices**: Weekday vs. weekend, business hours vs. off-hours, seasonal
+      - **Difficulty slices**: Easy vs. hard examples (based on baseline model confidence)
+      - Each slice must have a minimum of 100 examples for statistically meaningful evaluation
+
+      **Golden test sets**: For each model domain, maintain a "golden" test set that:
+      - Is curated by domain experts
+      - Covers all important slices with adequate representation
+      - Is updated quarterly to reflect current data distribution
+      - Serves as the canonical evaluation benchmark for model comparison
+    dialogue:
+      - speaker: interviewer
+        text: "How do you ensure everyone evaluates on the same test data?"
+      - speaker: candidate
+        text: "Immutable, content-hashed test datasets in a registry. If two teams reference the same dataset ID, the content hash guarantees they're using identical data."
+      - speaker: interviewer
+        text: "What about slice-level evaluation?"
+      - speaker: candidate
+        text: "Predefined slice definitions registered with each test set. Demographic, behavioral, temporal, and difficulty slices. Each must have at least 100 examples for statistical significance."
+      - speaker: interviewer
+        text: "And test set freshness?"
+      - speaker: candidate
+        text: "Golden test sets are updated quarterly to reflect current data distribution. But old versions are preserved for reproducibility."
+    next: data_question
+
+  - id: data_question
+    stage: data
+    type: question
+    label: "Comparison Methodology"
+    speaker: interviewer
+    content: |
+      How would you handle model comparison? "Is model A better than model B?" is surprisingly nuanced.
+    dialogue:
+      - speaker: interviewer
+        text: "When a team claims their new model is better, how does the evaluation store validate that claim?"
+      - speaker: candidate
+        text: "We need statistical rigor in model comparison, not just looking at raw metric differences."
+    choices:
+      - label: "Statistical significance testing (bootstrap + correction)"
+        answer: |
+          I'd implement **rigorous statistical comparison** using bootstrap confidence intervals with multiple testing correction.
+
+          **Bootstrap comparison methodology:**
+          1. Given two models' predictions on the same test set, compute the metric difference (e.g., model_B_AUC - model_A_AUC = +0.3%)
+          2. Generate 10,000 bootstrap samples by sampling test examples with replacement
+          3. Compute the metric difference on each bootstrap sample
+          4. Construct 95% confidence interval for the metric difference
+          5. If CI doesn't include 0, the difference is statistically significant at p<0.05
+
+          **Multiple testing correction:**
+          - When comparing across 10+ metrics and 20+ slices, the probability of a false positive is high
+          - Apply **Bonferroni correction** or **Benjamini-Hochberg FDR control** to adjust significance thresholds
+          - Example: With 50 comparisons (5 metrics * 10 slices), Bonferroni requires p < 0.001 per comparison to achieve overall p < 0.05
+
+          **Practical significance vs. statistical significance:**
+          - A 0.01% AUC improvement might be statistically significant on a large test set but practically meaningless
+          - Define **minimum meaningful effect sizes** per metric (e.g., AUC improvement must be >0.1% to matter for fraud detection)
+          - Report both statistical significance AND practical significance
+
+          **Comparison report format:**
+          ```
+          Model B vs Model A:
+          - AUC: +0.3% (95% CI: [+0.1%, +0.5%]) - Significant & Meaningful
+          - Precision@95recall: +1.2% (95% CI: [+0.4%, +2.0%]) - Significant & Meaningful
+          - Slice "age_18_25": -0.8% (95% CI: [-1.5%, -0.1%]) - Significant REGRESSION
+          Overall: MIXED - improves aggregate but regresses on young users
+          ```
+
+          **Advantages**: Gold standard statistical methodology. Clear, defensible conclusions. Prevents teams from deploying models based on noise.
+        next: feat_slicing
+      - label: "Multi-objective Pareto analysis"
+        answer: |
+          I'd implement **multi-objective Pareto analysis** to handle the reality that models trade off between multiple metrics simultaneously.
+
+          **The problem with single-metric comparison:** "Is model A better than B?" assumes one metric matters. In reality, models trade off:
+          - Accuracy vs. latency (more accurate model might be slower)
+          - Precision vs. recall (different operating points serve different use cases)
+          - Overall accuracy vs. fairness (improving overall might degrade for minority groups)
+          - Performance vs. cost (bigger model is better but more expensive to serve)
+
+          **Pareto frontier analysis:**
+          1. Define the metric axes for comparison (e.g., AUC, latency, model_size)
+          2. Plot all model candidates in this multi-dimensional metric space
+          3. Identify the **Pareto frontier**: models where no other model is better on ALL metrics simultaneously
+          4. Any model not on the frontier is **dominated** (another model is better on every metric) and can be eliminated
+          5. Choosing among Pareto-optimal models requires human judgment about trade-off preferences
+
+          **Weighted scoring:**
+          - For automated deployment decisions, define weighted metric scores:
+          ```
+          deployment_score = 0.5 * normalized_auc + 0.2 * normalized_latency + 0.15 * normalized_fairness + 0.15 * normalized_cost
+          ```
+          - Weights are configured per model domain (fraud cares most about recall, search cares about latency)
+          - The evaluation store computes and ranks by deployment score
+
+          **Regression guardrails:**
+          - Regardless of overall improvement, block deployment if ANY metric drops below a minimum threshold
+          - Example: "Model B improves AUC by 2% but degrades fairness metric below 0.8. Deployment BLOCKED."
+          - **Mandatory non-regression metrics**: Defined per model. Must pass all guardrails before deployment approval
+
+          **Visualization**: Interactive Pareto frontier plots where users can explore trade-offs. Select metrics for axes, filter by model family, highlight Pareto-optimal models.
+
+          **Advantages**: Handles real-world multi-metric trade-offs naturally. Prevents naive "pick the highest AUC" decisions that ignore latency, fairness, and cost.
+        next: feat_slicing
+
+  - id: feat_slicing
+    stage: features
+    type: info
+    label: "Slice Analysis Engine"
+    speaker: interviewer
+    content: |
+      Let's design the slice analysis engine - the component that prevents models from silently regressing on important subgroups.
+
+      **Why slice analysis matters:**
+      A model that improves overall AUC from 0.92 to 0.94 might have degraded from 0.88 to 0.75 for elderly users. Without slice analysis, this regression goes undetected until elderly users complain (or worse, are harmed).
+
+      **Automatic slice analysis pipeline:**
+      1. **For every evaluation**, compute metrics on each predefined slice
+      2. **Compare against baseline** (production model) on each slice
+      3. **Flag regressions**: Any slice with >2% degradation is flagged, regardless of overall improvement
+      4. **Generate slice analysis report**: Visual comparison of per-slice metrics between candidate and baseline
+
+      **Slice discovery** (automated):
+      - Beyond predefined slices, use **SliceFinder** (Chung et al., 2019) algorithms to automatically discover underperforming subgroups
+      - Algorithm: Decision tree on (features, model_correct) to find feature combinations that predict model errors
+      - Example output: "Model performs 15% worse on mobile users from Brazil who signed up in the last 30 days"
+      - Human review of auto-discovered slices to determine which are meaningful
+
+      **Fairness-specific slices:**
+      - **Protected attributes**: Race, gender, age, disability status (where available)
+      - **Proxy attributes**: Zip code (proxy for race/income), device type (proxy for income)
+      - **Intersectional slices**: Combined attributes (e.g., elderly women, young minority users)
+      - For each protected attribute, compute fairness metrics: demographic parity, equalized odds, calibration difference
+
+      **Minimum sample size enforcement:**
+      - Slices with <100 examples get a "low confidence" warning
+      - Slices with <30 examples are excluded from automated regression checks (too noisy)
+      - Report sample sizes alongside all slice metrics
+
+      **Historical slice tracking:**
+      - Track per-slice metrics across model versions and time
+      - Visualization: Per-slice trend lines showing whether specific subgroups are improving or degrading over releases
+      - Alert if a slice consistently underperforms across multiple model versions (systemic issue)
+    dialogue:
+      - speaker: interviewer
+        text: "How do you prevent models from silently regressing on important subgroups?"
+      - speaker: candidate
+        text: "Mandatory slice analysis for every evaluation. Any slice with more than 2% degradation is flagged, even if overall metrics improve."
+      - speaker: interviewer
+        text: "What about slices you didn't think to check?"
+      - speaker: candidate
+        text: "Automated slice discovery using decision trees that find feature combinations predicting model errors. The system finds underperforming subgroups you didn't know to look for."
+      - speaker: interviewer
+        text: "And fairness?"
+      - speaker: candidate
+        text: "Fairness metrics computed on protected attributes and proxy attributes for every evaluation. Including intersectional slices, which often reveal problems hidden in individual attribute analysis."
+    next: mod_system
+
+  - id: mod_system
+    stage: model
+    type: question
+    label: "System Architecture"
+    speaker: interviewer
+    content: |
+      How would you architect the evaluation store system?
+    dialogue:
+      - speaker: interviewer
+        text: "What's the overall system architecture? How do the components fit together?"
+      - speaker: candidate
+        text: "The architecture depends on whether we prioritize evaluation execution speed or query flexibility."
+    choices:
+      - label: "Evaluation-as-a-Service with async execution"
+        answer: |
+          I'd build an **Evaluation-as-a-Service** platform with asynchronous evaluation execution and a rich query API.
+
+          **Architecture:**
+          1. **API Gateway**: REST/gRPC API for submitting evaluation requests and querying results
+          2. **Job Queue** (Celery/SQS): Evaluation requests are queued and executed asynchronously. Users get a job ID and are notified on completion
+          3. **Evaluation Workers**: Kubernetes pods that execute evaluation pipelines. Scale 0-100 workers based on queue depth. Each worker:
+             - Loads model predictions (from model registry or uploaded file)
+             - Loads test dataset (from test set registry)
+             - Runs metric suite (from metric registry)
+             - Computes slice analysis
+             - Runs statistical comparisons against baseline
+          4. **Results Database**: PostgreSQL for structured results + metadata. Schema supports efficient querying by model, dataset, metric, slice, and time range
+          5. **Object Store** (S3): Stores large artifacts - prediction files, detailed per-example results, visualization assets
+          6. **Query Engine**: GraphQL API for flexible result queries. Supports comparisons, time series, slice analysis
+          7. **Web UI**: Dashboard for exploring results, comparing models, viewing slice analysis, and generating reports
+
+          **Data model:**
+          ```
+          Evaluation:
+            - evaluation_id (UUID)
+            - model_id, model_version
+            - dataset_id, dataset_version
+            - metric_suite_id
+            - triggered_by (user/CI/scheduled)
+            - status (queued/running/completed/failed)
+            - created_at, completed_at
+
+          MetricResult:
+            - evaluation_id (FK)
+            - metric_name, metric_version
+            - value (float)
+            - confidence_interval_lower, confidence_interval_upper
+            - slice_name (null for overall)
+          ```
+
+          **CI/CD integration**: Trigger evaluation automatically on every model PR. Block merge if evaluation shows regression on any mandatory metric/slice.
+        next: train_governance
+      - label: "Data warehouse with materialized views"
+        answer: |
+          I'd build the evaluation store on a **data warehouse** (BigQuery/Snowflake) with materialized views for common queries, optimized for analytical workloads.
+
+          **Why data warehouse?**
+          - 3+ years of evaluation history * 10K experiments/month * 50 metrics * 20 slices = **36M+ metric values**. This is an analytical workload, not transactional
+          - Data scientists are already comfortable with SQL. They can write custom queries against the evaluation data
+          - Built-in support for time-series analysis, window functions, and complex aggregations
+          - Scales to billions of rows without performance tuning
+
+          **Schema design (star schema):**
+          ```
+          Fact table: metric_results
+            - evaluation_id, model_id, dataset_id
+            - metric_name, metric_version
+            - slice_name, value
+            - confidence_lower, confidence_upper
+            - timestamp
+
+          Dimensions:
+            - models (model_id, name, team, type, git_sha)
+            - datasets (dataset_id, name, version, size, slice_definitions)
+            - metrics (metric_name, definition, owner, version)
+          ```
+
+          **Materialized views for common queries:**
+          - `latest_model_performance`: Most recent evaluation for each model on each golden test set
+          - `model_comparison`: Side-by-side metrics for the latest two versions of each model
+          - `slice_regressions`: All slice-level regressions detected in the last 30 days
+          - `metric_trends`: 30/60/90 day metric trends for each model
+
+          **Query examples:**
+          ```sql
+          -- Find best fraud model by AUC on latest golden set
+          SELECT model_id, value as auc FROM latest_model_performance
+          WHERE dataset_id = 'fraud_golden_2024q2'
+          AND metric_name = 'auc_roc' ORDER BY auc DESC LIMIT 10;
+
+          -- Detect regressions
+          SELECT * FROM slice_regressions
+          WHERE regression_magnitude > 0.02 AND slice_name LIKE 'demographic_%';
+          ```
+
+          **Ingestion**: Evaluation results are pushed via SDK or uploaded as Parquet files. An ingestion pipeline validates, transforms, and loads into the warehouse. Near-real-time ingestion via streaming insert (~30 second delay).
+
+          **Visualization**: Connect Looker, Tableau, or Superset to the warehouse for dashboards. Custom web UI for model comparison workflows.
+
+          **Cost**: BigQuery on-demand: ~$5 per TB scanned. With 36M rows at ~500 bytes each = 18GB. Most queries scan <1GB = $0.005 per query. Storage: $20/month. Extremely cost-effective.
+        next: train_governance
+
+  - id: train_governance
+    stage: training
+    type: info
+    label: "Evaluation Governance"
+    speaker: interviewer
+    content: |
+      Let's discuss evaluation governance - the policies and processes that ensure evaluation quality.
+
+      **Model deployment gates:**
+      Every model deployment must pass evaluation gates before reaching production:
+      1. **Metric gates**: All mandatory metrics must meet minimum thresholds (e.g., AUC > 0.85 for fraud models)
+      2. **Regression gates**: No regression >2% on any mandatory slice compared to current production model
+      3. **Fairness gates**: Fairness metrics must meet organizational standards (e.g., demographic parity ratio > 0.8)
+      4. **Freshness gates**: Evaluation must use the current golden test set (not an outdated version)
+      5. **Statistical gates**: Improvement must be statistically significant (p < 0.05 with appropriate corrections)
+
+      **Evaluation review process:**
+      - For high-risk models (fraud, credit, content moderation), evaluation results require **peer review** by a team member not involved in the experiment
+      - Reviewer checks: correct test set used, appropriate metrics reported, slice analysis complete, no data leakage, results are reproducible
+
+      **Audit trail:**
+      - Every evaluation is logged with full provenance: who triggered it, which model version, which test set version, which metric versions, computational environment
+      - Immutable audit trail for regulatory compliance (financial models, healthcare models)
+      - Can answer "why was this model deployed?" with complete evaluation evidence
+
+      **Periodic re-evaluation:**
+      - Production models are re-evaluated monthly on the latest golden test set
+      - Detects silent degradation (concept drift) that ongoing monitoring might miss
+      - If re-evaluation shows degradation below deployment gates, trigger alert to model owner
+
+      **Metric deprecation:**
+      - When a metric is deprecated (replaced by a better version), the evaluation store:
+        1. Marks old metric as deprecated with migration guide
+        2. Runs both old and new metrics in parallel for 3 months
+        3. After migration period, stops computing old metric but preserves historical results
+    dialogue:
+      - speaker: interviewer
+        text: "How do you prevent bad models from reaching production?"
+      - speaker: candidate
+        text: "Mandatory evaluation gates: metric thresholds, regression checks on all slices, fairness requirements, and statistical significance. All must pass before deployment."
+      - speaker: interviewer
+        text: "What about compliance and auditability?"
+      - speaker: candidate
+        text: "Full provenance audit trail for every evaluation. For regulated models, we can always answer 'why was this model deployed?' with complete evaluation evidence."
+      - speaker: interviewer
+        text: "And models that degrade after deployment?"
+      - speaker: candidate
+        text: "Monthly re-evaluation against the latest golden test set. If a model falls below deployment gates, the owner is alerted to investigate."
+    next: deploy_integration
+
+  - id: deploy_integration
+    stage: deployment
+    type: question
+    label: "CI/CD Integration"
+    speaker: interviewer
+    content: |
+      How would you integrate the evaluation store into the ML development workflow?
+    dialogue:
+      - speaker: interviewer
+        text: "How does the evaluation store fit into the day-to-day ML development workflow?"
+      - speaker: candidate
+        text: "The key is making evaluation a natural part of the development cycle, not an afterthought."
+    choices:
+      - label: "GitHub Actions / CI pipeline integration"
+        answer: |
+          I'd deeply integrate the evaluation store into **GitHub Actions** (or GitLab CI, Jenkins) so evaluation is automatic and gating.
+
+          **CI pipeline integration:**
+          ```yaml
+          # .github/workflows/model-evaluation.yml
+          on:
+            pull_request:
+              paths: ['models/**', 'features/**']
+          jobs:
+            evaluate:
+              steps:
+                - name: Train model
+                  run: python train.py --config ${{ matrix.config }}
+                - name: Run evaluation
+                  run: |
+                    eval-store evaluate \
+                      --model-path ./model.pt \
+                      --suite production_readiness \
+                      --dataset fraud_golden_latest \
+                      --compare-to production
+                - name: Check gates
+                  run: eval-store check-gates --evaluation-id $EVAL_ID
+                - name: Post results to PR
+                  run: eval-store comment-pr --evaluation-id $EVAL_ID
+          ```
+
+          **PR comment with evaluation summary:**
+          The evaluation store posts a formatted comment on the PR showing:
+          - Overall metric comparison (candidate vs. production)
+          - Slice analysis with regressions highlighted
+          - Statistical significance indicators
+          - Gate pass/fail status
+          - Link to full evaluation dashboard
+
+          **Branch protection rules:**
+          - PR cannot be merged if evaluation gates fail
+          - Evaluation must be run on the latest golden test set
+          - Peer review required for models with fairness gate warnings
+
+          **Incremental evaluation:**
+          - For fast iteration, run a "quick eval" on 10% sample (completes in minutes)
+          - Full evaluation runs automatically when PR is approved (before merge)
+          - "Quick eval" catches major issues early; full eval catches subtle regressions
+
+          **Advantages**: Evaluation is automatic and blocking. Engineers can't skip it. Results are visible to reviewers directly in the PR. Creates a culture of evaluation-driven development.
+        next: mon_operations
+      - label: "Model registry integration with deployment hooks"
+        answer: |
+          I'd integrate the evaluation store with the **model registry** (MLflow, Weights & Biases, or internal registry) as a deployment gateway.
+
+          **Integration architecture:**
+          1. **Experiment tracking**: During training, the experiment tracker (W&B, MLflow) logs training metrics and model artifacts
+          2. **Model registration**: When an engineer is ready to deploy, they register the model in the registry (MLflow Model Registry)
+          3. **Evaluation trigger**: Registration triggers the evaluation store to run the production evaluation suite
+          4. **Gate check**: Evaluation results are compared against deployment gates. Results are attached to the model version in the registry
+          5. **Deployment approval**: If gates pass, model is promoted to "staging" in the registry. If gates fail, model stays in "development" with a detailed report of failures
+          6. **Production deployment**: After staging validation (A/B test), model is promoted to "production"
+
+          **Model registry stages with evaluation gates:**
+          ```
+          Development -> [eval gates pass] -> Staging -> [A/B test] -> Production
+                    \-> [eval gates fail] -> Blocked (with report)
+          ```
+
+          **W&B / MLflow integration:**
+          - Custom MLflow plugin that calls eval store API on model registration
+          - Evaluation results appear as a tab in the MLflow model page
+          - Comparison views between model versions in the W&B dashboard
+          - Artifact linking: Model artifact in registry links to evaluation results in eval store
+
+          **Automated evaluation scheduling:**
+          - When a new golden test set is released, automatically re-evaluate all production models
+          - When a metric definition is updated, re-evaluate all models using that metric
+          - Scheduled monthly re-evaluation of all production models
+
+          **Advantages**: Integrates with existing MLOps tools teams already use. Evaluation becomes a required step in the model lifecycle rather than an optional activity. Natural fit for organizations using MLflow or similar model registries.
+        next: mon_operations
+
+  - id: mon_operations
+    stage: monitoring
+    type: info
+    label: "Monitoring & Analytics"
+    speaker: interviewer
+    content: |
+      Let's discuss how the evaluation store itself is monitored and how it provides organizational insights.
+
+      **Evaluation store health monitoring:**
+      - **Evaluation job latency**: Track time from submission to completion. Alert if p95 > 30 minutes (indicates resource constraints)
+      - **Job failure rate**: Track percentage of failed evaluations. Common causes: invalid predictions, missing test set, compute OOM. Target: <2% failure rate
+      - **Result consistency**: Periodically re-run completed evaluations to verify deterministic results. Any discrepancy indicates a reproducibility bug
+
+      **Organizational analytics dashboard:**
+      - **Model health overview**: Heatmap of all 200+ models showing current golden test set performance. Red/yellow/green based on metric thresholds
+      - **Improvement trends**: Are models getting better over time? Track metric improvements per team per quarter
+      - **Evaluation coverage**: What percentage of production models have been evaluated on the latest golden test set? Target: 100%
+      - **Slice health**: Cross-model view of which slices are consistently underperforming. If "elderly users" underperform across 8 models, it's an organizational data gap
+      - **Experiment velocity**: How many experiments are teams running? Are some teams shipping without adequate evaluation?
+
+      **Regression alerting:**
+      - When a production model is re-evaluated and shows regression, alert the model owner with:
+        - Which metrics regressed and by how much
+        - Which slices are most affected
+        - Possible causes (data drift, concept drift, test set change)
+        - Recommended actions (retrain, investigate, or acknowledge)
+
+      **Quarterly evaluation review:**
+      - ML leadership reviews organizational evaluation metrics quarterly
+      - Topics: model health trends, fairness improvements, evaluation coverage gaps, metric standardization progress
+      - Action items: update golden test sets, add new slice definitions, address systematic underperformance areas
+
+      **Knowledge base:**
+      - Evaluation results, comparison reports, and post-mortems are stored as searchable documents
+      - When an engineer starts a new fraud model experiment, they can search for "fraud model evaluations in 2024" to understand the performance landscape and avoid repeating past failures
+    dialogue:
+      - speaker: interviewer
+        text: "Beyond individual model evaluation, what organizational insights does the evaluation store provide?"
+      - speaker: candidate
+        text: "A model health heatmap across all 200+ models, improvement trends per team, evaluation coverage metrics, and cross-model slice analysis."
+      - speaker: interviewer
+        text: "The cross-model slice analysis sounds valuable. What would that reveal?"
+      - speaker: candidate
+        text: "If 'elderly users' consistently underperform across 8 different models, it's not a model-specific issue. It's an organizational data gap that needs systemic attention."
+      - speaker: interviewer
+        text: "How do you drive organizational improvement?"
+      - speaker: candidate
+        text: "Quarterly evaluation reviews with leadership. Track model health trends, fairness improvements, and evaluation coverage. Make evaluation a first-class organizational priority."
+    next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Design Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive evaluation store.
+
+      **Your design summary:**
+      - Chose active evaluation engine or results database with validation
+      - Built a standardized metrics framework with versioned, deterministic metric implementations
+      - Designed test set management with immutability, content hashing, and slice definitions
+      - Implemented rigorous model comparison with statistical testing or multi-objective Pareto analysis
+      - Built automatic slice analysis engine with regression detection and fairness metrics
+      - Architected the system as evaluation-as-a-service or data warehouse
+      - Defined evaluation governance with deployment gates and audit trails
+      - Integrated with CI/CD or model registry for automatic evaluation
+      - Created organizational analytics for cross-model health monitoring
+
+      **Key strengths:**
+      - Slice-level analysis prevents silent regression on important subgroups
+      - Statistical rigor in model comparison prevents deployment based on noise
+      - Governance framework creates accountability for evaluation quality
+      - Organizational analytics identify systemic issues across models
+
+      **Areas for further exploration:**
+      - Human evaluation integration for generative/LLM models
+      - A/B test result integration with offline evaluation
+      - Causal evaluation (counterfactual impact estimation)
+      - Evaluation for fairness across intersectional groups
+      - Real-time evaluation for production predictions (not just offline)

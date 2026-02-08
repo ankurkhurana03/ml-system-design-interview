@@ -1,0 +1,1109 @@
+id: bad-ad-detection
+title: "Bad Ad Detection"
+description: "Create a system to detect 'bad' or policy-violating ads before they serve."
+companies: ["Google", "Meta", "TikTok"]
+domains: ["NLP", "Computer Vision", "Classification"]
+root: pd_start
+
+nodes:
+  # ============ PROBLEM DEFINITION ============
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we will design a **bad ad detection system** -- the safety layer that prevents policy-violating, deceptive, or harmful advertisements from reaching users.
+
+      **Business context:**
+      - Google reviews over **5 billion ads per day** and rejected **5.5 billion bad ads in 2023** -- more ads blocked than served
+      - Meta's ad integrity team blocks approximately **2.7 billion ads annually** across Facebook and Instagram
+      - A single undetected bad ad can generate massive reputational damage -- brand safety incidents cost publishers an average of **$10M in lost advertiser trust**
+      - TikTok removed **71 million policy-violating ads in H1 2023** as new ad formats (video, interactive) create novel abuse vectors
+      - Regulatory pressure is increasing: the EU Digital Services Act requires platforms to detect illegal ads within hours
+
+      **Types of "bad ads":**
+      - **Policy violations:** Prohibited products (weapons, drugs), restricted categories (alcohol, gambling) shown to wrong audiences
+      - **Deceptive ads:** Misleading claims ("lose 30lbs in a week"), fake endorsements, counterfeit products
+      - **Malicious ads (malvertising):** Ads that redirect to phishing sites, install malware, or perform crypto-mining
+      - **Objectionable content:** Sexually explicit, violent, hateful, or discriminatory content
+      - **Clickbait / low quality:** Sensationalized headlines, misleading thumbnails, broken landing pages
+
+      **Goal:** Build an ML pipeline that reviews every ad at submission time and periodically post-serving, catching >99% of policy violations with <1% false positive rate on legitimate ads.
+    dialogue:
+      - speaker: interviewer
+        text: "Why is bad ad detection one of the hardest classification problems in ad tech?"
+      - speaker: candidate
+        text: "Three reasons. First, it is adversarial -- bad actors actively evolve their tactics to evade detection. Techniques that work today get circumvented within weeks. Second, the taxonomy of violations is enormous and constantly expanding -- hundreds of policy categories across different jurisdictions. Third, the cost of errors is asymmetric and severe: a false negative lets a harmful ad reach millions of users, while excessive false positives alienate legitimate advertisers."
+      - speaker: interviewer
+        text: "What makes this different from standard content moderation?"
+      - speaker: candidate
+        text: "Ads are multimodal -- an ad combines images, video, text, audio, and a landing page. A text ad saying 'natural weight loss supplements' with a legitimate health site is fine, but the same text with a scam landing page is a violation. You have to analyze the entire ad experience holistically, not just individual modalities."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: info
+    label: "Problem Scope"
+    speaker: interviewer
+    content: |
+      Let us define the scope of the bad ad detection system.
+
+      **Review pipeline stages:**
+      ```
+      Ad Submission → Pre-serve review (automated) → Serve
+                                                       │
+                                                 Post-serve review
+                                                 (periodic + triggered)
+                                                       │
+                                                 Enforcement action
+      ```
+
+      **Pre-serve review (our focus):**
+      - Every new ad must pass automated review before first impression
+      - **SLA: <30 minutes** from submission to review decision (advertisers expect fast approval)
+      - Most ads (~85%) should be auto-approved or auto-rejected
+      - Remaining ~15% sent to human review queue, prioritized by violation probability
+
+      **Policy taxonomy (simplified):**
+
+      | Category | Examples | Severity |
+      |----------|---------|---------|
+      | **Prohibited content** | Weapons, drugs, counterfeit goods | Block + account review |
+      | **Deceptive claims** | Fake endorsements, misleading pricing | Reject ad |
+      | **Malvertising** | Phishing landing pages, malware | Block + report |
+      | **Age-restricted** | Alcohol, gambling shown to minors | Restrict targeting |
+      | **Sensitive topics** | Political ads, health claims | Require disclosure |
+      | **Low quality** | Clickbait, broken pages, excessive text in images | Demote or reject |
+
+      **System requirements:**
+      - **Throughput:** Process ~200K new/updated ads per hour (~5B per day including re-reviews)
+      - **Precision target:** >99% (false positives alienate legitimate advertisers)
+      - **Recall target:** >99% for high-severity violations (prohibited content, malvertising), >95% for medium-severity
+      - **Latency:** <30 minutes end-to-end for pre-serve review
+      - **Adaptability:** System must adapt to new violation types within days, not months
+
+      Let us define the metrics framework.
+    dialogue:
+      - speaker: interviewer
+        text: "Why is the precision requirement so strict?"
+      - speaker: candidate
+        text: "A 1% false positive rate means 50 million legitimate ads blocked per year at Google's scale. Each false positive means a frustrated advertiser who cannot run their campaign, potentially costing thousands of dollars in lost spend. At scale, even small FP rates generate enormous advertiser support costs and churn. That is why the system must be high-precision with human review as the safety net for uncertain cases."
+    next: met_question
+
+  # ============ METRICS ============
+  - id: met_question
+    stage: metrics
+    type: question
+    label: "Detection Objective"
+    speaker: interviewer
+    content: |
+      How should we frame the detection objective? The key tension is between catching more bad ads (recall) and avoiding blocking good ads (precision).
+    choices:
+      - label: "High recall (safety-first, catch all bad ads)"
+        answer: |
+          I would optimize for **maximum recall** -- catching as many bad ads as possible -- with human review as the precision safety net.
+
+          **Why recall-first:**
+          - **Asymmetric costs:** A single bad ad reaching millions of users (false negative) causes far more damage than a legitimate ad being delayed for human review (false positive)
+          - **Brand safety incidents** can cost publishers millions in lost advertisers. Advertisers like Procter & Gamble and JPMorgan have pulled ad spend from platforms after brand safety failures.
+          - **Regulatory requirements:** The EU DSA requires "best efforts" to prevent illegal ads. Missing violations can result in fines of up to **6% of global turnover**
+
+          **Tiered detection strategy:**
+          ```
+          Ad submitted
+               │
+               ▼
+          Tier 1: Fast rules + keyword filters (1 second)
+            - Block known prohibited content (exact match)
+            - Recall: ~60%, Precision: ~95%
+               │
+               ▼
+          Tier 2: ML classifiers (30 seconds)
+            - Image + text + landing page analysis
+            - Recall: ~95%, Precision: ~90%
+               │
+               ▼
+          Tier 3: Human review for uncertain cases (hours)
+            - ~15% of ads routed here
+            - Near-perfect precision
+          ```
+
+          **Primary metrics:**
+
+          | Metric | Target | Why |
+          |--------|--------|-----|
+          | **Recall (high-severity)** | > 99.5% | Cannot miss prohibited or malicious content |
+          | **Recall (medium-severity)** | > 97% | Deceptive ads should be caught |
+          | **Precision (auto-reject)** | > 95% | Minimize wrongly-blocked legitimate ads |
+          | **Human review rate** | < 15% | Control operational cost |
+          | **Time to decision** | < 30 min (auto), < 4 hours (human) | Advertiser experience |
+          | **Adversarial evasion rate** | < 5% | Measure against known evasion attempts |
+
+          **Trade-off:** High recall means more false positives go to human review, increasing operational cost. At Google's scale, a 15% human review rate means processing ~750M ads by humans annually. This requires a large moderation team or effective prioritization.
+        next: met_recall
+      - label: "Balanced precision-recall with automation"
+        answer: |
+          I would optimize for **balanced precision and recall** with maximal automation to minimize human review.
+
+          **Why balanced:**
+          - Human review is the bottleneck and the cost center. At ~200K ads/hour, even a 15% human review rate means 30K ads/hour need human attention -- hundreds of moderators working 24/7.
+          - **Advertiser experience matters:** Waiting hours for ad approval hurts advertiser retention. Fast auto-approval of clearly safe ads is critical.
+          - A system that blocks too many ads creates **false positive fatigue** -- advertisers lose trust and reduce spend
+
+          **Automation-maximizing approach:**
+          ```
+          Ad submitted
+               │
+               ▼
+          Fast-track approval: High-confidence safe ads (70%)
+            - Established advertisers with clean history
+            - Ad content similar to previously approved ads
+            - ML confidence > 0.95 safe
+               │
+               ▼
+          Standard ML review: Medium-confidence ads (20%)
+            - Full multimodal analysis
+            - Auto-approve if ML confidence > 0.85 safe
+            - Auto-reject if ML confidence > 0.90 violation
+               │
+               ▼
+          Human review: Low-confidence / high-risk ads (10%)
+            - Prioritized by severity and confidence
+          ```
+
+          **Primary metrics:**
+
+          | Metric | Target | Why |
+          |--------|--------|-----|
+          | **F1 score (macro)** | > 0.95 | Balanced precision-recall across all categories |
+          | **Auto-approval rate** | > 70% | Minimize human bottleneck |
+          | **Auto-rejection precision** | > 99% | Almost never wrongly block |
+          | **TTFD (time to first decision)** | < 5 min for 70% of ads | Fast advertiser experience |
+          | **Human review rate** | < 10% | Operational cost control |
+          | **Appeal overturn rate** | < 3% | Quality of auto-decisions |
+
+          **Trade-off:** Optimizing for automation means some medium-severity violations may slip through if the model is uncertain. We accept slightly lower recall on edge cases in exchange for a much better advertiser experience and lower operational cost.
+        next: met_balanced
+
+  - id: met_recall
+    stage: metrics
+    type: info
+    label: "Safety-First Metrics"
+    speaker: interviewer
+    content: |
+      Good choice. Let us detail the safety-first metrics framework.
+
+      **Recall measurement by violation severity:**
+
+      | Severity | Category Examples | Recall Target | Measurement |
+      |----------|-----------------|---------------|-------------|
+      | **Critical** | Malware, phishing, CSAM | > 99.9% | Continuous red-team testing |
+      | **High** | Prohibited products, hate speech | > 99.5% | Monthly violation audits |
+      | **Medium** | Deceptive claims, clickbait | > 97% | Weekly random sampling |
+      | **Low** | Minor policy violations, low quality | > 90% | Quarterly reviews |
+
+      **Measuring recall when ground truth is imperfect:**
+      - We do not have perfect labels -- some violations are only discovered post-serving
+      - **Red team:** Dedicated adversarial team that crafts evasion attempts (100+ new samples/week)
+      - **User reports:** Reports of bad ads are investigated; confirmed violations become recall failures
+      - **Post-serve scanning:** Re-scan served ads weekly with updated models. Any newly detected violations are retroactive recall failures.
+      - **Cross-platform intelligence:** Compare with industry blocklists (TAG, IAS) to find misses
+
+      **False positive impact tracking:**
+      - **Appeal rate:** % of rejected ads that are appealed by advertisers. Target: < 5%.
+      - **Appeal overturn rate:** % of appeals that result in the ad being approved. Target: < 3%. If higher, the model is too aggressive.
+      - **Advertiser NPS impact:** Track NPS scores for advertisers who have had ads rejected vs those who have not. The delta indicates the false positive cost.
+
+      **Adversarial robustness metrics:**
+      - **Evasion rate against red team:** What percentage of deliberately crafted bad ads evade detection?
+      - **Time to adapt:** When a new evasion technique is discovered, how quickly can the model be updated to catch it?
+      - Target: < 48 hours from discovery to model update. < 4 hours for critical severity.
+
+      Let us design the data pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you measure recall when you do not know all the bad ads?"
+      - speaker: candidate
+        text: "This is the fundamental challenge. We combine multiple signals: red team testing with known bad ads gives a lower bound on recall, user reports reveal misses in production, and post-serve re-scanning with updated models catches ads that were missed initially. None of these individually gives true recall, but together they provide a robust estimate. The red team is particularly important because it tests against the latest evasion techniques."
+    next: data_pipeline
+
+  - id: met_balanced
+    stage: metrics
+    type: info
+    label: "Balanced Metrics Framework"
+    speaker: interviewer
+    content: |
+      Good. Let us define the balanced metrics framework focused on automation efficiency.
+
+      **Decision quality metrics:**
+
+      | Decision Type | Volume | Quality Metric | Target |
+      |--------------|--------|---------------|--------|
+      | **Auto-approve** | 70% of ads | False negative rate | < 0.5% |
+      | **Auto-reject** | 15% of ads | False positive rate | < 1% |
+      | **Route to human** | 15% of ads | Correct routing precision | > 90% (right category) |
+
+      **Automation efficiency metrics:**
+      - **Auto-decision rate:** % of ads decided without human review. Target: > 85%
+      - **Human review time:** Average time for a human reviewer per ad. Target: < 2 minutes
+      - **Model-assist rate:** When humans review, how often does the model's suggested category match the human decision? Target: > 80% (meaning the model provides useful signal even when it cannot decide alone)
+      - **Cost per review:** Total moderation cost / number of ads reviewed. Track quarterly trend.
+
+      **Advertiser experience metrics:**
+      - **Time to first serve:** From ad submission to first impression. Target: < 15 min for auto-approved, < 4 hours for human-reviewed.
+      - **Rejection clarity:** % of rejections that include a specific policy citation (not just "violated policy"). Target: 100%.
+      - **Appeal resolution time:** From appeal submission to decision. Target: < 24 hours.
+      - **Repeat violation rate:** % of advertisers who submit violating ads after a rejection. Should decrease over time (indicates the messaging is effective).
+
+      **Feedback loop metrics:**
+      - **Model retraining lift:** After incorporating the latest human review labels, how much does model accuracy improve?
+      - **Label disagreement rate:** How often do two human reviewers disagree? (Measures label quality, typically ~8-12%)
+      - **Drift detection:** Track prediction distribution daily. Significant shifts indicate new ad patterns or evasion tactics.
+
+      Let us design the data pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle the tension between fast auto-approval and catching bad ads?"
+      - speaker: candidate
+        text: "The key is advertiser reputation. An established advertiser with 1000+ previously approved ads and zero violations gets a fast-track: only lightweight checks are applied, and they are auto-approved in seconds. A new advertiser or one with recent violations gets the full review pipeline. This lets us serve 70% of ads instantly while focusing review resources on the riskiest 10-15%."
+    next: data_pipeline
+
+  # ============ DATA ============
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      The data pipeline for bad ad detection is complex because ads are multimodal and the violation taxonomy is large.
+
+      **Data sources per ad:**
+
+      | Component | What We Extract | Processing |
+      |-----------|----------------|------------|
+      | **Ad text** | Headline, description, CTA, display URL | NLP classification |
+      | **Ad image(s)** | Creative images, thumbnails | CNN classification, OCR |
+      | **Ad video** | Video content, audio track | Frame sampling + video understanding |
+      | **Landing page** | Page content, redirects, scripts, WHOIS | Crawler + page analysis |
+      | **Advertiser profile** | Account age, history, spend patterns | Risk scoring |
+      | **Targeting** | Audience, geo, device, placements | Policy compliance check |
+
+      **Data volumes and processing:**
+
+      | Data Type | Volume | Processing Time |
+      |-----------|--------|----------------|
+      | New ad submissions | ~200K/hour | < 30 min SLA |
+      | Ad updates (text/creative change) | ~100K/hour | < 30 min SLA |
+      | Post-serve re-reviews | ~5B/day | Background, batch |
+      | Landing page crawls | ~10M unique pages/day | Async, 24h cycle |
+      | Human review labels | ~50K/day | Real-time feedback |
+      | User reports | ~500K/day | Priority routing |
+
+      **Training data construction:**
+      - **Labeled data:** ~50M ads with human-annotated policy labels (multi-label: an ad can violate multiple policies)
+      - **Label quality:** Each high-severity label reviewed by 3 annotators, majority vote. Inter-annotator agreement (Cohen's kappa): ~0.82
+      - **Class imbalance:** ~95% of ads are legitimate. Violations are rare but varied.
+        - Use **stratified sampling** to ensure each violation category has at least 10K examples in training
+        - Augment rare categories with synthetic examples (paraphrased text, image transformations)
+
+      **Adversarial data augmentation:**
+      - **Text evasion:** Replace characters with lookalikes (e.g., "v1agra" for "viagra"), add zero-width characters
+      - **Image evasion:** Add noise, overlay text on images, use memes/screenshots of text
+      - **Landing page evasion:** Cloaking (show safe content to crawlers, bad content to users)
+      - Train models on known evasion techniques so they recognize future variants
+
+      Now let us design the feature extraction strategy.
+    dialogue:
+      - speaker: interviewer
+        text: "What is the hardest data challenge in bad ad detection?"
+      - speaker: candidate
+        text: "Landing page cloaking. Sophisticated bad actors serve a clean, legitimate page to our crawler but redirect real users to a scam or phishing page. They detect crawlers by IP range, user agent, JavaScript execution patterns, and geographic location. To combat this, we use residential proxies, headless browsers with realistic fingerprints, and geographically distributed crawlers. We also analyze the page's JavaScript for known redirection patterns. But it is an arms race -- attackers continually evolve their cloaking techniques."
+    next: feat_question
+
+  # ============ FEATURES ============
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Extraction Strategy"
+    speaker: interviewer
+    content: |
+      How would you approach feature extraction for the multimodal ad content?
+    choices:
+      - label: "Multimodal fusion (joint embedding)"
+        answer: |
+          I would build a **multimodal fusion model** that jointly embeds text, image, and landing page signals into a shared representation.
+
+          **Why multimodal fusion:**
+          - Violations are often **cross-modal** -- the text says "dietary supplement" (allowed) but the image shows a pharmaceutical drug (prohibited)
+          - A joint embedding captures **consistency checks** between modalities that separate models miss
+          - Real-world evasion often exploits modality boundaries (policy-safe text + violating image)
+
+          **Architecture: Cross-modal attention**
+          ```
+          Ad Text → BERT-base → text_embedding (768-dim)
+          Ad Image → EfficientNet-B3 → image_embedding (512-dim)
+          Landing Page → DistilBERT on extracted text → page_embedding (384-dim)
+          OCR Text (from image) → BERT-base → ocr_embedding (768-dim)
+
+          [text_emb, image_emb, page_emb, ocr_emb]
+               │
+               ▼
+          Cross-modal attention (2 layers, 8 heads)
+               │
+               ▼
+          Fused representation (512-dim)
+               │
+               ▼
+          Multi-label classifier: FC(256) → FC(num_policy_categories)
+          ```
+
+          **Cross-modal consistency features:**
+          - `text_image_similarity`: Cosine similarity between text and image embeddings. Low similarity may indicate mismatched content.
+          - `text_landing_page_similarity`: Does the ad text match the landing page content? Low similarity suggests deception.
+          - `image_ocr_text_match`: Does text extracted from the image match the declared ad text? Mismatch may indicate hidden messaging.
+
+          **Pre-trained models used:**
+          - **CLIP (OpenAI):** Pre-trained on 400M image-text pairs. Excellent at understanding image-text alignment.
+          - Freeze CLIP encoders, fine-tune the cross-attention and classification head on ad policy data.
+
+          **Trade-off:** Multimodal fusion is slower (~200ms per ad for full processing) and more complex to train. But the cross-modal signal catches violations that single-modality models miss.
+        next: feat_fusion
+      - label: "Modality-specific models with ensemble"
+        answer: |
+          I would build **separate specialized models** for each modality and combine their outputs via an ensemble.
+
+          **Why separate models:**
+          - **Modularity:** Each model team can iterate independently (text team, vision team, landing page team)
+          - **Faster processing:** Models run in parallel, total latency = max(individual latencies) not sum
+          - **Easier debugging:** When a violation is missed, we can pinpoint which modality model failed
+          - **Flexible update:** Can update the image model without retraining the text model
+
+          **Model per modality:**
+
+          | Modality | Model | Input | Output |
+          |----------|-------|-------|--------|
+          | **Text** | Fine-tuned BERT-base | Headline + description + CTA | Per-policy violation scores |
+          | **Image** | EfficientNet-B3 + classification head | Ad creative image | Per-policy violation scores |
+          | **OCR** | Tesseract → BERT-base | Text extracted from image | Per-policy violation scores |
+          | **Video** | Frame sampling (1fps) → EfficientNet → temporal pooling | Video frames | Per-policy violation scores |
+          | **Landing page** | Crawler → DistilBERT on page text + URL features | Landing page content | Per-policy violation scores |
+          | **Advertiser** | LightGBM | Account features, history | Risk score |
+
+          **Ensemble aggregation:**
+          ```
+          final_score[policy_i] = w_text * text_score[policy_i]
+                                + w_image * image_score[policy_i]
+                                + w_ocr * ocr_score[policy_i]
+                                + w_page * page_score[policy_i]
+                                + w_advertiser * advertiser_risk
+          ```
+          Weights learned via a meta-learner (small logistic regression) on top of individual model outputs.
+
+          **Parallel processing:**
+          ```
+          Ad submitted → Fan out to all modality models (parallel)
+                       → Text model: 50ms
+                       → Image model: 100ms
+                       → Landing page: 500ms (limited by page crawl)
+                       → Ensemble: 5ms
+                       → Total: ~600ms (dominated by landing page)
+          ```
+
+          **Trade-off:** Separate models miss cross-modal correlations. A text model saying "safe" and an image model saying "safe" might miss that the *combination* is a violation (e.g., a safe product name paired with a misleading image). The ensemble partially mitigates this with interaction features.
+        next: feat_ensemble
+
+  - id: feat_fusion
+    stage: features
+    type: info
+    label: "Multimodal Fusion Details"
+    speaker: interviewer
+    content: |
+      Let us detail the multimodal fusion pipeline and the critical cross-modal signals.
+
+      **CLIP-based alignment scoring:**
+      CLIP provides a natural cross-modal consistency check:
+      ```python
+      text_features = clip.encode_text(ad_headline + ad_description)
+      image_features = clip.encode_image(ad_creative)
+      alignment_score = cosine_similarity(text_features, image_features)
+      ```
+      - Alignment score > 0.7: Text and image are consistent (normal ad)
+      - Alignment score < 0.3: Text and image are mismatched (potential deception)
+      - Example: Text says "free iPhone giveaway" + Image shows a car → alignment 0.15 → flag for review
+
+      **Landing page analysis pipeline:**
+      ```
+      URL → Headless Browser (Puppeteer)
+           │
+           ├── Extract page text → DistilBERT → page_embedding
+           ├── Capture screenshot → EfficientNet → page_visual_embedding
+           ├── Analyze redirects → redirect_chain_features
+           ├── Check SSL cert → cert_features
+           ├── Analyze JavaScript → script_risk_score
+           └── WHOIS lookup → domain_age, registrar
+      ```
+
+      **Key landing page features:**
+      - `redirect_count`: Number of redirects. Legit: 0-1. Suspicious: 3+.
+      - `domain_age`: Newly registered domains (< 30 days) are 10x more likely to be malicious
+      - `ssl_valid`: No SSL = automatic flag
+      - `page_text_ad_text_similarity`: Does the landing page deliver what the ad promised?
+      - `malware_indicators`: Known malicious JavaScript patterns, suspicious iframes, crypto-mining scripts
+
+      **Processing time optimization:**
+      - BERT text encoding: 30ms per ad
+      - EfficientNet image encoding: 50ms per ad
+      - Landing page crawl: 500ms-2s (bottleneck)
+      - Cross-modal attention: 20ms
+      - **Total: ~700ms per ad** (dominated by landing page)
+      - For pre-serve review with 30-minute SLA, this is fine. Landing page crawl runs asynchronously.
+
+      **Batch processing for throughput:**
+      - Batch 64 ads together for GPU inference (BERT + EfficientNet)
+      - GPU batch inference: 100ms for 64 ads = ~1.5ms per ad (amortized)
+      - At 200K ads/hour, need ~3K GPU-seconds/hour = modest GPU fleet
+
+      Now let us choose the model architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle ads that have video instead of images?"
+      - speaker: candidate
+        text: "For video ads, I sample frames at 1 FPS and run EfficientNet on each frame, then apply temporal mean pooling for the video-level embedding. I also extract audio, transcribe it with Whisper, and run the text model on the transcription. This captures violations in both visual and audio channels. For a 30-second video, that is 30 frame embeddings + 1 audio transcript. The cross-modal attention then considers all these modalities jointly."
+    next: mod_question
+
+  - id: feat_ensemble
+    stage: features
+    type: info
+    label: "Modality-Specific Features"
+    speaker: interviewer
+    content: |
+      Let us detail the modality-specific feature extraction pipelines.
+
+      **Text features (most important for policy detection):**
+      - **BERT fine-tuned on ad text:** 768-dim embedding from fine-tuned BERT-base
+      - **Keyword features:** TF-IDF on policy-specific vocabulary lists (drug names, weapon terms, financial claims)
+      - **Claim detection:** Rule-based + NLI (Natural Language Inference) model to detect superlative claims ("best", "guaranteed", "#1")
+      - **Sentiment and toxicity:** Perspective API or custom toxicity classifier
+      - **Named entity recognition:** Detect brand mentions (unauthorized use), celebrity names (fake endorsements)
+
+      **Image features:**
+      - **EfficientNet-B3:** Pre-trained on ImageNet, fine-tuned on ad content categories (512-dim embedding)
+      - **NSFW detection:** Dedicated binary classifier trained on NSFW datasets (nudity, violence, gore)
+      - **Text in image (OCR):** Tesseract extracts text, which may contain hidden policy violations not in the declared ad text
+      - **Logo detection:** YOLO-based detector for brand logos -- identifies counterfeit product ads
+      - **Image manipulation detection:** Detect photoshopped images (fake before/after photos common in weight loss scams)
+
+      **Advertiser risk features:**
+
+      | Feature | Signal | Weight |
+      |---------|--------|--------|
+      | `account_age_days` | New accounts are riskier | High |
+      | `previous_violation_count` | Past behavior predicts future | Very high |
+      | `similar_ad_rejection_rate` | Ads like this often rejected | High |
+      | `payment_method_risk` | Prepaid cards, crypto payments | Medium |
+      | `geo_risk` | Some regions have higher fraud rates | Low (careful of bias) |
+      | `spend_pattern` | Sudden budget increases may indicate bad actor | Medium |
+
+      **Ensemble meta-features (for the combining model):**
+      - Individual model confidence scores (not just binary predictions)
+      - Cross-model agreement: do all modality models agree? Disagreement suggests ambiguity worth human review.
+      - Historical accuracy of each model on this ad category: weight models by their track record
+
+      Now let us choose the detection model architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "Which modality is most predictive for detecting bad ads?"
+      - speaker: candidate
+        text: "Text is the single most predictive modality, catching roughly 60-70% of violations on its own. But the remaining 30-40% require visual analysis (prohibited imagery, misleading thumbnails), landing page analysis (phishing, malware), or cross-modal checks (text-image mismatch). No single modality achieves the 99% recall we need. The ensemble is essential."
+    next: mod_question
+
+  # ============ MODEL ============
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Detection Model"
+    speaker: interviewer
+    content: |
+      What model architecture would you use for the core bad ad classifier?
+    choices:
+      - label: "Hierarchical multi-label classifier"
+        answer: |
+          I would use a **hierarchical multi-label classifier** that mirrors the policy taxonomy structure.
+
+          **Why hierarchical:**
+          - Ad policies have a natural hierarchy: `Prohibited → Drugs → Recreational Drugs` vs `Prohibited → Drugs → Prescription Without License`
+          - A hierarchical model first predicts the top-level category, then refines within the subtree
+          - This reduces the classification space at each level and improves accuracy on rare violation types
+          - The model can say "definitely prohibited content" even if uncertain about the specific sub-category
+
+          **Architecture:**
+          ```
+          Multimodal features (512-dim fused embedding)
+               │
+               ▼
+          Level 1: Safe vs Violation (binary, high recall)
+               │
+               ├── Safe → Auto-approve
+               │
+               ▼
+          Level 2: Violation category (6 classes)
+               │ [Prohibited, Deceptive, Malicious, Age-restricted, Sensitive, Low-quality]
+               │
+               ▼
+          Level 3: Specific sub-category (50+ classes)
+               │ [Weapons, Drugs, Fake endorsement, Phishing, ...]
+               │
+               ▼
+          Decision: Reject / Human review / Restrict targeting
+          ```
+
+          **Training strategy:**
+          - Level 1: Binary classification with **class-weighted loss** (10x weight on violations due to 20:1 imbalance)
+          - Level 2: Multi-class with **focal loss** to focus on hard examples
+          - Level 3: Multi-label (an ad can violate multiple sub-categories) with **binary cross-entropy per label**
+          - Train all levels jointly with a combined loss, but Level 1 gradients are dominant
+
+          **Confidence-based routing:**
+          - Level 1 confidence > 0.95 safe → auto-approve
+          - Level 1 confidence > 0.90 violation → auto-reject (with Level 2/3 for explanation)
+          - Otherwise → route to human review with model's top-3 predicted categories
+
+          **Trade-off:** Hierarchical models are more complex to maintain (each level needs separate evaluation and potential retraining). But the structured approach handles the long-tail of violation types much better than a flat classifier.
+        next: mod_hierarchical
+      - label: "Flat multi-label with LLM zero-shot"
+        answer: |
+          I would combine a **flat multi-label classifier** for known violation types with an **LLM-based zero-shot detector** for emerging and novel violations.
+
+          **Why flat + LLM hybrid:**
+          - The trained classifier excels at known patterns -- it has seen millions of examples of each violation type
+          - But new violation types emerge constantly (e.g., cryptocurrency scams did not exist 10 years ago)
+          - An LLM can detect novel violations **zero-shot** by reasoning about ad content against policy descriptions, without needing training examples
+
+          **Trained classifier (for known violations):**
+          ```
+          Multimodal features → FC(512) → FC(256) → FC(num_policies)
+          Each output: sigmoid → probability of violating policy_i
+          ```
+          - ~100 policy labels, each with independent sigmoid output
+          - Trained on 50M labeled examples with binary cross-entropy per label
+          - Fast inference: ~5ms for feature forward pass
+
+          **LLM zero-shot detector (for novel violations):**
+          ```python
+          prompt = f"""
+          You are an ad policy reviewer. Given the following ad content,
+          determine if it violates any of these policies:
+          {policy_descriptions}
+
+          Ad headline: {headline}
+          Ad description: {description}
+          Image description: {image_caption}
+          Landing page summary: {page_summary}
+
+          For each policy, respond: PASS, FAIL, or UNCERTAIN.
+          """
+          response = llm.generate(prompt)
+          ```
+          - Use GPT-4 or Claude for high-stakes decisions
+          - LLM processes ~10 ads/second (much slower than the classifier)
+          - Used for: (1) new policy categories, (2) edge cases where the classifier is uncertain, (3) audit sampling
+
+          **Hybrid routing:**
+          - All ads → fast classifier (5ms)
+          - Uncertain ads (15%) → LLM review (2-5 seconds)
+          - Disagreement between classifier and LLM → human review
+
+          **Trade-off:** LLM inference is expensive ($0.01-0.10 per ad) and slow. Cannot run on all 200K ads/hour. But for the ~15% uncertain cases, LLM provides much better reasoning than routing directly to humans.
+        next: mod_llm
+
+  - id: mod_hierarchical
+    stage: model
+    type: info
+    label: "Hierarchical Classifier Details"
+    speaker: interviewer
+    content: |
+      Let us detail the hierarchical classifier and the critical adversarial robustness measures.
+
+      **Level 1 model (Safe vs Violation -- must be extremely robust):**
+      - Binary classifier with **asymmetric loss:** false negatives weighted 10x more than false positives
+      - Ensemble of 3 models (BERT-based, CNN-based, LightGBM on statistical features) for robustness
+      - If ANY of the 3 models predicts violation with confidence > 0.7, the ad is flagged
+      - This ensemble catches evasions that fool a single model
+
+      **Adversarial robustness techniques:**
+
+      | Technique | What It Handles | Implementation |
+      |-----------|----------------|---------------|
+      | **Adversarial training** | Text perturbations (typos, homoglyphs) | Add character-level noise during training |
+      | **Character normalization** | Unicode tricks ("v1agra", zero-width chars) | Normalize all text to ASCII before processing |
+      | **Image augmentation** | Noise, filters, text overlays | Heavy augmentation during training |
+      | **Ensemble diversity** | Different evasion strategies fool different models | Train on different data subsets |
+      | **Red team feedback loop** | Novel evasion techniques | Weekly red team → retrain cycle |
+
+      **Handling the long tail of violations:**
+      - Top 10 violation types cover ~80% of violations (common patterns)
+      - The remaining 20% spans 90+ categories with few examples each
+      - **Few-shot learning for rare categories:** Use prototypical networks -- embed a few examples of a rare violation type and detect new instances by proximity
+      - **Active learning:** When the model is uncertain about an ad, prioritize it for human review. The human label then improves the model for that category.
+
+      **Model update cycle:**
+      - **Daily:** Retrain Level 1 with latest human review labels (highest priority)
+      - **Weekly:** Retrain Levels 2 and 3 with accumulated labels
+      - **Emergency:** When red team discovers a new evasion, targeted fine-tuning within 4 hours using the evasion samples
+
+      **Explainability (critical for advertiser trust):**
+      When rejecting an ad, the system must explain why:
+      ```
+      Rejection reason: "Ad violates policy P-1234 (prohibited health claims).
+      Detected claims: 'guaranteed weight loss' (text, confidence 0.97)
+      Supporting evidence: Image contains before/after photos (image, confidence 0.89)"
+      ```
+      - Use SHAP/attention weights to identify which text tokens and image regions triggered the violation
+      - This helps legitimate advertisers fix their ads and reduces appeal volume
+
+      Let us discuss training.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle the adversarial nature of this problem?"
+      - speaker: candidate
+        text: "We treat it as an ongoing arms race. The key is a fast feedback loop: red team discovers evasion → label evasion samples → retrain model → deploy update. We target a 48-hour cycle for non-critical evasions and 4 hours for critical ones. We also invest in fundamental robustness: character normalization defeats simple Unicode tricks, ensemble models are harder to evade than single models, and adversarial training makes each model more resilient. But we accept that we will never catch 100% -- human review is the ultimate safety net."
+    next: train_pipeline
+
+  - id: mod_llm
+    stage: model
+    type: info
+    label: "LLM + Classifier Hybrid"
+    speaker: interviewer
+    content: |
+      Let us detail the LLM + trained classifier hybrid and the practical serving considerations.
+
+      **Trained classifier optimization:**
+      The flat multi-label classifier needs to be fast since it runs on all ads:
+      - Architecture: DistilBERT (66M params) for text + MobileNetV3 for images
+      - Combined inference: ~15ms per ad on CPU
+      - Multi-label output: 100 policy categories, each with independent probability
+      - **Threshold per category:** Not all categories use 0.5 threshold. High-severity: threshold 0.3 (catch more). Low-severity: threshold 0.7 (reduce noise).
+
+      **LLM as the uncertainty resolver:**
+      When the classifier is uncertain (prediction between 0.3-0.7 for any high-severity policy):
+      ```python
+      def should_escalate_to_llm(predictions: dict) -> bool:
+          for policy, conf in predictions.items():
+              if policy.severity >= HIGH and 0.3 < conf < 0.7:
+                  return True
+          return False
+      ```
+
+      **LLM prompt engineering for policy review:**
+      - Provide the full policy text (not just the name) in the prompt
+      - Include 3 examples of violations and 3 examples of non-violations for each policy (few-shot)
+      - Ask the LLM to explain its reasoning before giving the verdict (chain-of-thought)
+      - Parse structured output: `{"policy_id": "P-1234", "verdict": "FAIL", "confidence": "high", "reasoning": "..."}`
+
+      **Cost management:**
+      - Classifier: ~$0.0001 per ad (CPU compute)
+      - LLM (GPT-4-turbo): ~$0.02 per ad (at ~1000 tokens per review)
+      - At 15% LLM escalation rate and 200K ads/hour: 30K LLM calls/hour = ~$600/hour = $5.2M/year
+      - **Optimization:** Use smaller LLMs (Llama 3, Mistral) for medium-severity; reserve GPT-4 for critical
+      - **Caching:** If an ad is similar to a recently LLM-reviewed ad, reuse the decision (semantic similarity > 0.95)
+
+      **LLM for new policy onboarding:**
+      When a new policy is added (e.g., "AI-generated content must be disclosed"):
+      1. Day 0: LLM reviews all ads against the new policy (zero-shot)
+      2. Week 1: LLM decisions become training data for the classifier
+      3. Week 2-4: Classifier catches up, LLM handles only uncertain cases
+      4. Month 2+: Classifier handles the policy fully; LLM is backup
+
+      This means new policies can be enforced **on day 1** without any training data.
+
+      Let us discuss the training pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "What is the biggest risk of using LLMs for ad review?"
+      - speaker: candidate
+        text: "Consistency and latency. LLMs can give different answers to the same ad on different calls (especially with temperature > 0). For ad review, we need deterministic decisions -- the same ad must always get the same verdict. I set temperature to 0 and use majority voting across 3 calls for critical decisions. The latency risk is that an LLM service outage could cause a backlog. We always have the trained classifier as a fallback that can handle all ads, with reduced accuracy on edge cases."
+    next: train_pipeline
+
+  # ============ TRAINING ============
+  - id: train_pipeline
+    stage: training
+    type: info
+    label: "Training Pipeline"
+    speaker: interviewer
+    content: |
+      Let us design the training pipeline for the bad ad detection system, with focus on the adversarial retraining loop.
+
+      **Training data sources:**
+
+      | Source | Volume | Label Quality | Update Frequency |
+      |--------|--------|--------------|-----------------|
+      | **Human review labels** | ~50K/day | High (3-annotator agreement) | Real-time |
+      | **Red team samples** | ~500/week | Expert-quality | Weekly |
+      | **User reports (verified)** | ~10K/day | Medium (needs validation) | Daily |
+      | **Post-serve detections** | ~100K/day | Model-quality (needs audit) | Daily |
+      | **Synthetic adversarial** | ~50K/week | Generated | Weekly |
+
+      **Training pipeline (daily):**
+      ```
+      1. Collect latest labels from all sources
+      2. Data quality checks:
+         - Remove duplicates
+         - Validate label consistency (if same ad has conflicting labels, resolve)
+         - Check for annotation errors (< 5% expected disagreement)
+      3. Data augmentation:
+         - Text: synonym replacement, character perturbation, back-translation
+         - Image: rotation, color jitter, noise, cropping
+         - Adversarial: apply known evasion techniques to create hard negatives
+      4. Train model (fine-tune from yesterday's checkpoint):
+         - 3 epochs on new data
+         - Learning rate: 1e-5 (small, to preserve existing knowledge)
+         - Focal loss with class weights inversely proportional to frequency
+      5. Evaluate on held-out test set + red team samples + recent appeals
+      6. Deploy if:
+         - Recall on critical violations >= 99.5%
+         - Precision >= 95%
+         - Recall on red team samples >= previous model
+      ```
+
+      **Active learning for efficient labeling:**
+      - Prioritize ads for human review where the model is most uncertain
+      - This targets the **decision boundary** -- the most informative examples
+      - Reduces the human labeling needed by 3-5x compared to random sampling
+
+      **Concept drift handling:**
+      New types of bad ads emerge constantly. Detect drift by:
+      - Monitoring the distribution of model uncertainty scores
+      - If the fraction of uncertain predictions (0.3-0.7 confidence) increases, new patterns are emerging
+      - Trigger increased human review and accelerated retraining
+
+      **Emergency retraining (for critical evasions):**
+      ```
+      Red team discovers evasion → Label 100+ examples → Fine-tune for 1 epoch
+      → Evaluate → Deploy within 4 hours
+      ```
+      This rapid response cycle is critical for maintaining safety against adversarial actors.
+
+      Let us design the deployment architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you prevent the model from forgetting old patterns when learning new ones?"
+      - speaker: candidate
+        text: "Catastrophic forgetting is a real risk with daily fine-tuning. I mitigate this with three strategies: first, use a very small learning rate (1e-5) so updates are gentle. Second, include a replay buffer -- sample 10% of the training batch from older data spanning the last 90 days. Third, maintain a separate test set of historical violation examples and verify that recall on old patterns does not degrade before deploying the new model."
+    next: deploy_question
+
+  # ============ DEPLOYMENT ============
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Deployment Architecture"
+    speaker: interviewer
+    content: |
+      How should we deploy the bad ad detection system?
+    choices:
+      - label: "Asynchronous pipeline with priority queues"
+        answer: |
+          I would deploy an **asynchronous pipeline** with priority-based routing, since most ad review does not need real-time latency.
+
+          **Architecture:**
+          ```
+          Ad Submission API
+               │
+               ▼
+          Priority Router
+               │
+          ┌────┴─────┬──────────────┐
+          │ P0: Fast  │ P1: Standard  │ P2: Batch
+          │ track     │ ML review     │ re-review
+          │ (1 min)   │ (15 min)      │ (24 hours)
+          │           │               │
+          │ Rule-     │ Full          │ Updated
+          │ based +   │ multimodal    │ models on
+          │ light ML  │ pipeline      │ existing ads
+          └────┬─────┴──────┬───────┘
+               │            │
+               ▼            ▼
+          Decision Queue → Human Review (for uncertain)
+               │
+               ▼
+          Ad Status Update (approve/reject/restrict)
+          ```
+
+          **P0 Fast Track (70% of ads):**
+          - Trusted advertisers with clean history
+          - Ad content similar to previously approved ads (embedding similarity > 0.95)
+          - Lightweight rule-based checks + small ML model (~5ms)
+          - Auto-approved in < 1 minute
+
+          **P1 Standard Review (20% of ads):**
+          - New advertisers or modified creatives
+          - Full multimodal pipeline: text + image + landing page
+          - Processing time: 1-5 minutes (dominated by landing page crawl)
+          - Auto-decided for 80% of P1 ads; remaining 20% → human review
+
+          **P2 Batch Re-review (background):**
+          - Re-scan all active ads weekly with latest model
+          - Catch violations that were missed or new policy additions
+          - Process 5B ads/day in batch (not latency-sensitive)
+
+          **Scaling:**
+          - P0: CPU-only, scales with ad submission rate. 10 instances handle 200K ads/hour.
+          - P1: GPU for multimodal inference. 5 T4 GPUs handle 40K ads/hour in P1.
+          - P2: Batch GPU cluster, scheduled overnight. 50 GPUs process 5B ads in ~8 hours.
+
+          **Trade-off:** Asynchronous means some ads have a 15-minute wait before serving. For time-sensitive campaigns (flash sales, event-based), this can be frustrating. Mitigate with advertiser-level SLA tiers.
+        next: deploy_details
+      - label: "Real-time synchronous with caching"
+        answer: |
+          I would deploy a **real-time synchronous review** system where the ad review decision is returned as part of the ad creation API response.
+
+          **Architecture:**
+          ```
+          Ad Creation API Request
+               │
+               ▼
+          Cache Check: Have we seen this exact ad before?
+          ┌── Yes → Return cached decision (< 10ms)
+          │
+          └── No → Real-time Review Pipeline
+               │
+               ├── Text classifier (30ms, CPU)
+               ├── Image classifier (50ms, GPU)    [parallel]
+               ├── Landing page check (100ms, cached)
+               │
+               ▼
+          Ensemble Decision (5ms)
+               │
+               ▼
+          Return: {status: "approved|rejected|pending_review",
+                   confidence: 0.95,
+                   policy_violations: [...]}
+          ```
+
+          **Decision returned in < 200ms for most ads.**
+
+          **Aggressive caching strategy:**
+          - **Creative hash cache:** Hash(image + text) → previous decision. ~40% cache hit rate.
+          - **Advertiser template cache:** If this ad is a minor variant of a previously approved ad (same image, slightly different text), approve instantly. ~20% cache hit rate.
+          - **Landing page cache:** Landing pages change slowly. Cache page analysis for 24 hours. ~60% cache hit rate.
+          - **Total cache hit rate: ~60%**, meaning only 40% need real-time model inference.
+
+          **Landing page shortcut:**
+          Full landing page crawl takes 500ms-2s (too slow for real-time). Instead:
+          - **URL reputation check** against known-good and known-bad domain lists (< 5ms)
+          - **Certificate check** via CT logs (< 10ms)
+          - **WHOIS features** (pre-cached): domain age, registrar
+          - Full page crawl runs asynchronously. If it reveals a violation post-approval, the ad is immediately pulled.
+
+          **Trade-off:** Real-time review means we cannot do a full landing page crawl before serving. A sophisticated bad actor could pass the real-time check with a clean URL and then change the landing page content after approval. Mitigate with continuous post-serve monitoring and rapid takedown.
+        next: deploy_details
+
+  - id: deploy_details
+    stage: deployment
+    type: info
+    label: "Production Safety Details"
+    speaker: interviewer
+    content: |
+      Let us cover the critical safety mechanisms in production.
+
+      **Multi-layer defense:**
+      ```
+      Layer 1: Pre-submission rules (client-side)
+        - Block known banned content categories at the ad creation UI
+        - Prevents obviously bad ads from wasting review resources
+
+      Layer 2: ML review (our system)
+        - Full multimodal analysis
+        - Auto-approve, auto-reject, or route to human
+
+      Layer 3: Post-serve continuous monitoring
+        - Re-scan served ads with updated models (weekly full scan)
+        - User report processing (real-time)
+        - Landing page change detection (daily re-crawl of active URLs)
+
+      Layer 4: Rapid response
+        - When a violation is confirmed, kill the ad in < 5 minutes globally
+        - Broadcast to all ad servers via kill-list push
+        - Investigate the advertiser for related violations
+      ```
+
+      **Kill list architecture:**
+      - Distributed Redis set containing all blocked ad IDs
+      - Updated via pub/sub with < 1 second propagation
+      - Every ad server checks the kill list before serving (simple set membership, < 0.1ms)
+      - Kill list size: ~50M entries, refreshed daily (remove expired entries)
+
+      **Human review queue management:**
+      - Priority scoring: `priority = severity * (1 - model_confidence) * impression_potential`
+      - High-severity uncertain ads with large audiences reviewed first
+      - Target: 95% of human reviews completed within 4 hours
+      - Reviewer quality monitoring: inject known-labeled ads to measure reviewer accuracy
+
+      **Advertiser communication:**
+      - Rejected ads receive specific policy citations + remediation suggestions
+      - Appeal process: advertiser contests → senior reviewer → ML team review if systemic
+      - API for bulk ad status checks (large advertisers need programmatic access)
+
+      **Metrics-based deployment gating:**
+      - New model must achieve >= previous model's recall on a curated test set of 10K labeled violations
+      - Must not increase false positive rate by more than 0.5%
+      - Must pass the red team's latest evasion test suite (100+ samples)
+      - Canary deployment: 10% of traffic for 24 hours before full rollout
+
+      Let us discuss monitoring.
+    dialogue:
+      - speaker: interviewer
+        text: "What is the SLA for removing a confirmed bad ad from serving?"
+      - speaker: candidate
+        text: "For critical violations like malware or CSAM, the target is under 5 minutes from confirmation to global kill. This uses a push-based kill list architecture -- when a violation is confirmed, the ad ID is pushed to a distributed Redis set that every ad server checks before serving. The propagation takes under 1 second. For less severe violations, the target is 1 hour. We track 'time to kill' as a key operational metric."
+    next: mon_strategy
+
+  # ============ MONITORING ============
+  - id: mon_strategy
+    stage: monitoring
+    type: question
+    label: "Monitoring Strategy"
+    speaker: interviewer
+    content: |
+      What monitoring would you set up for the bad ad detection system?
+    choices:
+      - label: "Safety-focused monitoring (miss rate tracking)"
+        answer: |
+          I would build monitoring centered on **miss rate tracking** -- detecting when bad ads slip through.
+
+          **Real-time safety monitoring:**
+
+          | Metric | Alert Threshold | Action |
+          |--------|----------------|--------|
+          | **User reports rate** | > 2x baseline per hour | Investigate new evasion |
+          | **Post-serve detection rate** | > 1% of served ads flagged by updated model | Model may be stale |
+          | **High-severity miss** | Any confirmed critical violation post-serve | Immediate incident response |
+          | **Model confidence shift** | Mean confidence drops > 5% | Distribution shift, possible evasion |
+          | **New advertiser violation rate** | > 5% of new accounts submit bad ads | Tighten new account screening |
+
+          **Proactive miss detection:**
+          - **Shadow scoring:** Run the latest model (possibly not yet deployed) on all served ads. Compute the hypothetical rejection rate. If significantly higher than production model, the production model is missing violations.
+          - **Cross-platform intelligence:** Compare with industry databases (TAG Threat Exchange, Google Safe Browsing) for known-bad URLs or ad creatives
+          - **Honeypot monitoring:** Create accounts that deliberately submit known-bad ads (with slight variations). If any pass review, the model has a gap.
+
+          **Red team effectiveness tracking:**
+          - Weekly red team score: % of crafted evasion attempts that pass the model
+          - Track over time -- should be trending downward as defenses improve
+          - Red team must also evolve techniques to keep the pressure realistic
+
+          **Incident response protocol:**
+          1. Critical violation detected post-serve
+          2. Kill ad immediately (< 5 min)
+          3. Scan all ads from the same advertiser (< 30 min)
+          4. Analyze evasion technique used
+          5. Label samples, retrain model (< 48 hours)
+          6. Post-mortem: how did this get through? What systemic fix is needed?
+
+          **Weekly safety report:**
+          - Violations caught (by category, severity)
+          - Estimated miss rate (from post-serve scanning + user reports)
+          - Red team results
+          - Adversarial trend analysis
+          - Recommendations for model improvements
+        next: mon_terminal_safety
+      - label: "Operational efficiency monitoring"
+        answer: |
+          I would build monitoring focused on **operational efficiency** -- ensuring the system processes ads quickly and cost-effectively.
+
+          **Pipeline throughput monitoring:**
+
+          | Metric | Target | Alert |
+          |--------|--------|-------|
+          | **Ads processed/hour** | > 200K | Drop > 20% |
+          | **P0 fast-track rate** | > 65% | Drop below 60% |
+          | **Auto-decision rate** | > 85% | Drop below 80% |
+          | **Mean time to decision** | < 10 min | Exceeds 20 min |
+          | **Human review queue depth** | < 5K ads | Exceeds 10K |
+          | **GPU utilization** | 60-80% | Above 90% (scale up) or below 40% (scale down) |
+
+          **Cost efficiency metrics:**
+          - **Cost per ad reviewed:** Total compute + human review cost / ads reviewed. Track monthly trend.
+          - **Human review cost per ad:** Moderation cost / human-reviewed ads. Target: < $0.10 per ad.
+          - **LLM cost (if used):** Track per-ad LLM inference cost. Optimize prompt length and model tier.
+          - **GPU cost efficiency:** Revenue protected / GPU compute cost. Should be > 1000x (each $1 of GPU prevents $1000+ of brand safety incidents).
+
+          **Advertiser experience monitoring:**
+          - **Time to first serve:** Distribution and P95. Target: P95 < 30 min.
+          - **Rejection rate trend:** Should be stable or declining (indicates advertiser education is working)
+          - **Appeal volume and resolution time:** Spikes indicate false positive issues
+          - **NPS impact:** Advertisers who had ads rejected vs those who did not
+
+          **Model staleness monitoring:**
+          - Track model age (time since last retraining)
+          - Track performance on most recent data vs model's training data
+          - If performance on recent data drops > 2% compared to training data, model is stale
+          - Automated alert + retraining trigger
+
+          **Dashboard hierarchy:**
+          - **Executive:** Daily summary: ads reviewed, violations blocked, estimated harm prevented
+          - **Operations:** Hourly: queue depth, processing times, cost metrics
+          - **ML team:** Per-model: accuracy metrics, feature drift, adversarial test results
+        next: mon_terminal_ops
+
+  - id: mon_terminal_safety
+    stage: monitoring
+    type: terminal
+    label: "Safety-Focused Path Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You have designed a comprehensive **bad ad detection system** with safety-focused monitoring.
+
+      **Your design summary:**
+      - **Problem:** Detect policy-violating, deceptive, and malicious ads before they reach users, processing 200K+ ads/hour
+      - **Metrics:** Recall-first for critical violations (>99.5%), with precision guardrails to protect legitimate advertisers
+      - **Data:** Multimodal data pipeline (text, image, video, landing page) with adversarial augmentation
+      - **Features:** Multimodal fusion or modality-specific models with cross-modal consistency checks
+      - **Model:** Hierarchical multi-label classifier or LLM+classifier hybrid for known and novel violations
+      - **Training:** Daily retraining with active learning, adversarial data, and emergency retrain capability
+      - **Deployment:** Asynchronous priority pipeline or real-time synchronous with caching
+      - **Monitoring:** Miss rate tracking, red team testing, proactive post-serve scanning
+
+      **Key strengths:**
+      - Treating detection as an adversarial problem with continuous red team feedback
+      - Hierarchical approach handling both common and long-tail violation types
+      - Rapid incident response with < 5 minute ad kill capability
+
+      **Areas for further exploration:**
+      - Federated detection across platforms (sharing threat intelligence)
+      - Generative AI for synthetic adversarial training data
+      - Graph-based detection (analyzing advertiser networks for coordinated bad actor campaigns)
+      - Privacy-preserving detection (analyzing ad content without accessing user data)
+
+      This design demonstrates the rigor needed for one of the most critical trust and safety systems in the ad ecosystem. Outstanding work!
+
+  - id: mon_terminal_ops
+    stage: monitoring
+    type: terminal
+    label: "Operations Path Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You have designed a comprehensive **bad ad detection system** with operational efficiency monitoring.
+
+      **Your design summary:**
+      - **Problem:** Build a scalable ad review pipeline that balances safety with advertiser experience
+      - **Metrics:** Balanced precision-recall with automation rate targets (>85% auto-decided)
+      - **Data:** Multimodal pipeline with human-in-the-loop labeling and active learning
+      - **Features:** Multimodal fusion or modality-specific ensemble with advertiser risk scoring
+      - **Model:** Hierarchical classifier or LLM-augmented hybrid for known and emerging violation types
+      - **Training:** Continuous retraining with adversarial augmentation and concept drift detection
+      - **Deployment:** Priority-based pipeline or cached real-time system with multi-layer defense
+      - **Monitoring:** Throughput tracking, cost efficiency, advertiser experience, and model freshness
+
+      **Key strengths:**
+      - Strong focus on operational efficiency and cost management
+      - Practical advertiser experience considerations
+      - Layered defense architecture with graceful degradation
+
+      **Areas for further exploration:**
+      - Self-supervised pre-training on unlabeled ad data
+      - Reinforcement learning for dynamic review thresholds
+      - Explainable AI for better advertiser communication
+      - Multi-language and multi-cultural policy enforcement
+      - Detecting AI-generated deepfake ads
+
+      This design shows the engineering maturity needed to build safety systems that scale to billions of ads while maintaining operational excellence. Great job!

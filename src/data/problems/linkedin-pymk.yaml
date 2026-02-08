@@ -1,0 +1,680 @@
+id: linkedin-pymk
+title: "LinkedIn People You May Know"
+description: "Design a 'People You May Know' recommendation system for LinkedIn."
+companies: ["LinkedIn", "Meta", "Twitter"]
+domains: ["Recommendation", "Graph/Network"]
+root: pd_start
+
+nodes:
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we will design the **"People You May Know" (PYMK)** recommendation system for LinkedIn.
+
+      PYMK is one of LinkedIn's most important growth features. It recommends people that a user might know and want to connect with. LinkedIn has **1 billion members** across 200+ countries, with **~310 million monthly active users**. PYMK is responsible for a significant fraction of all new connections made on the platform - LinkedIn has stated that PYMK drives **over 50% of connection requests**.
+
+      **The core challenge**: From 1 billion potential recommendations, select **20-50 people** to show each user on their homepage, notifications, and "My Network" page. These must be people the user:
+      - **Actually knows** (former colleagues, classmates, acquaintances) - high precision requirement
+      - **Would benefit from connecting with** (industry peers, potential collaborators) - professional relevance
+      - **Would accept a connection request from** - bilateral acceptance is important (unlike following)
+
+      **Key difference from social media "friend suggestions":**
+      LinkedIn connections are **bilateral and professional**. A connection request that gets ignored or declined is a bad user experience for both sides. Unlike Instagram's "Suggested for You," we care deeply about **acceptance rate**, not just the sender's interest.
+
+      **Scale:**
+      - 1 billion member profiles, ~5 billion connections (the LinkedIn graph)
+      - PYMK serves ~100M impressions per day
+      - Latency budget: **<200ms** for the PYMK module
+
+      Let's scope the problem.
+    dialogue:
+      - speaker: interviewer
+        text: "We're designing LinkedIn's People You May Know feature. It drives over 50% of all connection requests on the platform."
+      - speaker: candidate
+        text: "So it's a critical growth feature. What makes it different from Facebook's friend suggestions?"
+      - speaker: interviewer
+        text: "LinkedIn connections are bilateral and professional. A declined connection request is a bad experience for both parties. We care about acceptance rate, not just whether the user sends a request."
+      - speaker: candidate
+        text: "So we need to predict both sides - will the user send a request, AND will the recipient accept it?"
+      - speaker: interviewer
+        text: "Exactly. That bilateral nature is the core design challenge. Let's scope it."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: info
+    label: "Problem Scope"
+    speaker: interviewer
+    content: |
+      Let's scope the PYMK system.
+
+      **Product surfaces:**
+      - **Homepage widget**: ~5-10 recommendations shown alongside the feed
+      - **"My Network" page**: ~20-50 recommendations, the primary PYMK surface
+      - **Post-action prompts**: "You connected with Alice. Do you also know Bob?" (contextual PYMK)
+      - **Email/notification**: "4 people from your new company are on LinkedIn"
+
+      We will focus on the **"My Network" page** ranking, which is the main PYMK surface.
+
+      **ML formulation:**
+      This is a **bilateral recommendation** problem. We need to model:
+      1. **P(send | user, candidate)**: Probability the user sends a connection request
+      2. **P(accept | user, candidate)**: Probability the candidate accepts the request
+      3. **Combined score**: `P(send) * P(accept)` gives expected connection probability
+
+      **Pipeline:**
+      1. **Candidate generation** (1B members -> ~10,000 candidates): Graph-based retrieval (friends-of-friends, shared companies/schools, similar profiles)
+      2. **Scoring** (10,000 -> ~200): ML model scores each candidate
+      3. **Re-ranking** (200 -> 20-50): Apply diversity rules, business constraints
+
+      **Constraints:**
+      - Must respect **connection limits** (LinkedIn caps at 30,000 connections per member)
+      - Must handle **cold-start members** (new users with 0-5 connections): LinkedIn adds ~2 members per second
+      - Must not recommend people who are **blocked**, or who have previously declined the user's request
+      - PYMK is a **growth driver** - it directly affects LinkedIn's MAU and connection graph density metrics
+
+      What should we optimize for?
+    dialogue:
+      - speaker: interviewer
+        text: "The ML formulation is bilateral: predict P(send) and P(accept) and combine them. The pipeline goes from 1 billion members to 10,000 candidates to 20-50 shown."
+      - speaker: candidate
+        text: "The bilateral aspect is interesting. Why not just maximize P(send)?"
+      - speaker: interviewer
+        text: "Because that leads to recommending celebrities and influencers - users want to connect with them but they'd decline. We need real connections that get accepted. The combined P(send) * P(accept) optimizes for actual new connections."
+      - speaker: candidate
+        text: "Cold-start is also critical - new users have the most to gain from PYMK but the least data."
+      - speaker: interviewer
+        text: "Right. LinkedIn adds 2 new members per second. Let's decide on the optimization objective."
+    next: met_question
+
+  - id: met_question
+    stage: metrics
+    type: question
+    label: "Optimization Objective"
+    speaker: interviewer
+    content: |
+      What should the PYMK system optimize for?
+    dialogue:
+      - speaker: interviewer
+        text: "What should we optimize PYMK for? The metric choice has major implications for the type of connections we encourage."
+      - speaker: candidate
+        text: "The obvious choice is connection acceptance rate, but we could also optimize for long-term connection value - do these connections actually interact on the platform?"
+      - speaker: interviewer
+        text: "Interesting distinction. Walk me through both approaches."
+    choices:
+      - label: "Connection acceptance rate (bilateral conversion)"
+        answer: |
+          I would optimize for **connection acceptance rate** - the probability that a PYMK recommendation results in an accepted connection.
+
+          **Why acceptance rate?** This is the most direct measure of PYMK success. A recommendation is good if it leads to a real connection. It naturally encodes the bilateral nature: the user must send a request AND the recipient must accept. An accepted connection is a **strong signal** that both parties know each other or see mutual professional value.
+
+          **Scoring function:**
+          ```
+          Score(user, candidate) = P(send | user, candidate) * P(accept | candidate, user)
+          ```
+
+          **Metrics breakdown:**
+          - **P(send)**: Probability user sends a connection request to the candidate. Baseline: ~3-5% of PYMK impressions result in a request.
+          - **P(accept)**: Probability the candidate accepts a request from this user. Overall acceptance rate on LinkedIn: ~40-50% (much higher than friend suggestions on social media because LinkedIn connections are professional).
+          - **Combined conversion rate**: ~1.5-2.5% of PYMK impressions result in an accepted connection.
+
+          **Key benefit**: The metric is clean, binary (accepted or not), and directly drives LinkedIn's growth goals. More accepted connections = denser graph = more engagement = more revenue (LinkedIn's business model depends on network effects).
+
+          **Key risk**: Acceptance rate optimization can bias toward **"safe" recommendations** - people the user obviously knows (former direct coworkers). This maximizes short-term acceptance but may not provide discovery value. A former colleague from 10 years ago who is in the same industry but a different company might be a more valuable connection than a current coworker the user sees daily.
+        next: met_acceptance
+      - label: "Connection quality (post-connection engagement)"
+        answer: |
+          I would optimize for **connection quality** - not just whether a connection is accepted, but whether it leads to meaningful professional engagement afterward.
+
+          **Why quality over quantity?** LinkedIn's real value comes from **active, valuable connections**, not just a large connection count. A connection with someone you never interact with is a vanity metric. A connection that leads to messages, content sharing, or professional opportunities is genuinely valuable.
+
+          **Quality signals (measured 30 days post-connection):**
+          - **Message exchange**: Did the two people exchange messages within 30 days? This is the strongest signal of a valuable connection.
+          - **Content engagement**: Did they like, comment on, or share each other's posts?
+          - **Profile views**: Did they view each other's profiles (indicating professional interest)?
+          - **Endorsements**: Did one endorse the other's skills?
+          - **Referral/introduction**: Did one introduce the other to a third connection?
+
+          **Quality-weighted scoring:**
+          ```
+          Score = P(accept) * (w1*P(message_30d) + w2*P(engage_content_30d) + w3*P(profile_view_30d))
+          ```
+
+          The acceptance is a prerequisite - you cannot have post-connection engagement without a connection. Then the quality signals predict the connection's ongoing value.
+
+          **Key benefit**: This directly optimizes for LinkedIn's core value proposition - building a professional network that creates real career opportunities. It naturally deprioritizes vanity connections (adding random people for a large network) and prioritizes meaningful professional relationships.
+
+          **Key risk**: Quality labels are **delayed by 30+ days** and very sparse (most connections show minimal post-connection activity). Training is harder. Need to use acceptance as a real-time proxy and quality as a delayed calibration signal.
+        next: met_quality
+
+  - id: met_acceptance
+    stage: metrics
+    type: info
+    label: "Acceptance Metrics Framework"
+    speaker: interviewer
+    content: |
+      Good choice. Let's define the full metrics framework.
+
+      **Offline metrics:**
+      - **Primary**: AUC for P(send) > 0.82, AUC for P(accept | send) > 0.78
+      - **Combined**: AUC for P(accepted_connection) > 0.80
+      - **Ranking**: Precision@10 (what fraction of top 10 recommendations result in accepted connections?). Target: > 0.08 (1 in 12 top-10 recommendations results in a connection).
+      - **Recall@50**: What fraction of connections the user actually makes in the next month appear in our top 50? Target: > 0.35.
+
+      **Online A/B test metrics:**
+      - **Primary**: Accepted connections per user per week from PYMK. Baseline: ~0.5-1.0 per active user.
+      - **Secondary**: Send rate (fraction of impressions that lead to requests), accept rate (fraction of sent requests accepted)
+      - **Guardrails**: Declined request rate (must not increase), "Don't Know This Person" reports (must not increase), unsubscribe from PYMK notifications
+      - **Growth metrics**: Total new connections per day on LinkedIn, new users reaching 50+ connections within 30 days
+
+      **The "Don't Know" signal is critical:**
+      When a user clicks "I don't know this person" on a connection request (available on the recipient side), it is a very strong negative signal. If PYMK is surfacing too many strangers, this rate increases, damaging the platform's trust. LinkedIn tracks this carefully and it is a hard guardrail in A/B tests.
+
+      **Segmented metrics:**
+      - By member maturity: New members (<30 days), growing (30-180 days), established (180+ days). PYMK is most important for new and growing members.
+      - By graph density: Members with <50 connections have different needs than those with 500+.
+      - By geography: Professional networking patterns differ by country/culture.
+
+      Let's discuss data.
+    dialogue:
+      - speaker: interviewer
+        text: "Key metrics: AUC above 0.80 for accepted connection prediction. Online, about 0.5-1.0 accepted connections per user per week from PYMK."
+      - speaker: candidate
+        text: "The 'Don't Know This Person' signal seems very important as a guardrail."
+      - speaker: interviewer
+        text: "It's critical. If PYMK starts recommending too many strangers, the 'Don't Know' rate spikes and it damages platform trust. It's a hard guardrail - any model that increases this rate is rejected regardless of connection improvements."
+      - speaker: candidate
+        text: "The segmentation by member maturity makes sense - new members need PYMK the most."
+      - speaker: interviewer
+        text: "Exactly. For new members, PYMK is their primary way to build their initial network. Let's discuss data."
+    next: data_pipeline
+
+  - id: met_quality
+    stage: metrics
+    type: info
+    label: "Quality Metrics Framework"
+    speaker: interviewer
+    content: |
+      Excellent thinking. Let's define the quality-oriented metrics framework.
+
+      **Offline metrics:**
+      - **Acceptance AUC**: Still need P(accept) > 0.78 as a prerequisite
+      - **Quality prediction AUC**: AUC for P(message_within_30d | accepted) > 0.65. This is hard - most connections are dormant.
+      - **Post-connection engagement correlation**: Predicted quality score should correlate with actual 30-day engagement (Spearman r > 0.30).
+
+      **Online A/B test metrics:**
+      - **Primary**: Accepted connections per user per week (must not decrease by more than 5%)
+      - **Quality primary**: Post-connection message rate at 30 days. Baseline: ~8-12% of new connections exchange messages within 30 days.
+      - **Quality secondary**: Post-connection content engagement rate, profile view rate, endorsement rate
+      - **Guardrails**: Total accepted connections (cannot drop significantly), "Don't Know" rate, PYMK impression CTR
+
+      **The dual-metric challenge:**
+      Optimizing for connection quality will likely **reduce total accepted connections**. Why? Because the highest-acceptance recommendations are often obvious (current coworkers), but the highest-quality connections are often less obvious (a former colleague who moved to a relevant company). The quality model needs to find the **"Goldilocks zone"** - people the user knows well enough to accept, but who also provide genuine networking value.
+
+      **Practical compromise:**
+      Use P(accept) as the primary model. Then apply a **quality re-ranking multiplier**:
+      ```
+      FinalScore = P(accept)^0.7 * QualityScore^0.3
+      ```
+      The 70/30 split ensures acceptance remains dominant (no point in quality connections that never get accepted) but quality gets a meaningful vote.
+
+      Let's discuss data.
+    dialogue:
+      - speaker: interviewer
+        text: "The dual-metric challenge is real: quality optimization reduces total connections. The practical compromise is a 70/30 split between acceptance and quality scores."
+      - speaker: candidate
+        text: "That makes sense. You don't want to recommend high-quality connections that never get accepted."
+      - speaker: interviewer
+        text: "Right. The highest-quality recommendation is useless if the user doesn't recognize the person. Acceptance is a prerequisite for quality."
+      - speaker: candidate
+        text: "The 8-12% baseline for post-connection messaging is interesting - most connections are dormant."
+      - speaker: interviewer
+        text: "That's the reality of professional networking. Most connections are 'weak ties' - but research shows weak ties are often the most valuable for career advancement. Let's discuss data."
+    next: data_pipeline
+
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      LinkedIn has uniquely rich professional data. Let's inventory it.
+
+      **Social graph data:**
+      - **Connection graph**: ~5 billion edges between 1 billion members. Undirected (mutual connections). This is the core data asset.
+      - **Follow graph**: ~10 billion edges. Directed (can follow without connecting). Weaker signal but higher volume.
+      - **Interaction graph**: Who views whose profile, who likes/comments on whose posts, who messages whom. Weighted, directed, and timestamped.
+      - **Company affiliation graph**: Members connected to companies they work at (current and past). ~60 million companies on LinkedIn.
+      - **School affiliation graph**: Members connected to schools they attended. ~100K educational institutions.
+
+      **Profile data:**
+      - **Structured fields**: Current company, title, industry, location, skills (members list ~30 skills on average), education (school, degree, field of study, graduation year)
+      - **Profile completeness**: Score from 0-100. More complete profiles are easier to match.
+      - **Activity signals**: Post frequency, comment frequency, article publishing, profile update recency
+
+      **Historical connection data:**
+      - **Sent requests**: Who sent connection requests to whom, and the outcome (accepted, declined, withdrawn, pending)
+      - **PYMK impression data**: Which candidates were shown to which users, and what action was taken (connect, dismiss, ignore)
+      - **Volume**: ~50 million connection requests per day, ~20-25 million accepted
+
+      **External signals:**
+      - **Email contact import**: Users can import contacts from email (with permission). This directly reveals who they know.
+      - **Phone contact sync**: Similar to email import. Very strong signal for who the user knows.
+      - **Calendar data**: LinkedIn may have access to meeting participants (with permission). Co-attendees are likely acquaintances.
+
+      **Data challenges:**
+      - **Extreme sparsity**: The connection graph has density ~0.00000001 (5B edges / (1B * 1B/2)). Each member connects with <0.001% of other members.
+      - **Selection bias**: We only see outcomes for PYMK candidates we showed. Members who would have been great recommendations but were never shown have no labels.
+      - **Privacy constraints**: Contact import and calendar data are privacy-sensitive. Must handle with consent and anonymization.
+
+      Let's discuss candidate generation and feature engineering.
+    dialogue:
+      - speaker: interviewer
+        text: "LinkedIn has rich graph data: 5 billion connections, 10 billion follow edges, plus company and school affiliation graphs. Historical data includes 50 million connection requests per day."
+      - speaker: candidate
+        text: "The email contact import data is a very strong signal - it directly reveals who users know offline."
+      - speaker: interviewer
+        text: "It's one of the strongest signals, but privacy-sensitive. Only available for users who opt in. The graph sparsity is extreme - the connection graph has density of about 0.00000001."
+      - speaker: candidate
+        text: "So graph-based candidate generation is essential - we can't score all 1 billion members."
+      - speaker: interviewer
+        text: "Exactly. The candidate generation must efficiently narrow the billion-member space. Let's discuss features."
+    next: feat_question
+
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Candidate Generation & Features"
+    speaker: interviewer
+    content: |
+      How would you approach candidate generation and feature engineering for PYMK?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you generate the candidate set and engineer features? The graph structure is the key asset here."
+      - speaker: candidate
+        text: "Graph-based candidate generation is the natural approach for PYMK. The question is which graph signals to prioritize."
+      - speaker: interviewer
+        text: "Walk me through your approach."
+    choices:
+      - label: "Friends-of-friends (FoF) with triangle counting"
+        answer: |
+          I would use a **friends-of-friends (FoF)** approach with **triangle counting** as the primary candidate generation method.
+
+          **Why FoF?** The fundamental insight behind PYMK is that **if two people share many mutual connections, they probably know each other**. This is the "triadic closure" principle from social network theory. On LinkedIn, if Alice and Bob share 15 mutual connections, there is a very high probability they know each other (former colleagues, classmates, etc.).
+
+          **Candidate generation algorithm:**
+          1. For the target user, enumerate all **2nd-degree connections** (friends of friends). For a user with 500 connections, each with 500 connections, this is up to 250,000 unique 2nd-degree connections (after dedup).
+          2. For each 2nd-degree connection, count the number of **mutual connections** (triangles). This is the primary ranking signal for candidate generation.
+          3. Filter: Remove already-connected members, blocked members, and members who previously declined.
+          4. Return top 10,000 by mutual connection count.
+
+          **Why triangle counting works so well for LinkedIn:**
+          - **Company clusters**: When you join a new company, you gradually connect with coworkers. Your coworkers' coworkers at the same company are your other coworkers - people you definitely know.
+          - **School clusters**: Same logic for university classmates.
+          - **Industry clusters**: People in the same industry attend the same conferences, work at the same companies over time, and naturally accumulate mutual connections.
+
+          **Scaling the FoF computation:**
+          - Pre-compute and cache 2nd-degree neighbor lists for active users (updated daily)
+          - For 310M MAUs with average 500 connections, the adjacency list is ~155 billion entries. Store as compressed sparse adjacency lists in a distributed graph database (like LinkedIn's own **Galene** system).
+          - Triangle counting per user: ~100ms using the pre-computed adjacency lists
+
+          **Supplementary candidate sources:**
+          - **Same company/school**: Members who share a company or school affiliation but are not yet 2nd-degree connected. Handles cold-start for members with few connections.
+          - **Contact import matches**: If the user imported contacts, prioritize matching email/phone contacts above all other candidates.
+          - **Profile viewers**: People who viewed the user's profile recently (they may be looking to connect).
+
+          **Limitation**: FoF only discovers people within 2 hops. Misses valuable connections outside the user's current network (e.g., someone in a different industry who would be a great mentor).
+        next: feat_details
+      - label: "Graph neural network embeddings + multi-source retrieval"
+        answer: |
+          I would use **graph neural network (GNN) embeddings** for candidate generation, combined with multi-source retrieval for coverage.
+
+          **GNN-based candidate generation:**
+          Train a GNN on the LinkedIn connection graph to produce member embeddings where connected members are close in embedding space.
+
+          **Architecture: GraphSAGE on LinkedIn graph**
+          - **Node features**: Member profile features (industry embedding, title embedding, location, skills vector, tenure, activity level)
+          - **2-layer GraphSAGE**: Aggregates neighbor features to produce a 128-dim member embedding
+          - **Training objective**: Link prediction - predict which members are connected. Use positive pairs (actual connections) and hard negative pairs (2nd-degree connections that are NOT connected).
+          - **Output**: 128-dim embedding per member
+
+          **Candidate retrieval:**
+          - Build a FAISS HNSW index over all 1 billion member embeddings. Index size: ~128GB (fits on a single high-memory machine or distributed).
+          - For each user, query the index for top 5,000 nearest neighbors. These are members with similar professional profiles and network positions.
+          - Retrieval latency: <10ms per query with HNSW.
+
+          **Multi-source retrieval (additional 5,000 candidates):**
+          - **FoF candidates**: Top 2,000 by mutual connection count (still essential)
+          - **Company/school alumni**: 1,000 candidates from shared affiliations
+          - **Profile similarity**: 1,000 candidates with similar titles/skills from embedding search
+          - **Contact imports**: All matches (highest priority)
+          - **Profile viewers**: Recent viewers who are not yet connected (500 candidates)
+
+          **Why GNN?** The embedding captures **structural position** in the graph. Two people with similar professional backgrounds and similar network neighborhoods will have close embeddings, even if they are not 2nd-degree connected. This discovers valuable connections **beyond the 2-hop boundary** - people in different parts of the graph who would benefit from connecting.
+
+          **Trade-off**: GNN training on a 1 billion node graph is expensive (requires distributed training with mini-batch neighborhood sampling). LinkedIn has published that they train GraphSAGE-style models on their full graph using **PinnerSage** / custom distributed frameworks. Training time: ~24-48 hours on a large GPU cluster.
+        next: feat_details
+
+  - id: feat_details
+    stage: features
+    type: info
+    label: "Feature Engineering for Scoring"
+    speaker: interviewer
+    content: |
+      Good candidate generation approach. Now let's engineer features for the **scoring model** that ranks the 10,000 candidates.
+
+      **Graph proximity features (~15 features):**
+      - **Mutual connection count**: The single strongest feature for PYMK. Log-transformed (log(mutual+1)).
+      - **Jaccard similarity**: |mutual| / |union of connections|. Normalizes for different network sizes.
+      - **Adamic-Adar score**: Sum of 1/log(degree) for each mutual connection. Weights rare mutual connections higher (a mutual connection with 50 connections is more informative than one with 5,000).
+      - **Common neighbor centrality**: Average PageRank of mutual connections. High-centrality mutual connections indicate a stronger connection.
+      - **Shortest path length**: 2 (FoF) is stronger than 3+.
+
+      **Affiliation features (~20 features):**
+      - **Shared current company**: Binary + company size (working at the same 100-person startup is more meaningful than the same 100K-person corporation)
+      - **Shared past company**: Binary + years of overlap. Did they work there at the same time?
+      - **Shared school**: Binary + graduation year proximity (graduated within 2 years vs 10 years apart)
+      - **Shared industry**: Same industry category + sub-category
+      - **Shared skills**: Jaccard similarity of skills listed on profiles
+      - **Geographic proximity**: Same city, same country, same time zone
+
+      **Profile similarity features (~15 features):**
+      - **Title similarity**: Semantic similarity between job titles (using a title embedding model)
+      - **Seniority match**: Are they at similar career levels? VP connecting with VP is different from VP connecting with intern.
+      - **Profile completeness**: Both profiles' completeness scores. More complete profiles lead to better matches and higher acceptance rates.
+      - **Account maturity**: Both members' account ages. New members accept more connections.
+
+      **Behavioral features (~15 features):**
+      - **Profile view history**: Has the user viewed the candidate's profile? How recently? How many times? (Very strong signal)
+      - **Content engagement**: Has the user liked/commented on the candidate's posts?
+      - **Contact import match**: Did the candidate's email appear in the user's imported contacts? (The strongest possible signal)
+      - **PYMK history**: Has this candidate been shown to this user before? If shown and not clicked, reduce score.
+      - **User's connection request patterns**: How many requests does the user send per week? High-senders are less selective.
+
+      **Bilateral features (~10 features):**
+      - All graph and affiliation features computed **in both directions**: the user's features relative to the candidate AND the candidate's features relative to the user
+      - **Acceptance propensity**: The candidate's historical acceptance rate for connection requests. Some members accept everyone; others are very selective.
+
+      These ~75 features give the scoring model comprehensive coverage of "do they know each other?" (graph, affiliation) and "would they both benefit from connecting?" (similarity, engagement).
+
+      Let's choose the model architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "The feature set covers graph proximity, shared affiliations, profile similarity, behavioral signals, and bilateral features. About 75 features total."
+      - speaker: candidate
+        text: "The bilateral features are important - we need both directions. The candidate's acceptance propensity is a crucial feature."
+      - speaker: interviewer
+        text: "Right. Some members accept 90% of requests; others accept 10%. The candidate's historical acceptance rate directly affects P(accept). Contact import match is the single strongest binary signal."
+      - speaker: candidate
+        text: "The PYMK history feature is interesting - if we showed this candidate before and the user didn't act, reduce the score."
+      - speaker: interviewer
+        text: "Exactly. Don't keep showing the same person. Let's choose the model."
+    next: mod_question
+
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Model Architecture"
+    speaker: interviewer
+    content: |
+      What model architecture would you use for the PYMK scoring model?
+    dialogue:
+      - speaker: interviewer
+        text: "What model would you use to score the 10,000 candidates? Remember the bilateral nature - we need to predict both P(send) and P(accept)."
+      - speaker: candidate
+        text: "There are two approaches: a single model that predicts the combined outcome, or two separate models that we combine."
+      - speaker: interviewer
+        text: "Walk me through your recommendation."
+    choices:
+      - label: "Gradient boosted trees with bilateral features"
+        answer: |
+          I would use **gradient boosted trees (LightGBM)** with separate models for P(send) and P(accept), combined at inference time.
+
+          **Two-model architecture:**
+
+          **Model 1: P(send) model**
+          - Predicts: Will the user send a connection request to this candidate?
+          - Features: All user-centric features (user's view of the candidate's profile, user's connection patterns, user-side graph features, affiliation matches)
+          - Training data: PYMK impressions where the user either sent a request (positive) or did not (negative). ~100M labeled examples per month.
+          - LightGBM: 600 trees, max depth 8, learning rate 0.05
+
+          **Model 2: P(accept) model**
+          - Predicts: If a request is sent, will the candidate accept?
+          - Features: Candidate-centric features (candidate's acceptance propensity, candidate's view of the user's profile, bilateral graph features)
+          - Training data: Sent connection requests with outcome (accepted/declined). ~50M examples per month (only includes cases where requests were actually sent).
+          - LightGBM: 500 trees, max depth 7, learning rate 0.05
+
+          **Combined scoring:** `FinalScore = P(send)^α * P(accept)^β` where α and β are tuned via A/B testing. Typically α=0.6, β=0.4 (send prediction gets slightly more weight since it determines immediate user action).
+
+          **Why two separate models?**
+          - **Different training distributions**: P(send) is trained on all PYMK impressions; P(accept) is trained only on sent requests. Mixing them in one model is statistically messy.
+          - **Different feature importances**: P(send) depends heavily on the user's behavior and the candidate's profile attractiveness. P(accept) depends on the candidate's general willingness and the bilateral relationship strength.
+          - **Easier debugging**: When acceptance rate drops, we can diagnose whether P(send) is recommending bad candidates or P(accept) is miscalibrated.
+
+          **Why LightGBM?** PYMK features are mostly **tabular** (counts, ratios, binary flags, similarity scores). Gradient boosted trees dominate on tabular data. They naturally handle the feature interactions (mutual connections x same company x same graduation year) that drive PYMK quality. Training: ~30 minutes per model. Inference: ~2ms for 10,000 candidates per user on CPU.
+        next: train_strategy
+      - label: "Neural network with graph-augmented features"
+        answer: |
+          I would use a **neural network** that jointly predicts P(send) and P(accept) with a shared backbone and separate heads, augmented with graph-based features.
+
+          **Architecture:**
+          - **Feature input layer**: Concatenation of all ~75 features. Categorical features (company, school, industry) go through embedding lookup tables (32-dim per category). Graph features input as-is.
+          - **Graph feature augmentation**: In addition to hand-crafted graph features, include the raw **GNN embeddings** (128-dim per member) from the candidate generation stage. Compute user-candidate embedding interaction: element-wise product, cosine similarity, L2 distance.
+          - **Shared backbone** (3-layer MLP, 512-256-128 with batch normalization and dropout 0.3): Learns a joint representation of the user-candidate pair.
+          - **P(send) head** (2-layer MLP, 128-64-1): Predicts send probability. Loss: binary cross-entropy.
+          - **P(accept) head** (2-layer MLP, 128-64-1): Predicts acceptance probability. Loss: binary cross-entropy.
+          - **Combined score**: `Score = P(send) * P(accept)` at inference time.
+
+          **Joint training benefits:**
+          - **Shared representations**: The backbone learns features relevant to both tasks. Features that predict sending (strong profile) are correlated with features that predict acceptance (legitimate professional).
+          - **Regularization**: Multi-task learning prevents overfitting to either task alone.
+          - **Efficiency**: One forward pass produces both predictions. Training on the union of impression data (for P(send)) and request data (for P(accept)).
+
+          **Handling the different data distributions:**
+          - P(send) is trained on all PYMK impressions (~100M/month)
+          - P(accept) is trained only on sent requests (~50M/month)
+          - Use **task-specific batch sampling**: Each training batch includes both impression examples (for send head) and request examples (for accept head). The backbone sees all examples; each head only backpropagates on its relevant examples.
+
+          **Why neural over trees?** The GNN embeddings (128-dim) contain rich graph structural information that trees cannot effectively use (too many dimensions, non-linear interactions). The neural network can learn to extract useful patterns from these embeddings natively. Additionally, the multi-task architecture is more natural in neural networks than in tree-based models.
+
+          **Model size**: ~3M parameters. Inference: ~3ms per batch of 10,000 candidates on GPU.
+
+          **Trade-off**: Requires GPU serving (more expensive than CPU for trees). But the quality gain from end-to-end learning with GNN embeddings is typically **+2-4% AUC** over trees.
+        next: train_strategy
+
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: interviewer
+    content: |
+      Good model choice. Let's discuss training strategy.
+
+      **Training data:**
+      - **For P(send)**: All PYMK impressions with outcome (sent request or not). ~100M per month. Heavily imbalanced: only ~3-5% positive.
+      - **For P(accept)**: All sent connection requests with outcome (accepted/declined). ~50M per month. Less imbalanced: ~40-50% positive.
+      - **Temporal split**: Train on months 1-3, validate on month 4, test on most recent 2 weeks.
+
+      **Handling class imbalance (P(send)):**
+      - Only 3-5% of PYMK impressions lead to send. Without correction, the model would predict "no send" for everything.
+      - **Negative downsampling**: Keep all positives, sample 10% of negatives. Apply **log-odds correction** at inference to correct the bias introduced by downsampling.
+      - **Focal loss**: Alternative to downsampling. Focus training on hard negatives (candidates that look promising but were not clicked).
+
+      **Feature engineering pipeline:**
+      - **Batch features** (updated daily): Mutual connection count, affiliation matches, profile similarity, acceptance propensity
+      - **Near-real-time features** (updated hourly): Profile views, recent engagement, trending connections at user's company
+      - **Real-time features** (computed at request time): Session context, time of day, device
+
+      **Key training gotchas:**
+      - **Selection bias**: We only see labels for candidates we showed. The model learns from a biased distribution. Use **IPS (Inverse Propensity Scoring)** to correct: weight each example by 1/P(shown), estimated from the previous model's candidate selection probability.
+      - **Feedback loops**: The current model's recommendations influence future training data. If we never show a potentially good candidate, we never learn they are good. Solution: **exploration slots** - 5% of PYMK slots show random 2nd-degree connections regardless of model score.
+      - **Seasonal patterns**: Connection activity spikes during job-seeking seasons (January, September) and slows during holidays. Include time-based features and evaluate on full seasonal cycles.
+
+      **Retraining cadence:**
+      - Full model retrain: **Weekly** (connection patterns change more slowly than content feeds)
+      - Feature refresh: **Daily** for graph features, **hourly** for behavioral features
+      - Model evaluation before deployment: Compare new model vs production on held-out week. Must improve AUC by >0.001 AND not increase "Don't Know" rate.
+
+      Let's discuss deployment.
+    dialogue:
+      - speaker: interviewer
+        text: "Training uses 3-4 months of data with temporal splits. Key challenges: 3-5% positive rate for P(send), selection bias from only seeing labels for shown candidates, and feedback loops."
+      - speaker: candidate
+        text: "The exploration slots are important for breaking feedback loops. What percentage of slots?"
+      - speaker: interviewer
+        text: "About 5% of PYMK slots show random 2nd-degree connections regardless of model score. This provides unbiased training data and can surface surprisingly good recommendations."
+      - speaker: candidate
+        text: "The selection bias correction with IPS is also critical. Without it, the model only learns about the types of candidates it already shows."
+      - speaker: interviewer
+        text: "Exactly. Now let's discuss deployment."
+    next: deploy_question
+
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Serving Architecture"
+    speaker: interviewer
+    content: |
+      How would you deploy the PYMK system?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you serve PYMK recommendations? Consider the 100M daily impressions and 200ms latency requirement."
+      - speaker: candidate
+        text: "PYMK is a great candidate for pre-computation since the results don't change as frequently as a content feed."
+      - speaker: interviewer
+        text: "Good intuition. Walk me through your approach."
+    choices:
+      - label: "Pre-computed PYMK lists with event-triggered updates"
+        answer: |
+          I would **pre-compute PYMK lists** for all active members and update them based on events that change recommendations.
+
+          **Pre-computation pipeline (runs daily for all 310M MAUs):**
+          1. **Candidate generation** (~2 hours): For each active member, compute 2nd-degree connections with mutual counts using the pre-built adjacency index. Add affiliation-based and embedding-based candidates. Total: 10,000 candidates per user.
+          2. **Feature assembly** (~1 hour): Join candidate pairs with pre-computed features (graph metrics, profile similarity, engagement history) from feature tables.
+          3. **Model scoring** (~1 hour): Score 10,000 candidates per user. With LightGBM at 2ms per user: 310M * 2ms = ~172 hours of CPU time. On a 1,000-CPU cluster: ~10 minutes. With neural model on GPUs: ~30 minutes on 200 GPUs.
+          4. **Re-ranking** (~30 min): Apply diversity rules (mix of colleagues, classmates, industry peers), filter blocked/declined, select top 50 per user.
+          5. **Storage** (~30 min): Write to a serving store (Redis/Couchbase). 310M users x 50 recommendations x 50 bytes = ~775GB. Distributed across a Redis cluster.
+
+          **Event-triggered updates (near-real-time):**
+          The pre-computed list goes stale when significant events occur. Trigger a **priority re-computation** for affected users when:
+          - **New connection accepted**: User connects with someone new -> recompute PYMK (new 2nd-degree connections appear)
+          - **Profile update**: User changes company or school -> recompute (new affiliation matches)
+          - **Contact import**: User imports contacts -> immediate recomputation with high-priority contact matches
+          - **New member signup at user's company**: A new colleague joins LinkedIn -> inject into relevant users' PYMK lists
+
+          Event-triggered updates process ~10-50M users per day (those with recent events). Processing latency: <30 minutes from event to updated PYMK list.
+
+          **Serving**: When user loads the My Network page, fetch pre-computed PYMK list from Redis. Latency: **<10ms**. Apply minimal real-time filtering (remove anyone connected since last update). Total serving latency: **<30ms**.
+
+          **Cost**: Daily batch: ~$2-5K compute. Redis cluster: ~$50K/month. Total: ~$100-150K/month. Extremely cost-effective for a feature serving 310M users.
+        next: mon_setup
+      - label: "Real-time scoring with cached candidates"
+        answer: |
+          I would use **real-time scoring** at request time with pre-computed candidates and cached features.
+
+          **Architecture:**
+          - **Candidate cache** (updated every 6 hours): For each active member, pre-compute and cache 10,000 candidates with their base features in a feature store (Redis). This avoids expensive graph traversal at request time.
+          - **Real-time scoring** (at request time): When user opens My Network, fetch cached candidates and features. Run the scoring model in real-time. Apply re-ranking and return results.
+
+          **Request flow (target: <200ms):**
+          1. **Fetch cached candidates + features** (~30ms): Read 10,000 candidates with pre-computed features from Redis.
+          2. **Real-time feature augmentation** (~30ms): Add fresh behavioral features - recent profile views, recent activity, session context. These change frequently and benefit from real-time computation.
+          3. **Model scoring** (~40ms): Score 10,000 candidates with LightGBM on CPU (~2ms) or neural model on GPU (~10ms with batching).
+          4. **Re-ranking + diversity** (~30ms): Apply diversity constraints, filter stale recommendations, select top 50.
+          5. **Response** (~20ms)
+          Total: ~150ms. Within the 200ms budget.
+
+          **Advantages over full pre-computation:**
+          - **Fresher recommendations**: If a user just viewed someone's profile (strong interest signal), the next PYMK refresh reflects this immediately. Pre-computed lists would miss this until the next batch run.
+          - **Session context**: Real-time scoring can incorporate "the user just connected with 3 former colleagues" and immediately show more people from that company. The feed feels responsive to user actions.
+          - **Experimentation flexibility**: Easy to test new features or model versions in real-time without rerunning the full batch pipeline.
+
+          **Scaling**: 100M daily impressions / 86,400 seconds = ~1,200 QPS average. At 40ms GPU inference, each GPU handles ~25 QPS. Need ~50 GPUs at peak. Cost: ~$75K/month for GPU serving + ~$50K/month for Redis candidate cache = ~$125K/month.
+
+          **Hybrid fallback**: If the real-time scoring service is slow or unavailable, serve the pre-computed list (generated every 6 hours as a backup). This ensures PYMK always has results, even during outages.
+        next: mon_setup
+
+  - id: mon_setup
+    stage: monitoring
+    type: info
+    label: "Monitoring & Evaluation"
+    speaker: interviewer
+    content: |
+      Let's discuss monitoring for the PYMK system.
+
+      **Core metrics dashboard:**
+      - **Connection funnel**: PYMK impressions -> send rate -> accept rate -> accepted connections. Tracked daily with weekly comparisons.
+      - **Quality signals**: "Don't Know This Person" rate (hard guardrail), declined request rate, request withdrawal rate
+      - **Diversity**: Distribution of recommendation types (colleagues, classmates, industry peers, unknown). Alert if any category dominates >70%.
+      - **Coverage**: What fraction of active members receive PYMK? What fraction of members appear in at least one other member's PYMK? Target: >95% for both.
+
+      **Anomaly detection:**
+      - Connection send rate from PYMK drops >5% vs trailing 7-day average -> alert
+      - Accept rate drops >3% -> alert (we're recommending people the user doesn't actually know)
+      - "Don't Know" rate increases >10% -> immediate investigation (critical trust signal)
+      - Average mutual connection count in recommendations drops >20% -> data pipeline issue alert
+
+      **A/B testing:**
+      - Every model change tested for **3-4 weeks** (connections happen over days, not minutes)
+      - Primary metric: Accepted connections per active user per week
+      - Secondary: Send rate, accept rate, post-connection engagement (30-day)
+      - Guardrails: "Don't Know" rate, declined request rate, PYMK dismiss rate
+      - **Long-term holdback**: Keep 1% of users on old model for 6 months to measure long-term network growth effects
+
+      **Cold-start monitoring:**
+      - Specifically track new member metrics (<30 days): Time to first connection, connections at 7/30 days, PYMK effectiveness for new members
+      - New members are the most important segment - if PYMK fails for them, they may never build a network and churn
+
+      **Graph health monitoring:**
+      - Track graph density over time. Is the connection graph getting denser (good) or more fragmented (bad)?
+      - Monitor for **connection spam**: members using PYMK to mass-connect with strangers. Detect and rate-limit.
+      - **Reciprocity tracking**: Are PYMK connections more reciprocal (both sides engaged) than organic connections? They should be.
+
+      Let's wrap up.
+    dialogue:
+      - speaker: interviewer
+        text: "Monitoring covers the full connection funnel, quality signals, diversity, and graph health. A/B tests run for 3-4 weeks because connections happen over days."
+      - speaker: candidate
+        text: "The cold-start monitoring is critical - new members are the most important PYMK users."
+      - speaker: interviewer
+        text: "Right. If a new member can't find people they know within their first week, they're likely to churn. PYMK is the primary mechanism for initial network building."
+      - speaker: candidate
+        text: "The connection spam detection is interesting - some users abuse PYMK to mass-connect."
+      - speaker: interviewer
+        text: "Yes, LinkedIn has rate limits on connection requests for this reason. The model should also deprioritize showing users to serial connectors. Let's summarize."
+    next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Design Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You have designed a comprehensive People You May Know system for LinkedIn. Let's summarize.
+
+      **Architecture summary:**
+      - **Problem formulation**: Bilateral recommendation - predict P(send) * P(accept) for each candidate
+      - **Optimization**: Connection acceptance rate or quality-weighted connections (post-connection engagement)
+      - **Candidate generation**: Friends-of-friends with triangle counting or GNN embeddings + multi-source retrieval
+      - **Features**: ~75 features covering graph proximity, affiliations, profile similarity, behavioral signals, and bilateral features
+      - **Model**: Gradient boosted trees with separate P(send)/P(accept) models or neural network with joint multi-task training
+      - **Serving**: Pre-computed lists with event-triggered updates or real-time scoring with cached candidates
+      - **Monitoring**: Connection funnel tracking, "Don't Know" guardrail, cold-start metrics, graph health
+
+      **Strengths of your design:**
+      - Addresses the unique bilateral nature of professional connections (both sides must agree)
+      - Leverages LinkedIn's rich graph structure and affiliation data
+      - Clear cold-start strategy for new members (affiliation-based, contact import)
+      - Comprehensive feature set covering "do they know each other?" and "would they benefit from connecting?"
+
+      **Key challenges and further considerations:**
+      - **Privacy concerns**: Contact import and profile viewing data are sensitive. How to use these signals while respecting user privacy expectations.
+      - **Network inequality**: Well-connected members (500+ connections) get great PYMK; poorly-connected members get sparse recommendations. How to ensure equal access to networking opportunities.
+      - **Cross-industry connections**: PYMK tends to reinforce existing network structure (recommending more people in same industry). How to facilitate valuable cross-industry connections.
+      - **International networking**: Professional networking norms vary by culture. Connection request etiquette in Japan differs from the US.
+      - **LinkedIn Premium upsell**: How does PYMK interact with LinkedIn Premium features like InMail? Should PYMK be subtly different for premium vs free users?
+
+      This design demonstrates strong understanding of graph-based recommendation systems, practical handling of bilateral prediction, and awareness of the unique challenges in professional social networking. Well done!

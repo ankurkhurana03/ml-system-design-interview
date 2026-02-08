@@ -1,0 +1,553 @@
+id: netflix-top-picks
+title: "Netflix Top Picks"
+description: "Design a 'Top Picks' recommendation engine for Netflix."
+companies: ["Netflix", "Disney+", "Amazon"]
+domains: ["Recommendation", "Ranking/Search"]
+root: pd_start
+
+nodes:
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we will design the **"Top Picks for You"** recommendation engine for Netflix.
+
+      Netflix serves **250+ million subscribers** across 190+ countries, with a catalog of roughly **17,000 titles** (movies and TV series). The "Top Picks" row is the most prominent recommendation surface - it appears near the top of the homepage and is the **single highest-traffic row**, generating approximately **30-35% of all plays** initiated from the homepage.
+
+      The challenge: from 17,000 titles, select and rank the **40-75 titles** that appear in a user's Top Picks row. Each title is represented by an **artwork image** (Netflix A/B tests different artwork per user), a title, and a match percentage.
+
+      **Key business context:**
+      - A user who does not find something to watch within **60-90 seconds** is at risk of leaving the app. Top Picks must surface a compelling title quickly.
+      - Netflix invests **$17B+ annually in content**. Effective recommendations ensure this investment reaches the right audiences.
+      - Recommendation quality directly impacts **churn** - Netflix estimates that personalization saves them **$1B+ per year** in reduced subscriber churn.
+
+      Let's define the problem scope.
+    dialogue:
+      - speaker: interviewer
+        text: "Today we'll design Netflix's Top Picks row. It's the highest-traffic row, generating 30-35% of all homepage plays."
+      - speaker: candidate
+        text: "What makes Top Picks different from other recommendation rows on Netflix?"
+      - speaker: interviewer
+        text: "It's the most prominent - appears near the top of the homepage. Users must find something compelling within 60-90 seconds or they leave. Netflix estimates personalization saves them over $1 billion per year in reduced churn."
+      - speaker: candidate
+        text: "That's enormous business impact. How large is the catalog we're recommending from?"
+      - speaker: interviewer
+        text: "About 17,000 titles globally. Let's scope the problem."
+    next: pd_scope
+
+  - id: pd_scope
+    stage: problem_definition
+    type: info
+    label: "Problem Scope"
+    speaker: interviewer
+    content: |
+      Let's scope the Top Picks recommendation system.
+
+      **Product requirements:**
+      - Rank **40-75 titles** per user for the Top Picks row (users typically scroll through 10-20 before selecting)
+      - Titles include **movies and TV series** (series can be at various stages: new, partially watched, new season available)
+      - Must handle **multi-profile households** (a family Netflix account may have 4-5 profiles with very different tastes)
+      - Results should update **within minutes** of significant user actions (e.g., finishing a series should immediately affect recommendations)
+      - Must respect **regional catalog differences** (not all titles available in all countries)
+
+      **ML formulation:**
+      This is a **personalized ranking problem**. For each user, we need to produce a score for each eligible title and sort by score. The system breaks down into:
+      1. **Candidate filtering**: Remove titles not available in the user's region, already fully watched titles, and titles violating content preferences
+      2. **Scoring**: Predict user affinity for each remaining title (~10,000-15,000 eligible per user)
+      3. **Re-ranking**: Apply business rules (diversity across genres, promote new originals, balance movies vs series)
+
+      Unlike Explore (Instagram) or Discover Weekly (Spotify) where we rank millions of items, Netflix's catalog is small enough to **score every eligible title** for every user. This changes the architecture significantly.
+
+      **Key constraint**: The catalog is relatively small (17K) but each title is high-stakes - watching a movie is a 2-hour commitment. Recommendation errors are more costly than on short-form content platforms.
+
+      What should we optimize for?
+    dialogue:
+      - speaker: interviewer
+        text: "Netflix's catalog is small enough - about 17,000 titles - that we can score every eligible title for every user. No candidate generation stage needed."
+      - speaker: candidate
+        text: "That simplifies the architecture considerably. What about the multi-profile aspect?"
+      - speaker: interviewer
+        text: "A household might have 4-5 profiles with very different tastes. Each profile gets its own Top Picks. The recommendation must be personalized per profile, not per account."
+      - speaker: candidate
+        text: "And the results need to update quickly when users take significant actions."
+      - speaker: interviewer
+        text: "Yes, within minutes of finishing a series or rating something. Now, what should we optimize for?"
+    next: met_question
+
+  - id: met_question
+    stage: metrics
+    type: question
+    label: "Optimization Objective"
+    speaker: interviewer
+    content: |
+      What should the Top Picks ranking model optimize for? Netflix has famously iterated on this question over the years.
+    dialogue:
+      - speaker: interviewer
+        text: "What should the ranking model optimize for? Netflix has gone through multiple generations of this - from star ratings to thumbs up/down to viewing hours."
+      - speaker: candidate
+        text: "There's a fundamental tension between predicting what users will click on and predicting what they'll actually enjoy watching."
+      - speaker: interviewer
+        text: "Exactly. Tell me about the approaches you'd consider."
+    choices:
+      - label: "Predict probability of play (click-through rate)"
+        answer: |
+          I would optimize for **P(play)** - the probability that a user will click on a title and start watching it.
+
+          **Rationale**: Play is the most direct, measurable action. It has clear positive and negative labels: the user either started watching or they did not. It is available in near-real-time (within seconds of the action) and is abundant (millions of plays per day).
+
+          **Scoring function:**
+          ```
+          TitleScore = P(play | user, title, context)
+          ```
+          Where context includes time of day, device, and what the user just finished watching.
+
+          **Why P(play) over viewing time?** Plays are binary and unambiguous. Viewing time conflates quality with length - a 2-hour movie that the user abandons after 90 minutes shows 90 minutes of viewing but is a worse experience than a 25-minute episode watched to completion. P(play) avoids this length bias.
+
+          **Rich training data**: Every homepage impression where the title was visible but not played is a negative example. Every play is a positive. This gives us **billions of labeled examples** per month.
+
+          **Key risk**: Optimizing for P(play) alone leads to **clickbait** - titles with provocative artwork and descriptions that people click on but then abandon. Netflix's early recommendation system had this problem: high click-through but low completion. This is why Netflix eventually moved to a more nuanced objective.
+
+          **Mitigation**: Use P(play) as the primary signal but add **guardrail metrics** on completion rate and post-play satisfaction (thumbs up/down). Penalize titles with high play rate but low completion.
+        next: met_play
+      - label: "Predict effective viewing hours (quality-weighted engagement)"
+        answer: |
+          I would optimize for **effective viewing hours** - a quality-weighted measure of how much time the user will spend watching a title.
+
+          **Why effective hours?** Netflix's public statements and research papers indicate they moved away from star ratings (too sparse) and simple play prediction (clickbait problem) toward **viewing hours as the north star metric**. But raw viewing hours have problems too - a 3-hour bad movie generates more hours than a great 90-minute film. So we quality-weight the hours.
+
+          **Effective viewing hours formula:**
+          ```
+          EffectiveHours(title) = HoursWatched * CompletionFraction * QualityMultiplier
+          ```
+          Where:
+          - **HoursWatched**: Predicted total viewing time
+          - **CompletionFraction**: Predicted fraction of the title the user will watch (0 to 1). Penalizes abandonments.
+          - **QualityMultiplier**: Based on predicted post-viewing satisfaction (1.0 for neutral, 1.2 for thumbs-up, 0.7 for thumbs-down)
+
+          **Multi-task prediction**: The model predicts three outputs simultaneously:
+          1. P(play) - will the user start watching?
+          2. E[completion] - what fraction will they watch?
+          3. P(thumbs_up) - will they rate it positively?
+
+          These are combined into the effective hours score.
+
+          **Key benefit**: This metric aligns with Netflix's business goal. Happy, engaged viewers renew their subscription. It naturally penalizes clickbait (high play, low completion) and rewards genuinely satisfying content.
+
+          **Key risk**: The metric is complex and harder to optimize directly. Completion and satisfaction labels are delayed (hours to days after the play). Need multi-task learning to handle the different label latencies and sparsity levels.
+        next: met_viewing
+
+  - id: met_play
+    stage: metrics
+    type: info
+    label: "Play Prediction Metrics"
+    speaker: interviewer
+    content: |
+      Good choice. Let's define the metrics framework for a play-prediction approach.
+
+      **Offline metrics:**
+      - **Primary**: AUC-ROC for P(play). Target: > 0.82. Netflix's published research suggests their models achieve AUC in the 0.80-0.85 range.
+      - **Ranking quality**: Recall@10 (what fraction of titles the user actually plays appear in the top 10?). Target: > 0.45.
+      - **Calibration**: Predicted P(play) should match observed play rates. ECE < 0.03.
+      - **Diversity**: Entropy of genre distribution in the top 20 recommendations. Higher entropy = more diverse.
+
+      **Online A/B test metrics:**
+      - **Primary**: Play rate from Top Picks row (plays / impressions). Current baseline: approximately **5-8%** of title impressions in the row result in a play.
+      - **Guardrails**: Completion rate per play (must not decrease), thumbs-down rate (must not increase), browse time before first play (should decrease, indicating users find content faster)
+      - **North star**: Monthly hours viewed per subscriber, monthly churn rate
+
+      **The "browse time" metric is fascinating**: Netflix wants users to spend **less** time browsing and **more** time watching. A good recommendation system reduces browse time (user finds a title quickly) while increasing viewing time. If browse time increases, the model is failing even if play rate improves (users are confused, not engaged).
+
+      **Position bias**: In the horizontal Top Picks row, titles on the left get 5-10x more plays than titles on the right. Must correct for this in both training and evaluation using position-debiased metrics.
+
+      Let's discuss data.
+    dialogue:
+      - speaker: interviewer
+        text: "The key offline metric is AUC for play prediction, targeting above 0.82. For online, we track play rate from the Top Picks row."
+      - speaker: candidate
+        text: "The browse time metric is interesting - we actually want to minimize it. Less browsing, more watching."
+      - speaker: interviewer
+        text: "Exactly. If browse time increases, the model is failing even if play rate goes up. It means users are scrolling more, not finding things quickly."
+      - speaker: candidate
+        text: "We also need to correct for position bias - titles on the left of the row get way more plays."
+      - speaker: interviewer
+        text: "Right, 5-10x difference between leftmost and rightmost positions. Let's move to data."
+    next: data_pipeline
+
+  - id: met_viewing
+    stage: metrics
+    type: info
+    label: "Effective Viewing Hours Metrics"
+    speaker: interviewer
+    content: |
+      Excellent choice. Let's define the metrics framework for effective viewing hours.
+
+      **Offline metrics:**
+      - **Primary**: Predicted effective hours correlation with actual effective hours. Target Spearman correlation > 0.55.
+      - **Sub-task AUCs**: AUC for P(play) > 0.82, AUC for P(complete | play) > 0.70, AUC for P(thumbs_up | play) > 0.65 (sparse, harder)
+      - **Ranking quality**: NDCG@20 using effective hours as relevance grades (continuous, not binary)
+      - **Diversity**: Genre entropy in top 20, recency distribution (mix of new and catalog titles)
+
+      **Online A/B test metrics:**
+      - **Primary**: Total viewing hours per subscriber per month. Current Netflix average: **~3.2 hours per day** for active users.
+      - **Secondary**: Effective viewing hours (quality-weighted), completion rate, thumbs-up rate
+      - **Guardrails**: Browse time before first play (must not increase), play rate (must not decrease significantly), churn rate
+      - **North star**: 3-month subscription retention rate
+
+      **The multi-task evaluation challenge**: Since we predict three things (play, completion, satisfaction), we need to evaluate each sub-model independently AND the combined score. The combined metric can improve even if a sub-task regresses, as long as the others compensate.
+
+      **Delayed labels**: Completion data arrives hours after play. Satisfaction data (thumbs up/down) is very sparse (~5% of views get a rating). This affects how frequently we can evaluate the model. Daily evaluation for P(play), weekly for P(complete), monthly for P(thumbs_up) due to sparsity.
+
+      Let's discuss data.
+    dialogue:
+      - speaker: interviewer
+        text: "Effective viewing hours requires evaluating three sub-tasks independently and as a combined score. Netflix users watch about 3.2 hours per day on average."
+      - speaker: candidate
+        text: "The delayed labels are a practical challenge - completion arrives hours later, satisfaction data is very sparse."
+      - speaker: interviewer
+        text: "Right, only about 5% of views get a thumbs up or down. So we evaluate play prediction daily, completion weekly, and satisfaction monthly due to sparsity."
+      - speaker: candidate
+        text: "We'd want to ensure the combined score improves even if one sub-task has a minor regression."
+      - speaker: interviewer
+        text: "Exactly - the combined metric matters most. Let's move to data."
+    next: data_pipeline
+
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      Netflix has incredibly rich viewing data. Let's inventory it.
+
+      **Viewing behavior data:**
+      - **Play events**: Every play with timestamp, duration watched, device, and completion status. ~500M+ plays per day across all users.
+      - **Browse behavior**: Every title impression (what appeared on the screen), hover events (user paused on a title), trailer plays, detail page views. This is **implicit negative feedback** - titles shown but not played.
+      - **Explicit feedback**: Thumbs up/down ratings. Sparse but high-quality - only ~5% of viewed titles get rated.
+      - **Search queries**: What users search for reveals their intent.
+
+      **Content metadata:**
+      - **Structured metadata**: Genre tags (multi-label, ~30 genres), cast, director, release year, runtime, maturity rating, country of origin, language
+      - **Content embeddings**: Netflix trains deep models on video frames and audio to generate **content similarity embeddings** (256 dims). Two titles that "feel similar" (similar cinematography, pacing, tone) have close embeddings even if their genres differ.
+      - **Artwork**: Each title has 10-20 artwork variants. Netflix A/B tests which artwork to show each user. Artwork significantly affects CTR (~20-30% variation across variants).
+
+      **User profile data:**
+      - **Viewing history**: Complete history of titles played, when, how much watched, on what device
+      - **Profile attributes**: Age range, language preference, maturity settings, taste preferences (genres)
+      - **Household context**: Number of profiles, typical viewing times, shared vs individual viewing patterns
+
+      **Data challenges:**
+      - **Household sharing**: Multiple people may use the same profile, creating noisy signals. Netflix's profile transfer feature helps but does not fully solve this.
+      - **Catalog churn**: Titles enter and leave the catalog due to licensing. ~1,000 titles change monthly. Model must handle this gracefully.
+      - **Content investment bias**: Netflix promotes its originals more aggressively, creating exposure bias in the data.
+
+      Let's discuss feature engineering.
+    dialogue:
+      - speaker: interviewer
+        text: "Netflix has rich data: 500 million plays daily, browse behavior, explicit ratings, content embeddings, and even artwork A/B test results."
+      - speaker: candidate
+        text: "The artwork data is fascinating - 20-30% CTR variation across artwork variants for the same title."
+      - speaker: interviewer
+        text: "It's huge. A horror movie might get better CTR with a scary artwork for horror fans but a character-focused artwork for drama fans. Artwork selection is itself a personalization problem."
+      - speaker: candidate
+        text: "What about the catalog churn? Titles coming and going creates data issues."
+      - speaker: interviewer
+        text: "About 1,000 titles change monthly. The model must handle new titles quickly and not recommend titles that are about to leave. Let's discuss features."
+    next: feat_question
+
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Engineering"
+    speaker: interviewer
+    content: |
+      How would you approach feature engineering for the Top Picks ranker?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you engineer features for the ranking model? Remember, the catalog is small enough to score every title."
+      - speaker: candidate
+        text: "Since we're scoring the full catalog, we can afford richer features than systems that need fast candidate retrieval. The key is capturing user-title affinity."
+      - speaker: interviewer
+        text: "Walk me through your approach."
+    choices:
+      - label: "Collaborative signals + content embeddings"
+        answer: |
+          I would combine **collaborative filtering signals** with **content embeddings** to capture both taste-based and content-based affinity.
+
+          **Collaborative features:**
+          - **User-title co-occurrence score**: Based on matrix factorization - how many users who watched titles in this user's history also watched this candidate? Implemented as dot product of user and title latent factors (128 dims each) from an ALS-trained matrix factorization model.
+          - **Taste cluster membership**: Cluster users into ~500 taste segments using K-means on viewing history embeddings. For each segment, compute the popularity of each title. Feature: how popular is this title in the user's taste cluster?
+          - **Viewing velocity**: How quickly are users in similar taste clusters consuming this title? A title that is trending among "sci-fi fans" should rank higher for sci-fi users.
+
+          **Content embedding features:**
+          - **User taste embedding** (256 dims): Weighted average of content embeddings of the user's top-50 most-watched titles (weighted by recency and viewing completion)
+          - **Title content embedding** (256 dims): Pre-computed from Netflix's deep content model
+          - **Cosine similarity**: Between user taste embedding and title content embedding. This captures "does this title feel like what this user watches?"
+          - **Genre affinity vector**: User's viewing hours distribution across 30 genres, compared with title's genre tags
+
+          **Why this combination?** Collaborative filtering captures "people like you watched this" (powerful but cold-start-prone). Content embeddings capture "this looks/feels like what you watch" (handles cold-start but may miss cultural factors). Together, they cover each other's weaknesses.
+
+          **Additional cross features**: User-title genre overlap, user's average rating for this director/actor, title popularity in user's country.
+        next: mod_question
+      - label: "Contextual features + temporal dynamics"
+        answer: |
+          I would emphasize **contextual features** and **temporal viewing dynamics**, since what users want to watch is highly context-dependent.
+
+          **Temporal features:**
+          - **Time-of-day encoding** (sine/cosine): Users watch different content at different times. Light comedies in the evening, documentaries on weekends, kids content in the afternoon.
+          - **Day-of-week features**: Friday and Saturday evenings have higher engagement with movies (longer commitment). Weekday evenings favor episodic series.
+          - **Seasonal patterns**: Holiday content in December, summer blockbusters in June. Use month-level cyclic encoding.
+          - **Continuation signals**: Has the user started a series? How recently? What episode are they on? **"Continue watching" titles should rank very high** in Top Picks - the strongest predictor of a play is that the user is mid-series.
+
+          **Context features:**
+          - **Device**: Phone vs tablet vs smart TV vs laptop. Phone users prefer shorter content. TV users prefer immersive content.
+          - **Session history**: What did the user just watch? If they just finished a thriller, they might want another thriller (mood continuation) or a comedy (mood shift). Model both hypotheses.
+          - **Household context**: Is this a solo viewing session or a shared session (multiple profiles active)? Shared sessions favor broadly appealing content.
+
+          **User lifecycle features:**
+          - **Account age**: New subscribers need more exploration, long-term subscribers have more personalized tastes
+          - **Engagement trend**: Is the user's viewing hours increasing or decreasing over the past 4 weeks? Decreasing users (churn risk) might benefit from stronger, more diverse recommendations.
+          - **Content freshness preference**: Some users prefer new releases, others prefer catalog deep-cuts. Compute ratio of new vs catalog titles in recent viewing.
+
+          **Why contextual?** Netflix's research (published at RecSys conferences) shows that context features contribute **15-25% of model lift** beyond user-title affinity features alone. What you want to watch depends heavily on when, where, and how you're watching.
+        next: mod_question
+
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Model Architecture"
+    speaker: interviewer
+    content: |
+      What model architecture would you choose for the Top Picks ranking model?
+    dialogue:
+      - speaker: interviewer
+        text: "What model would you use? Remember, we're scoring about 15,000 eligible titles per user. The catalog is small but the ranking quality bar is very high."
+      - speaker: candidate
+        text: "Since we can score every title, we have more flexibility than systems that need fast retrieval. I'd consider a pointwise model, a pairwise learning-to-rank model, or a newer approach."
+      - speaker: interviewer
+        text: "Walk me through your recommendation."
+    choices:
+      - label: "Wide & Deep model with multi-task heads"
+        answer: |
+          I would use a **Wide & Deep model** (originally from Google, adopted widely including by Netflix) with multi-task prediction heads.
+
+          **Architecture:**
+          - **Wide component**: Captures memorization of specific feature combinations. Includes cross-product features like (user_country x title_language), (user_top_genre x title_genre), (time_of_day_bucket x content_type). These capture known important interactions with high precision.
+          - **Deep component** (4-layer MLP, 1024-512-256-128): Takes all features including embeddings, learns generalized patterns. User and title embeddings are concatenated and passed through the deep network.
+          - **Multi-task heads**: Separate output heads for P(play), P(complete|play), P(thumbs_up|play). Each head is a 2-layer MLP (128-64-1) with sigmoid activation.
+          - **Combined score**: Weighted combination of head outputs to produce final title score.
+
+          **Why Wide & Deep for Netflix?**
+          - The **wide component** is critical for a catalog-based system. Netflix knows specific patterns: "users who watched Stranger Things and liked it will want to see similar sci-fi shows." Cross-product features in the wide component capture these exactly.
+          - The **deep component** generalizes to new titles and new users where specific patterns are not yet observed.
+          - **Multi-task heads** let us jointly predict play, completion, and satisfaction without separate models.
+
+          **Training**: Joint training of wide and deep components using Adam optimizer. Mini-batch gradient descent with batch size 4096. Use focal loss for the thumbs-up head (very sparse positives, ~5% rate).
+
+          **Model size**: ~10M parameters. Inference: ~2ms per title, ~30 seconds to score all 15K titles per user. At 250M users with daily refresh, this is manageable in batch.
+        next: train_strategy
+      - label: "Factorization Machine + neural ranker cascade"
+        answer: |
+          I would use a **two-stage cascade**: a lightweight Factorization Machine (FM) for initial scoring followed by a neural re-ranker for the top candidates.
+
+          **Stage 1: Factorization Machine (score all 15K titles)**
+          - **Architecture**: Second-order FM that models pairwise feature interactions. For input features x, the score is: `y = w0 + sum(wi*xi) + sum(sum(<vi,vj>*xi*xj))` where vi are k-dimensional latent vectors per feature.
+          - **Why FM?** It is incredibly efficient - O(k*n) per prediction where k=64 latent dims and n=100 features. Scoring 15K titles per user takes **<50ms on CPU**. It captures important feature interactions (user-genre affinity, title-time appropriateness) without needing explicit cross features.
+          - **Use DeepFM variant**: Add a small MLP (256-128-64) on top of the FM to capture higher-order interactions.
+
+          **Stage 2: Neural Re-ranker (top 200 titles)**
+          - Take the top 200 titles from Stage 1 and apply a heavier model
+          - **Architecture**: Transformer-based model (2 layers, 4 heads) that takes the user's viewing sequence (last 50 titles watched) and each candidate title, using cross-attention to compute relevance scores
+          - This captures **sequential patterns** (user just finished a thriller series -> recommend similar thrillers) that the FM misses
+          - Scoring 200 titles: ~100ms on GPU
+
+          **Why cascade?** The FM handles the bulk filtering efficiently (15K to 200). The neural re-ranker invests heavy compute on the top candidates where ranking quality matters most (these are the titles the user actually sees). This is a common production pattern at Netflix and YouTube.
+
+          **Total latency**: FM scoring (50ms) + Neural re-rank (100ms) = 150ms per user. For batch processing all 250M users: ~37.5M seconds = ~10.4K GPU-hours. Fits in a daily batch window.
+
+          **Trade-off**: More complex pipeline than a single model. But the quality gain from the neural re-ranker on top candidates is typically **+2-3% NDCG** compared to FM alone.
+        next: train_strategy
+
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: interviewer
+    content: |
+      Excellent model choice. Let's discuss training strategy.
+
+      **Training data:**
+      - Source: **3-6 months** of viewing history. Longer than typical because Netflix viewing patterns are more stable than short-form content (users don't change movie tastes as quickly as their Instagram preferences).
+      - **Positive examples**: Plays that resulted in >10 minutes of viewing (filter out accidental clicks). Weighted by engagement: completion=1.0, save-to-list=0.5, thumbs-up=2.0.
+      - **Negative examples**: Titles that were impressed (shown on screen) but not played. Challenge: most impressions are negatives (~95%), so downsample negatives 10:1.
+      - **Volume**: ~250M users x ~100 impressed titles per session x ~5 sessions per week = ~125 billion impression-level examples per week. Sample to ~5 billion for training.
+
+      **Temporal split**: Train on months 1-5, validate on month 6, test on most recent 2 weeks. This simulates the real deployment scenario where the model must predict future viewing from past data.
+
+      **Handling biases:**
+      - **Position bias**: Titles on the left of the row get more impressions and plays. Use position as a feature during training, set to neutral at inference.
+      - **Promotion bias**: Netflix promotes originals more heavily. Track a "promoted" flag and use it as a feature to deconfound.
+      - **Popularity bias**: Popular titles dominate positives. Use **popularity-stratified sampling** or inverse popularity weighting to ensure the model learns to recommend niche content too.
+
+      **Multi-task training details:**
+      - P(play) head: Binary cross-entropy, trained on all impressions
+      - P(complete|play) head: Binary cross-entropy, trained only on examples where play=True. Completion defined as watching >70% of a movie or an entire episode.
+      - P(thumbs_up|play) head: Binary cross-entropy with focal loss (gamma=2), trained only on examples with explicit ratings. Very sparse (~5% of plays).
+      - **Gradient balancing**: Use GradNorm to automatically balance gradients across tasks, preventing the dominant P(play) task from dominating.
+
+      **Cold-start strategy for new titles:**
+      - New titles have no viewing data. Use **content embeddings** and metadata-based features as fallbacks.
+      - Apply a **Thompson Sampling exploration bonus** to new titles: boost their score by a decaying factor for the first 2-4 weeks after launch. This ensures new titles get initial exposure to gather viewing data.
+      - For Netflix Originals: use **pre-release signals** (trailer views, "Remind Me" clicks, cast popularity) to warm-start predictions.
+
+      Let's move to deployment.
+    dialogue:
+      - speaker: interviewer
+        text: "Training uses 3-6 months of viewing data with temporal splits. Key challenge is handling position, promotion, and popularity biases."
+      - speaker: candidate
+        text: "How do we handle cold-start for new titles? That's critical for a platform that adds new content every week."
+      - speaker: interviewer
+        text: "Thompson Sampling exploration bonus for new titles - boost their score for the first 2-4 weeks. For Netflix Originals, use pre-release signals like trailer views and 'Remind Me' clicks."
+      - speaker: candidate
+        text: "The multi-task training with GradNorm for gradient balancing makes sense given the different label sparsities."
+      - speaker: interviewer
+        text: "Exactly. P(play) has billions of labels, P(thumbs_up) has millions. GradNorm prevents the dominant task from taking over. Let's discuss deployment."
+    next: deploy_question
+
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Serving Architecture"
+    speaker: interviewer
+    content: |
+      How would you serve the Top Picks recommendations?
+    dialogue:
+      - speaker: interviewer
+        text: "How would you architect the serving layer? Netflix serves 250 million users across 190+ countries."
+      - speaker: candidate
+        text: "The key design question is whether to pre-compute recommendations in batch or serve them in real time."
+      - speaker: interviewer
+        text: "Walk me through your preferred approach and the trade-offs."
+    choices:
+      - label: "Pre-computed batch with real-time adjustments"
+        answer: |
+          I would use **pre-computed batch recommendations** with a lightweight real-time adjustment layer.
+
+          **Batch component (runs every 4-6 hours):**
+          - Score all ~15K eligible titles for each of 250M users using the full ranking model
+          - Store the ranked list (top 200 titles with scores) in a **distributed cache** (Memcached/EVCache, Netflix's internal caching layer)
+          - Total compute: 250M users x 15K titles x 2ms per scoring = ~7.5 trillion operations. With 1000 GPUs, completes in ~2-3 hours.
+
+          **Real-time adjustment layer (at request time):**
+          - When a user opens Netflix, fetch their pre-computed ranked list from cache
+          - Apply **real-time adjustments**: boost "continue watching" titles to the top, demote titles they just finished, incorporate very recent viewing (last 30 minutes)
+          - Apply business rules: ensure genre diversity, promote new releases within first 48 hours, apply A/B test treatment logic
+          - **Latency**: Cache lookup (5ms) + real-time adjustments (10ms) = 15ms total. Well within Netflix's 50ms page-load budget.
+
+          **Why hybrid batch + real-time?** Pure batch is stale - if a user finishes a series, their recommendations should update immediately, not in 4 hours. Pure real-time is expensive at 250M user scale. The hybrid approach gets 90% of real-time quality at 10% of the cost.
+
+          **Staleness mitigation**: Run the batch more frequently for highly active users (every 2 hours) and less frequently for inactive users (every 12 hours). This optimizes compute allocation.
+
+          **Failover**: If the batch job fails, serve slightly stale recommendations (last successful batch, typically <12 hours old). Users barely notice because taste profiles change slowly.
+        next: mon_setup
+      - label: "Full real-time scoring with model caching"
+        answer: |
+          I would serve recommendations **in real time** at request time, with aggressive caching of model components.
+
+          **Architecture:**
+          - **Feature store** (Redis + DynamoDB): Pre-computed user features (updated hourly) and title features (updated daily). Total size: ~250M users x 1KB features = ~250GB for users, ~15K titles x 2KB = ~30MB for titles. Fits in memory.
+          - **Model serving** (TorchServe on GPU): When a user opens Netflix, fetch user + all eligible title features from the feature store, run the ranking model in real time. Score 15K titles in one batched forward pass.
+          - **Request-level personalization**: Because we compute at request time, we can incorporate **session context** (what the user just watched, current time, device) directly into the model. No staleness.
+
+          **Latency optimization:**
+          - **Batched inference**: Score all 15K titles in a single GPU batch. With TensorRT optimization, ~25ms for the full batch on a T4 GPU.
+          - **Feature prefetch**: Start fetching features as soon as the user opens the app, before they navigate to the homepage. Overlap network latency with feature assembly.
+          - **Tiered scoring**: Score all 15K titles with a lightweight model (FM, ~5ms), then score top 200 with the heavy model (~20ms). Total: ~25ms for both tiers.
+
+          **Scaling:**
+          - Netflix peak QPS: ~100K requests per second (250M users, not all online simultaneously)
+          - At 25ms per request, each GPU handles ~40 QPS. Need ~2,500 GPUs for peak load.
+          - Auto-scale based on traffic patterns (peak: 7-10 PM local time across time zones)
+
+          **Cost**: ~2,500 GPUs at peak x $2/hr = $5K/hour at peak. Monthly cost ~$1-2M. Higher than batch but acceptable for Netflix's scale and revenue ($33B annual revenue).
+
+          **Key advantage**: Every recommendation is fresh. No staleness. Session context (just finished a series, current mood based on browsing) directly influences recommendations.
+        next: mon_setup
+
+  - id: mon_setup
+    stage: monitoring
+    type: info
+    label: "Monitoring & Evaluation"
+    speaker: interviewer
+    content: |
+      Let's discuss monitoring for the Top Picks system.
+
+      **Real-time monitoring:**
+      - **Serving health**: Latency p50/p95/p99, cache hit rate (should be >95% for batch approach), error rate, QPS
+      - **Recommendation quality signals**: Play rate from Top Picks (hourly), browse time before first play (hourly), completion rate of played titles (daily)
+      - **Diversity metrics**: Genre distribution of shown titles (should match user preferences, not collapse to popular genres), unique titles shown across all users (catalog coverage)
+
+      **Anomaly detection:**
+      - Alert if play rate drops **>3%** vs same hour last week (controls for daily/weekly patterns)
+      - Alert if browse time increases **>10%** (users cannot find what they want)
+      - Alert if a single title appears in **>50%** of all Top Picks rows (model collapse to one popular title)
+      - Alert if any content category is **>80%** of recommendations for any user segment (filter bubble)
+
+      **A/B testing framework:**
+      - Every model change A/B tested for **2-4 weeks** minimum
+      - Primary metric: **Total viewing hours per subscriber** (Netflix's north star)
+      - Secondary: Play rate from Top Picks, completion rate, thumbs-up rate
+      - Guardrails: Browse time, "skip" rate, churn rate
+      - Sample size: 1-2% of users per experiment (2.5-5M users), sufficient for detecting 0.5% effects
+      - **Interleaving experiments**: For ranking changes, use interleaving (mix results from two models in one row) for faster convergence than traditional A/B tests. Netflix published research showing interleaving detects differences **100x faster** than parallel A/B tests.
+
+      **Long-term evaluation:**
+      - **Holdback experiments**: Keep 0.5% of users on previous model for 6 months to detect long-term effects on retention and viewing diversity
+      - **Content lifecycle analysis**: Does the model help new titles find their audience? Track "time to first 1M views" for new releases under different model versions.
+      - **User segmentation analysis**: Ensure model improvements benefit all user segments (new users, power users, churn-risk users), not just the average.
+
+      Let's wrap up.
+    dialogue:
+      - speaker: interviewer
+        text: "Monitoring covers serving health, recommendation quality, and anomaly detection. Netflix uses interleaving experiments, which detect ranking differences 100x faster than traditional A/B tests."
+      - speaker: candidate
+        text: "Interleaving is interesting - mixing results from two models in one row instead of splitting users."
+      - speaker: interviewer
+        text: "It's very powerful for ranking problems. Each user sees a mix of both models' recommendations, so you can compare within-user rather than between-user. Much faster convergence."
+      - speaker: candidate
+        text: "The long-term holdback experiments are important too - detecting slow effects on retention."
+      - speaker: interviewer
+        text: "Exactly. Let's summarize the full design."
+    next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Design Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You have designed a comprehensive Top Picks recommendation engine for Netflix. Let's summarize.
+
+      **Architecture summary:**
+      - **Problem scope**: Rank 15,000 eligible titles into a Top Picks row of 40-75 titles per user
+      - **Optimization objective**: P(play) prediction or effective viewing hours (quality-weighted engagement)
+      - **Features**: Collaborative signals + content embeddings or contextual + temporal dynamics
+      - **Model**: Wide & Deep with multi-task heads or Factorization Machine + neural re-ranker cascade
+      - **Serving**: Pre-computed batch with real-time adjustments or full real-time scoring with model caching
+      - **Monitoring**: Interleaving experiments, anomaly detection, long-term holdbacks
+
+      **Strengths of your design:**
+      - Leverages Netflix's unique advantage: small catalog (17K titles) allows exhaustive scoring
+      - Multi-task prediction captures both immediate engagement (play) and satisfaction (completion, rating)
+      - Cold-start strategy for new titles using exploration bonuses and pre-release signals
+      - Comprehensive bias handling (position, popularity, promotion)
+
+      **Key challenges and further considerations:**
+      - **Artwork personalization**: Which artwork variant to show each user? This is itself a major ML problem at Netflix.
+      - **Multi-profile households**: How to handle shared profiles where multiple people use the same account
+      - **Content scheduling**: Balancing recommendations with Netflix's content release strategy (promoting new originals)
+      - **Global vs local models**: Should users in Japan and Brazil see recommendations from the same model, or should there be regional models?
+      - **Fairness across content**: Ensuring diverse content (international titles, documentaries, indie films) gets fair exposure, not just mainstream content
+
+      This design demonstrates strong understanding of recommendation systems for subscription-based video platforms, with practical attention to the unique challenges of long-form content recommendation. Well done!
