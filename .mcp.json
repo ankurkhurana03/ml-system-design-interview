@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ml-interview-tree": {
+      "command": "node",
+      "args": ["/Users/ankur/Downloads/ml_sys_design/mcp-server/dist/index.js"]
+    }
+  }
+}

@@ -1,0 +1,1135 @@
+id: dynamic-pricing
+title: "Dynamic Pricing Engine for Uber (RL-Based)"
+description: "Design an RL-based dynamic pricing engine (surge pricing) that optimizes ride prices to balance supply and demand across geographic regions."
+root: start
+
+nodes:
+  # ============ PROBLEM DEFINITION ============
+  - id: start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design a **real-time dynamic pricing engine** (surge pricing) for a ride-sharing platform like Uber.
+
+      **Business context:**
+      - The platform handles ~20M rides/day globally across ~10K hexagonal geo-zones
+      - Current rule-based surge multipliers (e.g., "2x when demand > supply by 50%") are reactive and suboptimal
+      - Price must be returned in **<100ms** at ride request time
+      - Must comply with price gouging laws and avoid discriminatory pricing patterns
+
+      **Goal:** Design an ML system that outputs an optimal price multiplier given current market conditions, maximizing long-term revenue while maintaining rider satisfaction and driver utilization.
+
+      Let's start by clarifying the approach.
+    next: q_scope
+
+  - id: q_scope
+    stage: problem_definition
+    type: multi_select
+    label: "Problem Scoping"
+    speaker: interviewer
+    content: |
+      Before diving into the approach, let's clarify the problem scope. Your choices will shape whether we lean towards RL or supervised learning, and what constraints the system operates under.
+    dimensionGroups:
+      - id: system_reqs
+        label: "System Requirements"
+        dimensions:
+          - id: latency
+            label: "Latency Requirement"
+            description: "How fast must pricing decisions be served?"
+            options:
+              - value: real_time
+                label: "Real-time (<100ms)"
+              - value: near_real_time
+                label: "Near real-time (<5s)"
+              - value: batch
+                label: "Batch (per zone, periodic)"
+          - id: scale
+            label: "Geographic Scale"
+            description: "How many geo-zones must the system handle?"
+            options:
+              - value: city
+                label: "Single City"
+              - value: regional
+                label: "Regional (multi-city)"
+              - value: global
+                label: "Global (10K+ zones)"
+      - id: business_constraints
+        label: "Business Constraints"
+        dimensions:
+          - id: priority
+            label: "Optimization Priority"
+            description: "What's the primary business objective?"
+            options:
+              - value: revenue_first
+                label: "Maximize Revenue"
+              - value: fairness_first
+                label: "Fairness First"
+              - value: balanced
+                label: "Balanced"
+          - id: approach
+            label: "Preferred Approach"
+            description: "Which ML paradigm do you want to explore?"
+            options:
+              - value: rl
+                label: "Reinforcement Learning"
+              - value: supervised
+                label: "Supervised Learning"
+              - value: hybrid
+                label: "Hybrid"
+    routes:
+      - key: "real_time|global|revenue_first|rl"
+        next: rl_safety_question
+      - key: "real_time|global|balanced|rl"
+        next: rl_safety_question
+      - key: "batch|city|revenue_first|supervised"
+        next: sl_metrics
+      - key: "near_real_time|regional|balanced|supervised"
+        next: sl_metrics
+    defaultRoute: q_approach
+
+  - id: q_approach
+    stage: problem_definition
+    type: question
+    label: "ML Approach"
+    speaker: interviewer
+    content: |
+      Based on your scoping decisions, how would you frame this as an ML problem? What approach makes the most sense for dynamic pricing?
+    choices:
+      - label: "Reinforcement Learning (learn long-term optimal pricing)"
+        answer: |
+          I'd frame this as a **Reinforcement Learning** problem. Here's why:
+
+          **Why RL over supervised learning?**
+          - A price increase *now* may reduce demand in 30 minutes — RL captures these **temporal dynamics** that supervised learning cannot
+          - The supply-demand landscape shifts constantly; an RL agent **adapts without manual rule tuning**
+          - RL naturally handles **multi-objective optimization** — balancing revenue, rider retention, driver earnings, and market health
+
+          **MDP Formulation:**
+          - **State**: Market conditions in a geo-zone (demand signals, supply signals, S/D ratio, weather, time features)
+          - **Action**: Price multiplier to apply (discrete set like {1.0, 1.1, 1.2, ..., 5.0})
+          - **Reward**: Combination of revenue, ride completion rate, price stability, and fairness
+          - **Transition**: How the market evolves after a pricing decision
+
+          The key insight is that pricing is a **sequential decision problem** — today's price affects tomorrow's rider behavior and driver supply. RL is purpose-built for this.
+        next: rl_safety_question
+      - label: "Supervised Learning (predict optimal price from features)"
+        answer: |
+          I'd use **supervised learning** to predict the optimal price multiplier from market features.
+
+          **Approach:**
+          - Collect historical data of (market_state, price_applied, outcome) tuples
+          - Train a regression model to predict the price multiplier that maximizes a target metric
+          - Use features like supply/demand ratio, time of day, weather, event flags
+
+          **Why supervised?**
+          - Simpler to implement, debug, and explain to stakeholders
+          - Faster to iterate — no need for environment simulation or reward shaping
+          - Can leverage existing ML infrastructure (feature stores, model serving)
+          - Well-understood training, evaluation, and deployment patterns
+
+          **Model choice:** Gradient boosting (LightGBM) for tabular features, with the target being "optimal multiplier" derived from historical A/B test data showing which prices maximized revenue while maintaining completion rates.
+
+          **Limitation:** Supervised learning treats each decision independently — it doesn't model how today's price affects future demand. But in practice, with frequent retraining (daily), this may be sufficient.
+        next: sl_metrics
+
+  # ============ RL PATH ============
+  - id: rl_safety_question
+    stage: problem_definition
+    type: question
+    label: "Online vs Offline RL"
+    speaker: interviewer
+    content: |
+      Good choice on RL. But there's a key concern — **exploration is dangerous** in pricing. A bad price could lose millions in rides. How do you handle this?
+    choices:
+      - label: "Offline (Batch) RL — learn from historical logs safely"
+        answer: |
+          I'd use **Offline (Batch) RL** — specifically **Conservative Q-Learning (CQL)**.
+
+          **Why Offline RL?**
+          - We **cannot safely explore** arbitrary prices in production — a random 5x surge could drive away riders permanently
+          - We have **massive historical logs** of (state, action, reward, next_state) from the existing pricing system
+          - Offline RL learns from this logged data without requiring online exploration
+
+          **Why CQL specifically?**
+          Standard Q-learning overestimates Q-values for unseen (state, action) pairs. CQL adds a regularization term that **penalizes Q-values for actions not well-represented in the dataset**, making the learned policy conservative and safe.
+
+          ```
+          Loss_CQL = Loss_bellman + α · (E[Q(s,a_uniform)] - E[Q(s,a_data)])
+          ```
+
+          | Algorithm | Pros | Cons | Verdict |
+          |-----------|------|------|---------|
+          | DQN (online) | Simple | Requires risky exploration | No |
+          | PPO (online) | Good for continuous | Needs simulator | No |
+          | **CQL (offline)** | Safe, uses logs | Needs diverse data | Yes |
+          | BCQ | Also offline-safe | More complex | Backup |
+
+          After initial offline training, we can add **constrained exploration** (epsilon-greedy within ±0.3 of policy) to continue learning safely.
+        next: rl_metrics
+      - label: "Online RL with safety constraints and simulator"
+        answer: |
+          I'd use **Online RL** but with strong safety constraints and a **simulator for pre-training**.
+
+          **Simulator approach:**
+          1. Build a ride-sharing market simulator from historical data — model rider demand elasticity, driver response to surge, and spatial dynamics
+          2. Pre-train the RL agent extensively in simulation (millions of episodes)
+          3. Deploy with **constrained exploration**: agent can only explore prices within ±20% of the simulator-trained policy
+
+          **Safety layer:**
+          - Hard caps on multipliers (e.g., max 5x, lower during emergencies)
+          - Smoothing filter: price can't change more than 0.3x per 5-minute interval
+          - Automatic rollback if completion rate drops >3% below baseline
+          - Shadow mode first: run RL recommendations alongside current system, compare without affecting real prices
+
+          **Algorithm: PPO (Proximal Policy Optimization)**
+          - Stable policy gradient method
+          - Natural constraint handling via clipped objective
+          - Can optimize continuous multiplier directly
+
+          **Risk:** Simulator may not perfectly capture real-world dynamics (sim-to-real gap). Mitigate with domain randomization and conservative initial deployment.
+        next: rl_metrics
+
+  - id: rl_metrics
+    stage: metrics
+    type: question
+    label: "RL Metrics Design"
+    speaker: interviewer
+    content: |
+      Now let's design the metrics. For RL, we need both a **reward function** (what the agent optimizes) and **evaluation metrics** (how we measure success). How would you design the reward?
+    choices:
+      - label: "Multi-objective reward: revenue + completion + stability + fairness"
+        answer: |
+          I'd design a **multi-objective reward function** that balances four components:
+
+          ```
+          R(s, a, s') = α·R_revenue + β·R_completion + γ·R_stability + δ·R_fairness
+          ```
+
+          | Component | Formula | Rationale |
+          |-----------|---------|-----------|
+          | **R_revenue** | `log(fare_revenue / baseline)` | Revenue uplift (log avoids chasing outliers) |
+          | **R_completion** | `completion_rate - target_rate` | Penalize if riders are priced out |
+          | **R_stability** | `-|mult_t - mult_{t-1}|` | Penalize rapid price swings |
+          | **R_fairness** | `-max(0, disparity - threshold)` | Penalize demographic pricing bias |
+
+          **Weight tuning:** α=1.0, β=2.0, γ=0.5, δ=1.0 — completion rate is weighted **heavily** to maintain marketplace health. Revenue maximization without completion guardrails leads to a death spiral.
+
+          **Discount factor:** γ=0.95 with 5-minute decision intervals → agent cares about effects ~100 minutes into the future.
+
+          **Offline evaluation metrics:**
+          - Cumulative discounted reward (primary RL metric)
+          - Revenue per available driver-hour
+          - Price stability index (variance over rolling windows)
+          - Supply-demand gap reduction
+        next: rl_data
+      - label: "Revenue-focused reward with guardrail constraints"
+        answer: |
+          I'd use a **simpler revenue-focused reward** with hard constraints acting as guardrails:
+
+          ```
+          R(s, a, s') = log(zone_revenue / baseline_revenue)
+          ```
+
+          **Why simple reward?** Multi-objective rewards with many hyperparameters (α, β, γ, δ) are hard to tune and debug. A simpler reward that optimizes one clear thing — revenue — is more predictable. The other objectives are enforced as **constraints**, not reward components.
+
+          **Constraint framework:**
+          - **Completion rate**: If zone completion rate drops below 85%, multiply reward by 0.1 (heavy penalty)
+          - **Price stability**: Hard constraint — multiplier can't change more than 0.3x per interval
+          - **Fairness**: Post-hoc audit — if pricing disparity across demographic groups exceeds threshold, retrain with adjusted data
+          - **Regulatory**: Hard cap at 5x (lower in regulated cities/emergencies)
+
+          **Why this works better:**
+          - Cleaner optimization signal — agent knows exactly what to maximize
+          - Constraints are more interpretable than reward weights
+          - Easier to debug — if completion drops, we know the constraint wasn't tight enough
+          - Business stakeholders understand "maximize revenue subject to constraints" better than a weighted sum
+
+          **Online A/B metrics:** Gross bookings, rider conversion rate, driver online hours, ETA, rider retention (7d/30d), P95 latency.
+        next: rl_data
+
+  - id: rl_data
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      Let's design the data pipeline. For RL, we need to construct **experience tuples** (state, action, reward, next_state).
+
+      **Data sources and volume:**
+
+      | Source | Data | Volume |
+      |--------|------|--------|
+      | Ride events (Kafka) | Requests, matches, completions, cancellations | ~20M rides/day |
+      | Driver pings | GPS, online/offline status, ride status | ~1B pings/day |
+      | App events | Opens, searches, price views, request attempts | ~100M events/day |
+      | External | Weather APIs, event calendars, holidays | Periodic |
+      | Pricing logs | Historical surge multipliers per zone per interval | ~100M records/day |
+
+      **Experience tuple construction** — every 5 minutes per active geo-zone:
+      1. **Aggregate** raw events into zone-level state features
+      2. **Record** the action taken (surge multiplier from current policy)
+      3. **Compute** reward from outcomes in the next 5-minute window
+      4. **Store** (s_t, a_t, r_t, s_{t+1}) in replay buffer (HDFS/S3)
+
+      **Decision frequency:** Every 5 minutes per zone (not per ride request — keeps the problem tractable). Episode = one day in one city (resets at midnight).
+
+      Now let's design the state space — what features does the RL agent see?
+    next: q_features
+
+  - id: q_features
+    stage: features
+    type: question
+    label: "State Space Design"
+    speaker: interviewer
+    content: |
+      What features would you include in the RL agent's state vector? Remember, this needs to capture everything the agent needs for a good pricing decision.
+    choices:
+      - label: "Comprehensive state: demand + supply + spatial + temporal + weather"
+        answer: |
+          I'd design a **comprehensive state vector** (~80 dimensions per zone):
+
+          | Category | Features | Granularity |
+          |----------|----------|-------------|
+          | **Demand** | Open requests, app opens, search queries, request rate Δ5min/Δ15min | Per zone |
+          | **Supply** | Available drivers, en-route drivers, drivers finishing rides (ETA <10min) | Per zone |
+          | **S/D Ratio** | Current ratio, historical ratio at same (zone, day, hour) | Per zone |
+          | **Current pricing** | Active multiplier, neighboring zone multipliers | Per zone |
+          | **Temporal** | Hour, day of week, is_holiday, is_event, minutes since last update | Global + zone |
+          | **Spatial** | Zone type (airport/downtown/suburban), neighbor zone states | Per zone |
+          | **Weather** | Rain, snow, temperature, severe weather alerts | Per city |
+          | **Historical** | Avg completion rate at current price, avg wait time, avg cancellation rate | Per zone |
+
+          **Key design choices:**
+          - Include **neighboring zone features** to capture spatial spillover (raising prices in Zone A pushes demand to Zone B)
+          - Use **rate-of-change** features (Δ5min, Δ15min) not just snapshots — captures momentum
+          - **Temporal encoding**: Sinusoidal positional encoding for time-of-day and day-of-week
+          - Normalize all features to [-1, 1] range for stable RL training
+        next: rl_model
+      - label: "Compact state: S/D ratio + price + temporal embeddings"
+        answer: |
+          I'd use a **compact state representation** (~20 dimensions) focused on the most predictive signals:
+
+          **Core features:**
+          - Supply/demand ratio (current) — the single most important signal
+          - Current surge multiplier — agent needs to know current price
+          - S/D ratio velocity (Δ5min) — is the gap growing or shrinking?
+          - Hour-of-day embedding (2D sinusoidal) — captures daily patterns
+          - Day-of-week embedding (2D sinusoidal) — captures weekly patterns
+          - Is_event flag (binary) — concerts, sports games, etc.
+          - Weather severity (0-1 scalar) — simple summary
+
+          **Neighbor summary:**
+          - Mean S/D ratio of 6 neighboring zones
+          - Mean surge multiplier of neighbors
+
+          **Why compact?**
+          - Fewer features → faster convergence in RL (curse of dimensionality)
+          - Less risk of the agent overfitting to noise in high-dimensional state
+          - Easier to interpret what the agent is responding to
+          - **S/D ratio is 80% of the signal** — additional features add marginal value
+          - Simpler feature pipeline → fewer failure modes in production
+
+          **Trade-off:** We lose some nuance (weather details, zone type, historical patterns), but the agent can still learn effective pricing from the core supply/demand dynamics.
+        next: rl_model
+
+  - id: rl_model
+    stage: model
+    type: question
+    label: "RL Model Architecture"
+    speaker: interviewer
+    content: |
+      Now let's design the model architecture. What network design would you use for the RL agent?
+    choices:
+      - label: "DQN with spatial attention over neighboring zones"
+        answer: |
+          I'd use a **Deep Q-Network (DQN)** with spatial attention:
+
+          ```
+          State Vector (~80 dim)
+                 │
+                 ▼
+          ┌──────────────────┐
+          │  FC(256) + LN + ReLU │
+          │  FC(256) + LN + ReLU │
+          │  FC(128) + LN + ReLU │
+          └──────────────────┘
+                 │
+                 ▼
+          ┌──────────────────┐
+          │  Q-value heads    │ → Q(s, a) for each of 12 actions
+          │  (dim = 12)       │   {1.0, 1.1, 1.2, 1.3, 1.5, 1.7,
+          └──────────────────┘    2.0, 2.5, 3.0, 3.5, 4.0, 5.0}
+          ```
+
+          **Discrete action space** (12 multiplier levels):
+          - Easier to train, more stable convergence
+          - Interpretable for business stakeholders
+          - Simpler to apply caps and constraints
+
+          **Spatial attention module:**
+          - Each zone's embedding attends to its 6 neighboring zone embeddings
+          - Learns that raising prices in Zone A should consider Zone B's state
+          - Multi-head attention (2 heads) captures different spatial relationships
+
+          **Training enhancements:**
+          - **Double DQN** to reduce Q-value overestimation
+          - **Dueling architecture** — separate value and advantage streams
+          - **Per-city models** initially (NYC, SF, London have different dynamics)
+          - Target network updated every 1000 steps
+
+          Model is small (~1M params) → fast inference (<10ms on CPU).
+        next: rl_training
+      - label: "Actor-Critic with continuous action output"
+        answer: |
+          I'd use an **Actor-Critic architecture** (specifically SAC — Soft Actor-Critic) for continuous price output:
+
+          **Actor (Policy Network):**
+          ```
+          State → FC(256) → FC(256) → FC(128) → μ, σ
+          Sample: multiplier ~ N(μ, σ), clamped to [1.0, 5.0]
+          ```
+
+          **Critic (Value Network):**
+          ```
+          (State, Action) → FC(256) → FC(256) → Q-value
+          Two critics (twin Q) for stability
+          ```
+
+          **Why continuous actions?**
+          - Price multiplier is inherently continuous — discretizing loses information
+          - The agent can learn fine-grained pricing (e.g., 1.37x vs 1.40x) that discrete can't express
+          - SAC's entropy regularization encourages exploration naturally
+          - No need to predefine action bins — the agent discovers the right granularity
+
+          **SAC advantages for pricing:**
+          - Maximum entropy objective → diverse, robust policies
+          - Automatic temperature tuning → less hyperparameter sensitivity
+          - Stable off-policy learning → works well with offline data (can adapt CQL to SAC)
+
+          **Post-processing:** Round to nearest 0.1 for display, apply EMA smoothing (α=0.3) to prevent jitter, enforce regulatory caps.
+
+          **Trade-off:** Harder to train than DQN, but more expressive. Start with discrete DQN for v1, migrate to SAC for v2 if finer granularity improves metrics.
+        next: rl_training
+
+  - id: rl_training
+    stage: training
+    type: question
+    label: "Training Pipeline"
+    speaker: interviewer
+    content: |
+      How would you design the training pipeline? Remember, this is offline RL — we're learning from historical logs without live interaction.
+    choices:
+      - label: "Daily retraining with OPE gating"
+        answer: |
+          I'd design a **daily retraining pipeline** with strict Offline Policy Evaluation (OPE) gating:
+
+          **Pipeline (runs daily):**
+          1. **Extract** last 30 days of experience tuples from data warehouse
+          2. **Data quality checks**: Missing states, reward anomalies, action coverage (are all 12 actions seen?), distribution shift detection
+          3. **Train CQL model** (~2-4 hours on GPU cluster): batch size 2048, LR 3e-4 with cosine decay, ~500K steps
+          4. **Offline Policy Evaluation** using three methods
+          5. **Gate**: Deploy only if OPE shows improvement AND safety checks pass
+
+          **OPE Methods** (critical for safety):
+
+          | Method | How | Limitation |
+          |--------|-----|------------|
+          | Inverse Propensity Scoring (IPS) | Re-weight by π_new/π_old | High variance |
+          | Doubly Robust (DR) | IPS + learned reward model | Complex but lower variance |
+          | **Fitted Q Evaluation (FQE)** | Separate Q-network evaluates new policy | Most stable — **preferred** |
+
+          **Deployment gate:** New policy must show:
+          - ≥2% improvement in estimated cumulative reward via FQE
+          - ≤1% degradation in estimated completion rate
+          - Pass fairness audit across zone demographics
+
+          **Why daily?** Market dynamics shift (new drivers, events, weather). Daily retraining captures recent patterns while 30-day window maintains stability.
+        next: rl_deployment
+      - label: "Weekly retraining with sliding window and ensembles"
+        answer: |
+          I'd use **weekly retraining** with a sliding window approach and policy ensembles:
+
+          **Training schedule:**
+          - Retrain every Sunday night using last 30 days of data
+          - 30-day window balances recency with having enough data for stable training
+          - Each weekly model is versioned and stored
+
+          **Ensemble of policies:**
+          - Maintain 4 most recent weekly models
+          - At serving time, each model votes on the action → take weighted average
+          - Recent models get higher weights (exponential decay)
+          - If models disagree significantly (high variance), default to conservative pricing
+
+          **Why weekly instead of daily?**
+          - RL training is compute-intensive — daily may not converge in time
+          - Weekly gives more time for thorough OPE evaluation
+          - Ensemble provides stability even if one week's training is noisy
+          - Reduced operational burden (fewer deployments to monitor)
+
+          **Handling non-stationarity:**
+          - Monitor KL-divergence of reward distribution weekly
+          - If significant drift detected, trigger early retraining
+          - Maintain a "winter model" and "summer model" — seasonal dynamics differ dramatically
+
+          **Data quality:** Before each training run, validate: action coverage across all 12 multiplier levels, no reward anomalies, feature staleness checks, ensure data from all geo-zones.
+        next: rl_deployment
+
+  - id: rl_deployment
+    stage: deployment
+    type: question
+    label: "Serving Architecture"
+    speaker: interviewer
+    content: |
+      How would you serve the RL model at scale? Remember: <100ms latency, 20M rides/day, 10K zones.
+    choices:
+      - label: "Zone-level caching with periodic inference"
+        answer: |
+          I'd use **zone-level price caching** — compute prices per zone periodically, not per ride request:
+
+          **Architecture:**
+          ```
+          Ride Request → Identify H3 Hex Zone → Lookup Cached Price → Return
+
+          Background (every 60s per zone):
+          Feature Store (Redis) → RL Model → Post-Processing → Cache Update
+          ```
+
+          **Why zone-level caching?**
+          - All rides in the same zone within 60 seconds get the **same multiplier**
+          - Reduces inference from 20M/day to ~14M/day (10K zones × 1440 minutes)
+          - Price lookup is a simple Redis GET → <1ms latency
+          - Removes model inference from the critical path
+
+          **Post-processing pipeline:**
+          - **Regulatory caps**: Max multiplier per city, emergency overrides
+          - **Smoothing**: EMA filter prevents price jitter (multiplier_new = 0.7×model + 0.3×previous)
+          - **Fairness check**: Compare pricing across demographic zones
+          - **Min/max bounds**: Floor at 1.0, ceiling per-city
+
+          **Fallback:** If RL model errors or times out, fall back to rule-based surge (S/D ratio heuristic). Monitor fallback rate as SLA metric — should be <5%.
+
+          **Scaling:** Model serving via TorchServe with GPU batching. Model is ~1M params → CPU inference also viable at ~2ms. Feature store (Redis cluster) handles 10K zone updates/minute easily.
+        next: rl_exploration
+      - label: "Real-time per-request inference with model optimization"
+        answer: |
+          I'd serve predictions **per ride request** with aggressive model optimization:
+
+          **Architecture:**
+          ```
+          Ride Request
+               │
+               ▼
+          API Gateway → Load Balancer → Model Service (K8s pods)
+               │                              │
+               │                    ┌─────────┴─────────┐
+               │                    │ Fetch Features     │ (Redis, <5ms)
+               │                    │ Run Inference      │ (ONNX, <5ms)
+               │                    │ Post-Process       │ (<1ms)
+               │                    └─────────┬─────────┘
+               │                              │
+               ▼                              ▼
+          Price Response (<20ms total)
+          ```
+
+          **Model optimization for speed:**
+          - Export to **ONNX** format for optimized CPU inference
+          - Quantize weights to INT8 → 2-4x speedup with minimal accuracy loss
+          - Batch inference: accumulate requests for same zone over 10ms window, batch forward pass
+          - Model is small (~1M params) → even without optimization, <5ms on modern CPU
+
+          **Feature serving (critical path):**
+          - Pre-computed features in Redis (updated every 60s by Flink jobs)
+          - Feature fetch: single `MGET` call for all zone features → <5ms
+          - No external API calls on critical path
+
+          **Why per-request?**
+          - Can incorporate **rider-specific features** (loyalty tier, ride history) for personalized pricing
+          - Price reflects most recent market state (not 60s stale)
+          - Easier to A/B test — route specific users to different model versions
+
+          **Auto-scaling:** Kubernetes HPA targeting <70% CPU, min 10 pods, max 100. P99 latency target: 50ms.
+        next: rl_exploration
+
+  - id: rl_exploration
+    stage: deployment
+    type: info
+    label: "Safe Exploration Strategy"
+    speaker: interviewer
+    content: |
+      Once deployed, we want to **continue learning** without endangering the marketplace. Here's the safe exploration strategy:
+
+      **Constrained Epsilon-Greedy:**
+      ```python
+      def get_action(state, policy, epsilon=0.05):
+          if random() < epsilon:
+              # Explore within SAFE subset only
+              base = policy(state)
+              safe_actions = [a for a in ACTIONS if abs(a - base) <= 0.3]
+              return random.choice(safe_actions)
+          else:
+              return policy(state)  # Exploit
+      ```
+
+      - Epsilon starts at 5% and decays over weeks
+      - Exploration is **bounded**: only prices within ±0.3 of the policy recommendation
+      - Results are logged and fed back into the next offline training cycle
+
+      **Deployment rollout:**
+      1. **Shadow mode** (2 weeks): RL runs alongside production, doesn't affect prices
+      2. **Limited A/B** (4 weeks): 5% of geo-zones use RL, geographically isolated to minimize spillover
+      3. **Gradual rollout**: 5% → 20% → 50% → 100% over 8 weeks
+      4. **Automated rollback** if any guardrail degrades >2%
+
+      Now let's talk about the key challenges.
+    next: rl_challenges
+
+  - id: rl_challenges
+    stage: monitoring
+    type: question
+    label: "Key Challenges"
+    speaker: interviewer
+    content: |
+      What are the biggest challenges with this RL pricing system, and how would you address them?
+    choices:
+      - label: "Spatial spillover, non-stationarity, and reward hacking"
+        answer: |
+          Three critical challenges:
+
+          **1. Spatial Spillover Effects**
+          Raising prices in Zone A pushes demand to Zone B — zones are coupled, not independent.
+
+          *Solution:*
+          - Include **neighboring zone features** in state (already in our design)
+          - Advanced: **Multi-Agent RL (MARL)** — treat each zone as a cooperative agent using mean-field approximation (each considers average neighbor behavior)
+          - Start single-agent + neighbor features; migrate to MARL if spillover is significant
+
+          **2. Non-Stationarity**
+          The environment changes — new competitors, city growth, seasonal shifts, COVID-like events.
+
+          *Solution:*
+          - Retrain with **sliding 30-day window** to capture recent dynamics
+          - Monitor reward distribution drift using **KL-divergence**
+          - Maintain an **ensemble** of policies from different time windows; use the one performing best on recent OPE
+          - Seasonal models if patterns differ dramatically
+
+          **3. Reward Hacking**
+          The agent might learn to always surge to maximize revenue, destroying rider trust.
+
+          *Solution:*
+          - Completion rate weighted **2x** in reward (β=2.0)
+          - Hard cap on multiplier (5x max, lower in regulated cities)
+          - Rider retention (30-day) as guardrail — triggers rollback if degraded
+          - Constraint: average multiplier per city per day within historical ±10%
+        next: rl_monitoring
+      - label: "Fairness, cold start, and delayed rewards"
+        answer: |
+          Three critical challenges:
+
+          **1. Fairness & Ethics**
+          RL might learn to surge higher in lower-income neighborhoods (fewer transit alternatives).
+
+          *Solution:*
+          - **R_fairness** in reward penalizes price disparity across demographic groups
+          - **Post-hoc audit**: Weekly analysis of average surge by neighborhood income quartile
+          - **Hard constraint**: Maximum surge difference between adjacent zones of different income levels
+          - **Regulatory layer**: Hard caps during declared emergencies; full audit trail
+
+          **2. Cold Start (New Cities)**
+          No historical data for new markets.
+
+          *Solution:*
+          - **Transfer learning**: Fine-tune a model trained on similar cities (same population density, transit patterns)
+          - **City embeddings**: Encode city characteristics (density, income, transit) and train a single model with city context
+          - Start with rule-based pricing in new cities; collect 30 days of data before switching to RL
+
+          **3. Delayed Rewards**
+          A pricing decision at 5:00 PM affects ride completions at 5:15 PM.
+
+          *Solution:*
+          - 5-minute decision intervals with γ=0.95 discount factor
+          - **N-step returns** (n=5) to propagate rewards faster during training
+          - Include "riders who saw price but haven't decided yet" as a state feature
+          - The 5-minute granularity naturally handles most delay (effects observed within 1-3 intervals)
+        next: rl_monitoring
+
+  - id: rl_monitoring
+    stage: monitoring
+    type: question
+    label: "Production Monitoring"
+    speaker: interviewer
+    content: |
+      What monitoring would you set up for this RL pricing system?
+    choices:
+      - label: "Comprehensive alerting on model, system, and business metrics"
+        answer: |
+          I'd set up **three layers of monitoring**:
+
+          **Layer 1: System Health**
+          | Monitor | Alert Threshold | Action |
+          |---------|----------------|--------|
+          | Fallback rate | >5% of requests | Page on-call; investigate model serving |
+          | Inference latency P99 | >50ms | Scale serving infra |
+          | Feature freshness | Any feature >5 min stale | Alert data pipeline team |
+          | Cache hit rate | <90% | Investigate cache invalidation |
+
+          **Layer 2: Model Performance**
+          | Monitor | Alert Threshold | Action |
+          |---------|----------------|--------|
+          | Average surge (city) | >2.0 sustained 1hr (non-event) | Investigate model issue |
+          | Reward distribution shift | KL-divergence > threshold | Trigger early retraining |
+          | OPE vs actual performance gap | >10% divergence | Review OPE methodology |
+          | Action distribution entropy | Drops below threshold | Agent may be stuck |
+
+          **Layer 3: Business Guardrails**
+          | Monitor | Alert Threshold | Action |
+          |---------|----------------|--------|
+          | Completion rate drop | >3% below baseline | **Auto-rollback** to rules |
+          | Rider complaints (pricing) | >2x normal | Investigate; tighten caps |
+          | Rider retention (7d) | >1% degradation | Review and retrain |
+          | Fairness audit | Disparity exceeds threshold | Pause RL; revert to rules |
+
+          **Dashboards:** Real-time per-city view showing current multipliers across zones (heat map), completion rates, revenue vs baseline, and alerts.
+        next: rl_terminal
+      - label: "Focus on A/B testing and continuous improvement"
+        answer: |
+          I'd center monitoring around **continuous A/B testing**:
+
+          **Always-on A/B framework:**
+          - Permanently hold back 5-10% of zones as control (rule-based pricing)
+          - Continuously compare RL zones vs control zones
+          - This catches both sudden failures and slow degradation
+
+          **Metrics tracked in A/B:**
+          - **Gross bookings** (primary): Total fare revenue — is RL actually making more money?
+          - **Rider conversion funnel**: App open → price view → request → completion. Where do we lose riders?
+          - **Driver metrics**: Online hours, earnings/hour, utilization rate. Drivers must benefit too.
+          - **ETA (pickup time)**: Proxy for supply availability — lower is better
+          - **Rider retention** (7d, 30d): Long-term health signal
+          - **P95 pricing latency**: System performance
+
+          **Statistical rigor:**
+          - Use Bayesian analysis (not just p-values) — gives probability of improvement and effect size
+          - Require 95% probability of >1% revenue improvement to declare winner
+          - Account for spatial interference (RL zones may affect neighboring control zones)
+
+          **Continuous learning loop:**
+          - A/B results feed into reward function tuning (adjust α, β, γ, δ weights)
+          - Quarterly review with business stakeholders on reward function design
+          - Annual full redesign consideration as market dynamics evolve
+        next: rl_terminal
+
+  - id: rl_terminal
+    stage: monitoring
+    type: terminal
+    label: "RL Pricing Path Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive **RL-based dynamic pricing engine**.
+
+      **Your key design decisions:**
+      - Framed as RL to capture temporal dynamics and long-term effects
+      - Used offline RL (CQL) or online RL with safety constraints
+      - Designed multi-objective reward balancing revenue, completion, stability, fairness
+      - Built comprehensive state space with spatial and temporal features
+      - Chose DQN with spatial attention or Actor-Critic for model architecture
+      - Deployed with zone-level caching or per-request inference
+      - Addressed challenges: spillover, non-stationarity, fairness, cold start
+
+      **Why this design is strong:**
+      - **Safety-first**: Offline RL → constrained exploration → gradual rollout
+      - **Multi-stakeholder**: Revenue for platform, fair prices for riders, earnings for drivers
+      - **Production-ready**: <100ms latency, fallback to rules, automated rollback
+      - **Continuously improving**: Safe exploration feeds back into training
+
+      This demonstrates deep understanding of RL in production, marketplace dynamics, and the balance between optimization and safety. Outstanding design!
+
+  # ============ SUPERVISED LEARNING PATH ============
+  - id: sl_metrics
+    stage: metrics
+    type: question
+    label: "SL Metrics"
+    speaker: interviewer
+    content: |
+      For the supervised learning approach, what metrics would you use to evaluate the pricing model?
+    choices:
+      - label: "Revenue uplift and ride completion rate"
+        answer: |
+          I'd use **revenue uplift** as the primary metric with **ride completion rate** as the key guardrail:
+
+          **Primary: Revenue per zone-hour**
+          - Compare model-suggested prices vs baseline (rule-based) prices
+          - Measure incremental revenue: `(revenue_model - revenue_baseline) / revenue_baseline`
+          - Evaluate both in offline backtesting and online A/B tests
+
+          **Guardrail: Ride completion rate**
+          - Must stay within 2% of baseline — pricing riders out of the market is unacceptable
+          - Track conversion funnel: price_view → ride_request → completed_ride
+
+          **Secondary metrics:**
+          - **MAE of multiplier prediction** vs "optimal" multiplier (derived from historical best outcomes)
+          - **Driver earnings per hour** — drivers must benefit from surge
+          - **Price stability**: Variance of predicted multipliers over time windows
+          - **ETA (pickup time)**: Proxy for whether pricing is effectively balancing supply and demand
+
+          **Why not just RMSE on multiplier?** Because predicting the "correct" multiplier exactly is less important than predicting one that achieves good business outcomes. A 1.3x prediction where 1.5x was "optimal" might still generate good revenue.
+        next: sl_data
+      - label: "Prediction accuracy on optimal multiplier"
+        answer: |
+          I'd focus on **prediction accuracy** of the optimal multiplier:
+
+          **Defining the target:** The "optimal" multiplier for training is derived from historical data — for each (zone, time) window, find the multiplier that maximized `revenue × completion_rate`. This becomes our regression target.
+
+          **Primary metric: Weighted MAE**
+          ```
+          WMAE = Σ w_i × |predicted_mult - optimal_mult|
+          ```
+          Where weights are proportional to zone ride volume — errors in busy zones matter more.
+
+          **Bucketed accuracy:**
+          - What percentage of predictions are within ±0.1 of the optimal?
+          - What percentage are within ±0.3? (acceptable range)
+          - What percentage are off by >0.5? (dangerous errors)
+
+          **Directional accuracy:**
+          - When the model says "surge up", was surging up actually beneficial?
+          - When the model says "no surge", was staying flat the right call?
+          - This matters more than exact multiplier accuracy
+
+          **Rank correlation (Spearman):**
+          - Across zones at a given time, does the model correctly rank which zones need higher/lower prices?
+          - Rank ordering is often more important than absolute values
+
+          **Offline evaluation:** Use counterfactual estimation to predict what revenue *would have been* under model prices vs actual prices.
+        next: sl_data
+
+  - id: sl_data
+    stage: data
+    type: info
+    label: "Data for Supervised Pricing"
+    speaker: interviewer
+    content: |
+      For supervised learning, we need to construct a clean training dataset.
+
+      **Target variable construction** — this is the hardest part:
+      - For each (zone, 5-min interval), the "optimal" price is the one that maximized `revenue × completion_rate` in similar historical conditions
+      - Use **causal inference** techniques (doubly robust estimation) to estimate counterfactual outcomes under different prices
+      - Alternatively, use A/B test data where different prices were randomly assigned
+
+      **Feature engineering:**
+      - Same features as RL state space: demand/supply signals, temporal, spatial, weather
+      - **Key difference from RL:** We can also include **lagged outcome features** (completion rate in past 15 min, revenue trend) since SL doesn't have the temporal coupling concern
+
+      **Data splits:**
+      - Time-based splits (never random): Train on months 1-10, validate month 11, test month 12
+      - Per-city datasets (city dynamics differ too much for one global model)
+
+      **Data volume:** ~10K zones × 288 intervals/day × 365 days = ~1B training examples per year. Plenty of data even for deep models.
+
+      Now let's choose features carefully.
+    next: sl_features
+
+  - id: sl_features
+    stage: features
+    type: question
+    label: "Feature Engineering for SL"
+    speaker: interviewer
+    content: |
+      What features would you engineer for the supervised pricing model?
+    choices:
+      - label: "Supply-demand features with interaction terms"
+        answer: |
+          I'd build features centered on **supply-demand dynamics** with carefully engineered interactions:
+
+          **Core features:**
+          - S/D ratio (current, 5-min lag, 15-min lag, 1-hour lag)
+          - Absolute demand count and supply count (ratio alone loses scale)
+          - Demand velocity: `(demand_now - demand_5min_ago) / 5`
+          - Supply velocity: `(supply_now - supply_5min_ago) / 5`
+
+          **Interaction features:**
+          - `S/D_ratio × hour_of_day` — surge needs differ by time
+          - `S/D_ratio × is_weekend` — weekend dynamics are different
+          - `demand_velocity × supply_velocity` — diverging trends signal impending imbalance
+          - `weather_severity × S/D_ratio` — bad weather amplifies supply shortage
+
+          **Historical benchmarks:**
+          - Expected S/D ratio for this (zone, day, hour) from 30-day rolling average
+          - Current deviation from expectation: `actual_SD / expected_SD`
+          - This captures "is this zone abnormally busy right now?"
+
+          **Neighbor features:**
+          - Mean S/D ratio of neighboring 6 zones
+          - Max surge multiplier among neighbors
+          - These capture spatial demand patterns and substitution effects
+
+          **Why interactions matter:** The optimal price depends on *combinations* of factors. High demand alone might need 1.5x, but high demand + bad weather + low supply needs 2.5x. Tree-based models learn some interactions, but explicit ones help linear/NN models.
+        next: sl_model
+      - label: "Embeddings for zones, time, and events"
+        answer: |
+          I'd use **learned embeddings** for high-cardinality features, combined with numerical signals:
+
+          **Zone embeddings (dim=16):**
+          - Each of 10K zones gets a learned 16-dimensional vector
+          - Captures latent zone characteristics: airport vs downtown, nightlife district, commuter corridor
+          - Similar zones cluster in embedding space → enables transfer learning
+
+          **Temporal embeddings:**
+          - Hour-of-day: Sinusoidal encoding (2 dims: sin, cos) — captures cyclical nature
+          - Day-of-week: Learned embedding (7 categories → 4 dims)
+          - Month: Learned embedding (12 categories → 4 dims)
+          - `hour × day_of_week` cross embedding — Friday 11PM ≠ Tuesday 11PM
+
+          **Event embeddings:**
+          - Event type embedding: concert, sports, conference, holiday (→ 4 dims)
+          - Event magnitude: estimated attendance (normalized)
+          - Event timing: hours until start, hours until end
+
+          **Numerical features (standard):**
+          - S/D ratio, demand count, supply count, current multiplier
+          - Weather features, competitor pricing (if available)
+
+          **Why embeddings?**
+          - **Zone embeddings** eliminate need for manual zone-type labels — model discovers zone characteristics
+          - **Temporal embeddings** capture non-linear time patterns (rush hour isn't just "high demand")
+          - **Transfer learning**: When a new zone opens, initialize its embedding near similar zones
+          - Works best with neural network models that can learn end-to-end
+        next: sl_model
+
+  - id: sl_model
+    stage: model
+    type: question
+    label: "Model Selection for SL"
+    speaker: interviewer
+    content: |
+      What model would you choose for the supervised pricing approach?
+    choices:
+      - label: "LightGBM with quantile regression"
+        answer: |
+          I'd use **LightGBM with quantile regression** as the primary model:
+
+          **Why LightGBM?**
+          - Best-in-class for tabular data with mixed feature types
+          - Handles the interaction features naturally through tree splits
+          - Trains in minutes on billions of rows (critical for daily retraining)
+          - Built-in handling of categorical features
+
+          **Quantile regression for uncertainty:**
+          - Train three models: predict P25, P50, P75 of optimal multiplier
+          - P50 is the point estimate; P25-P75 gives a confidence interval
+          - In high-uncertainty situations (wide interval), default to conservative pricing
+          - Business value: "We're 75% confident the optimal price is between 1.3x and 1.8x"
+
+          **Multi-output setup:**
+          - One model per city (NYC, SF, London dynamics differ too much)
+          - Each model predicts multiplier for its city's zones
+          - Shared feature engineering pipeline, separate model weights
+
+          **Hyperparameter tuning:**
+          - Bayesian optimization (Optuna) on validation set
+          - Key params: num_leaves, learning_rate, min_child_samples, feature_fraction
+          - Optimize for business metric (revenue × completion_rate), not just MAE
+
+          **Feature importance:** SHAP values explain each prediction — "this zone is priced at 1.8x because demand is 2.3x supply (contributes +0.5x) and it's raining (contributes +0.3x)."
+        next: sl_training
+      - label: "Neural network with zone and time embeddings"
+        answer: |
+          I'd use a **neural network** to leverage the learned embeddings:
+
+          **Architecture:**
+          ```
+          Zone ID → Embedding(16)  ─┐
+          Time features → Embed(10) ─┤
+          Event → Embed(4)          ─┤ Concatenate → FC(256) → FC(128) → FC(64) → Output(1)
+          Numerical features (20)   ─┘                 ↓           ↓
+                                                   Dropout(0.2) Dropout(0.1)
+          ```
+
+          **Why neural network?**
+          - Learns zone, time, and event embeddings **end-to-end** — no manual feature engineering for these
+          - Can capture complex non-linear interactions across all feature types
+          - **Multi-task learning**: Add auxiliary outputs (predict completion rate, predict demand next interval) to learn richer representations
+          - Easily extends to sequence modeling (feed last N intervals → LSTM/Transformer)
+
+          **Training details:**
+          - Loss: Huber loss (less sensitive to outlier prices than MSE)
+          - Optimizer: AdamW with cosine annealing LR schedule
+          - Batch size: 8192 (large batches for stable gradient estimates)
+          - Early stopping on validation revenue metric
+
+          **Serving optimization:**
+          - Export to ONNX for fast inference (<5ms)
+          - Quantize embeddings to FP16
+          - Pre-compute zone embeddings and cache in feature store
+
+          **Trade-off vs LightGBM:** Slightly more complex to train/serve, but better at capturing latent patterns through embeddings. Best for markets with many zones and complex spatial dynamics.
+        next: sl_training
+
+  - id: sl_training
+    stage: training
+    type: info
+    label: "SL Training Strategy"
+    speaker: interviewer
+    content: |
+      Let's discuss the training strategy for supervised pricing.
+
+      **Key training considerations:**
+
+      **1. Target variable quality**
+      - The "optimal price" target is estimated, not observed — this is **noisy supervision**
+      - Use techniques to reduce noise: aggregate over similar situations, use causal estimation
+      - Consider training on **relative targets** (should price go up/down/stay) rather than absolute multipliers
+
+      **2. Time-based validation**
+      - Train: months 1-10, Validate: month 11, Test: month 12
+      - Never shuffle — pricing patterns are temporal
+      - Walk-forward validation: train on [1..T], validate on [T+1], slide T forward
+
+      **3. Retraining frequency**
+      - Daily retraining with latest data (sliding 30-day window)
+      - Automated pipeline: data validation → feature engineering → training → evaluation → deployment
+      - Canary deployment: new model serves 5% of traffic, compare metrics for 1 hour, then full rollout
+
+      **4. Handling distribution shift**
+      - Monitor feature distributions weekly
+      - If S/D ratio distribution shifts significantly (KS test), trigger immediate retraining
+      - Special event detection: if demand is 3x normal (concert, game), switch to event-specific model or rules
+
+      Now let's deploy this model.
+    next: sl_deployment
+
+  - id: sl_deployment
+    stage: deployment
+    type: question
+    label: "SL Deployment Architecture"
+    speaker: interviewer
+    content: |
+      How would you deploy the supervised pricing model?
+    choices:
+      - label: "Feature store + real-time inference"
+        answer: |
+          I'd deploy with a **feature store** feeding **real-time model inference**:
+
+          **Architecture:**
+          ```
+          Ride Request → Zone Lookup → Feature Store (Redis) → Model Service → Post-Process → Price
+                                            │                        │
+                                      Updated by Flink         TorchServe/ONNX
+                                      streaming jobs            on Kubernetes
+          ```
+
+          **Feature store (dual-layer):**
+          - **Online store (Redis):** Pre-computed features updated every 60s by Flink. `MGET` for zone features in <5ms.
+          - **Offline store (Hive/Spark):** Historical features for training. Materialized into partitioned tables.
+
+          Key online features per zone:
+          ```
+          zone:{id}:demand_count         → updated every 60s
+          zone:{id}:supply_count         → updated every 60s
+          zone:{id}:sd_ratio             → computed from above
+          zone:{id}:current_multiplier   → last applied price
+          zone:{id}:completion_rate_1h   → rolling 1-hour rate
+          ```
+
+          **Model serving:**
+          - LightGBM compiled to TreeLite for 10-100x speedup
+          - Or ONNX export for neural network models
+          - Kubernetes pods with auto-scaling (target <70% CPU)
+          - P99 latency target: 30ms end-to-end
+
+          **Advantages:** Fresh predictions using latest features, flexible per-request customization, easy A/B testing with traffic splitting.
+        next: sl_monitoring
+      - label: "Batch prediction with zone-level price table"
+        answer: |
+          I'd use **batch predictions** to maintain a zone-level price table:
+
+          **Architecture:**
+          ```
+          Every 5 minutes:
+          All Zone Features → Batch Predict → Price Table (DynamoDB)
+
+          Ride Request → Zone Lookup → Price Table → Return Cached Price
+          ```
+
+          **Batch job (runs every 5 minutes):**
+          1. Fetch latest features for all 10K active zones
+          2. Run model inference in batch (very fast — <1 second for 10K predictions)
+          3. Apply post-processing (caps, smoothing, fairness checks)
+          4. Write updated price table to DynamoDB
+
+          **Price table schema:**
+          ```
+          zone_id | multiplier | confidence | updated_at | model_version
+          hex_abc | 1.5        | 0.85       | 2026-02-07T10:05:00 | v42
+          ```
+
+          **Why batch?**
+          - **Operationally simple**: No model on the critical path, just a DB lookup
+          - **Reliable**: If batch job fails, prices are stale by 5 minutes — not catastrophic
+          - **Debuggable**: Full price table is logged; can replay any moment
+          - **Cheap**: No GPU serving infrastructure needed, just periodic compute
+
+          **5-minute refresh** is sufficient — supply/demand doesn't change dramatically minute-to-minute, and the smoothing filter prevents price volatility anyway.
+
+          **Fallback:** If price table entry is >10 minutes stale, use rule-based S/D ratio pricing.
+        next: sl_monitoring
+
+  - id: sl_monitoring
+    stage: monitoring
+    type: info
+    label: "SL Monitoring & Iteration"
+    speaker: interviewer
+    content: |
+      For the supervised approach, here's the monitoring strategy:
+
+      **Model performance monitoring:**
+      - Track MAE of predicted vs "actual optimal" multiplier (computed retrospectively)
+      - Monitor revenue per zone-hour compared to baseline rule-based pricing
+      - Completion rate tracking per zone with alerting on >3% degradation
+
+      **Data and feature monitoring:**
+      - Feature drift detection (PSI, KS-test) on all input features weekly
+      - Missing feature alerting — if any feature is stale >5 min
+      - Target distribution monitoring — is the "optimal price" distribution shifting?
+
+      **Business monitoring:**
+      - A/B test RL vs SL vs rules continuously (hold back 10% for rules baseline)
+      - Track rider conversion funnel: price view → request → completion
+      - Driver earnings and online hours — ensure drivers benefit
+      - Rider retention 7d/30d as lagging indicator
+
+      **Key advantage of SL monitoring:** Since it's a standard regression/classification model, all existing ML monitoring tools (MLflow, Evidently, WhyLabs) work out of the box. No special RL monitoring needed.
+
+      **Iteration path:** If SL works well, consider graduating to RL for the temporal optimization benefits. SL is a great starting point that delivers value quickly.
+    next: sl_terminal
+
+  - id: sl_terminal
+    stage: monitoring
+    type: terminal
+    label: "Supervised Learning Path Complete"
+    speaker: interviewer
+    content: |
+      Great work! You've designed a solid **supervised learning pricing system**.
+
+      **Your key design decisions:**
+      - Framed as supervised regression predicting optimal price multiplier
+      - Used revenue uplift or prediction accuracy as primary metrics
+      - Built supply-demand features or learned embeddings for zones/time
+      - Chose LightGBM with quantile regression or neural network with embeddings
+      - Deployed via feature store + real-time or batch prediction with price table
+
+      **Strengths of SL approach:**
+      - **Simpler** to implement, debug, and explain than RL
+      - **Faster iteration** — standard ML pipeline, well-understood tooling
+      - **Lower risk** — no exploration needed, no reward shaping pitfalls
+      - **Production-proven** — gradient boosting and feature stores are battle-tested
+
+      **Limitations vs RL:**
+      - Doesn't model **temporal effects** (price now → demand later)
+      - Treats each decision independently — misses sequential optimization
+      - Target variable ("optimal price") is estimated and noisy
+
+      **Recommended evolution:** Start with SL for quick wins (1-2 months to production), then build RL as v2 once you have solid data infrastructure and baseline metrics. The SL system provides the data logging needed for offline RL training!
+
+      Excellent end-to-end design that balances pragmatism with sophistication. Great job!

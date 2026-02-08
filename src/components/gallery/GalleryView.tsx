@@ -1,0 +1,281 @@
+import { useState, useMemo } from 'react';
+import { useGallery } from '@/hooks/useGallery';
+import { useAuth } from '@/hooks/useAuth';
+import { parse } from 'yaml';
+import type { Problem } from '@/types/tree';
+
+interface GalleryViewProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onSelectProblem: (problem: Problem) => void;
+}
+
+type SortOption = 'newest' | 'most_upvoted' | 'alphabetical';
+type DifficultyFilter = 'all' | 'beginner' | 'intermediate' | 'advanced';
+
+const difficultyColors = {
+  beginner: 'bg-green-600',
+  intermediate: 'bg-yellow-600',
+  advanced: 'bg-red-600',
+};
+
+const SearchIcon = () => (
+  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+  </svg>
+);
+
+const CloseIcon = () => (
+  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+  </svg>
+);
+
+const HeartIcon = ({ filled }: { filled: boolean }) => (
+  <svg
+    className="w-5 h-5"
+    fill={filled ? 'currentColor' : 'none'}
+    stroke="currentColor"
+    viewBox="0 0 24 24"
+  >
+    <path
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth={2}
+      d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"
+    />
+  </svg>
+);
+
+export function GalleryView({ isOpen, onClose, onSelectProblem }: GalleryViewProps) {
+  const { galleryProblems, loading, upvoteProblem, removeUpvote, userUpvotes } = useGallery();
+  const { user } = useAuth();
+
+  const [searchQuery, setSearchQuery] = useState('');
+  const [sortOption, setSortOption] = useState<SortOption>('newest');
+  const [difficultyFilter, setDifficultyFilter] = useState<DifficultyFilter>('all');
+
+  const filteredAndSortedProblems = useMemo(() => {
+    let filtered = galleryProblems.filter((p) => {
+      const matchesSearch =
+        p.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        p.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        p.tags.some((tag) => tag.toLowerCase().includes(searchQuery.toLowerCase()));
+
+      const matchesDifficulty =
+        difficultyFilter === 'all' || p.difficulty === difficultyFilter;
+
+      return matchesSearch && matchesDifficulty;
+    });
+
+    // Sort
+    switch (sortOption) {
+      case 'newest':
+        filtered.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+        break;
+      case 'most_upvoted':
+        filtered.sort((a, b) => b.upvotes - a.upvotes);
+        break;
+      case 'alphabetical':
+        filtered.sort((a, b) => a.title.localeCompare(b.title));
+        break;
+    }
+
+    return filtered;
+  }, [galleryProblems, searchQuery, sortOption, difficultyFilter]);
+
+  const handleUpvote = async (problemId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!user) {
+      alert('Please sign in to upvote problems');
+      return;
+    }
+
+    if (userUpvotes.has(problemId)) {
+      await removeUpvote(problemId);
+    } else {
+      await upvoteProblem(problemId);
+    }
+  };
+
+  const handleLoadProblem = (yamlContent: string) => {
+    try {
+      const problem = parse(yamlContent) as Problem;
+      onSelectProblem(problem);
+      onClose();
+    } catch (err) {
+      console.error('Failed to parse problem:', err);
+      alert('Failed to load problem');
+    }
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-6xl max-h-[90vh] flex flex-col">
+        {/* Header */}
+        <div className="flex items-center justify-between p-6 border-b border-gray-200">
+          <div>
+            <h2 className="text-2xl font-bold text-gray-900">Problem Gallery</h2>
+            <p className="text-sm text-gray-500 mt-1">
+              Browse and load community-published ML system design problems
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-2 hover:bg-gray-100 rounded-lg text-gray-500 hover:text-gray-700 transition-colors"
+          >
+            <CloseIcon />
+          </button>
+        </div>
+
+        {/* Filters and Search */}
+        <div className="p-6 border-b border-gray-200 bg-gray-50">
+          <div className="flex flex-col lg:flex-row gap-4">
+            {/* Search */}
+            <div className="flex-1">
+              <div className="relative">
+                <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none text-gray-400">
+                  <SearchIcon />
+                </div>
+                <input
+                  type="text"
+                  placeholder="Search by title, description, or tags..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
+              </div>
+            </div>
+
+            {/* Sort */}
+            <div>
+              <select
+                value={sortOption}
+                onChange={(e) => setSortOption(e.target.value as SortOption)}
+                className="px-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              >
+                <option value="newest">Newest First</option>
+                <option value="most_upvoted">Most Upvoted</option>
+                <option value="alphabetical">Alphabetical</option>
+              </select>
+            </div>
+
+            {/* Difficulty Filter */}
+            <div className="flex gap-2">
+              {(['all', 'beginner', 'intermediate', 'advanced'] as DifficultyFilter[]).map((diff) => (
+                <button
+                  key={diff}
+                  onClick={() => setDifficultyFilter(diff)}
+                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                    difficultyFilter === diff
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-white border border-gray-300 text-gray-700 hover:bg-gray-50'
+                  }`}
+                >
+                  {diff.charAt(0).toUpperCase() + diff.slice(1)}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Content */}
+        <div className="flex-1 overflow-y-auto p-6">
+          {loading ? (
+            <div className="flex items-center justify-center py-12">
+              <div className="text-center">
+                <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+                <p className="text-gray-600">Loading gallery...</p>
+              </div>
+            </div>
+          ) : filteredAndSortedProblems.length === 0 ? (
+            <div className="flex items-center justify-center py-12">
+              <div className="text-center">
+                <p className="text-gray-500 text-lg">No problems found</p>
+                <p className="text-gray-400 text-sm mt-2">
+                  Try adjusting your filters or search query
+                </p>
+              </div>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {filteredAndSortedProblems.map((problem) => (
+                <div
+                  key={problem.id}
+                  onClick={() => handleLoadProblem(problem.yaml_content)}
+                  className="bg-white border border-gray-200 rounded-lg p-4 hover:shadow-lg hover:border-blue-400 transition-all cursor-pointer"
+                >
+                  {/* Title and Difficulty */}
+                  <div className="flex items-start justify-between gap-2 mb-2">
+                    <h3 className="font-semibold text-gray-900 text-base leading-tight flex-1">
+                      {problem.title}
+                    </h3>
+                    <span
+                      className={`text-xs px-2 py-1 rounded font-medium ${
+                        difficultyColors[problem.difficulty]
+                      } text-white shrink-0`}
+                    >
+                      {problem.difficulty[0].toUpperCase()}
+                    </span>
+                  </div>
+
+                  {/* Description */}
+                  <p className="text-sm text-gray-600 line-clamp-3 mb-3">
+                    {problem.description}
+                  </p>
+
+                  {/* Tags */}
+                  {problem.tags && problem.tags.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mb-3">
+                      {problem.tags.slice(0, 3).map((tag, idx) => (
+                        <span
+                          key={idx}
+                          className="text-xs px-2 py-0.5 bg-gray-100 text-gray-700 rounded"
+                        >
+                          {tag}
+                        </span>
+                      ))}
+                      {problem.tags.length > 3 && (
+                        <span className="text-xs px-2 py-0.5 text-gray-500">
+                          +{problem.tags.length - 3}
+                        </span>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Footer */}
+                  <div className="flex items-center justify-between pt-3 border-t border-gray-100">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-gray-500">by {problem.author_name}</span>
+                      <span className="text-xs text-gray-400">
+                        {new Date(problem.created_at).toLocaleDateString()}
+                      </span>
+                    </div>
+                    <button
+                      onClick={(e) => handleUpvote(problem.id, e)}
+                      className={`flex items-center gap-1 px-2 py-1 rounded transition-colors ${
+                        userUpvotes.has(problem.id)
+                          ? 'text-red-600 hover:text-red-700'
+                          : 'text-gray-400 hover:text-red-600'
+                      }`}
+                    >
+                      <HeartIcon filled={userUpvotes.has(problem.id)} />
+                      <span className="text-sm font-medium">{problem.upvotes}</span>
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="p-4 border-t border-gray-200 bg-gray-50 text-center text-sm text-gray-600">
+          {filteredAndSortedProblems.length} problem{filteredAndSortedProblems.length !== 1 ? 's' : ''} found
+        </div>
+      </div>
+    </div>
+  );
+}
