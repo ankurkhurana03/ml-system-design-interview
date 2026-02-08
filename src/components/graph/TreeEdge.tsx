@@ -9,6 +9,8 @@ import {
 export interface TreeEdgeData extends Record<string, unknown> {
   isOnPath: boolean;
   choiceLabel?: string;
+  choiceIndex?: number;
+  totalChoices?: number;
 }
 
 export const TreeEdge = memo(
@@ -22,10 +24,13 @@ export const TreeEdge = memo(
     targetPosition,
     data,
   }: EdgeProps) => {
-    const isOnPath = (data as TreeEdgeData | undefined)?.isOnPath ?? false;
-    const choiceLabel = (data as TreeEdgeData | undefined)?.choiceLabel;
+    const edgeData = data as TreeEdgeData | undefined;
+    const isOnPath = edgeData?.isOnPath ?? false;
+    const choiceLabel = edgeData?.choiceLabel;
+    const choiceIndex = edgeData?.choiceIndex ?? 0;
+    const totalChoices = edgeData?.totalChoices ?? 1;
 
-    const [edgePath, labelX, labelY] = getBezierPath({
+    const [edgePath] = getBezierPath({
       sourceX,
       sourceY,
       sourcePosition,
@@ -33,6 +38,15 @@ export const TreeEdge = memo(
       targetY,
       targetPosition,
     });
+
+    // Offset label along the edge to avoid overlap with sibling edges.
+    // Place labels at different positions along the edge (30%-70% range)
+    // instead of all at the midpoint (50%).
+    const t = totalChoices > 1
+      ? 0.3 + (choiceIndex / (totalChoices - 1)) * 0.4
+      : 0.5;
+    const offsetLabelX = sourceX + (targetX - sourceX) * t;
+    const offsetLabelY = sourceY + (targetY - sourceY) * t;
 
     return (
       <>
@@ -52,12 +66,14 @@ export const TreeEdge = memo(
             <div
               style={{
                 position: 'absolute',
-                transform: `translate(-50%, -50%) translate(${labelX}px,${labelY}px)`,
+                transform: `translate(-50%, -50%) translate(${offsetLabelX}px,${offsetLabelY}px)`,
                 pointerEvents: 'all',
+                maxWidth: 180,
               }}
+              title={choiceLabel}
               className={`
                 px-2 py-1 rounded text-xs font-medium
-                transition-all duration-300
+                transition-all duration-300 truncate
                 ${
                   isOnPath
                     ? 'bg-blue-500 text-white shadow-md'

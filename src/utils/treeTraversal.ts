@@ -280,33 +280,41 @@ export function problemToFlowElements(problem: Problem): {
           data: {
             choiceIndex: i,
             choiceLabel: choice.label,
+            totalChoices: node.choices.length,
           },
         });
       }
     } else if (node.type === 'multi_select') {
       const targets = new Set<string>();
+      const uniqueRoutes: { key: string; next: string }[] = [];
       if (node.routes) {
         for (const route of node.routes) {
           if (!targets.has(route.next)) {
             targets.add(route.next);
-            edges.push({
-              id: `${node.id}-${route.next}-route`,
-              source: node.id,
-              target: route.next,
-              type: 'treeEdge',
-              data: { choiceLabel: route.key },
-            });
+            uniqueRoutes.push({ key: route.key, next: route.next });
           }
         }
       }
-      if (node.defaultRoute && !targets.has(node.defaultRoute)) {
+      const hasDefault = node.defaultRoute && !targets.has(node.defaultRoute);
+      const totalRouteEdges = uniqueRoutes.length + (hasDefault ? 1 : 0);
+      for (let i = 0; i < uniqueRoutes.length; i++) {
+        const route = uniqueRoutes[i];
+        edges.push({
+          id: `${node.id}-${route.next}-route`,
+          source: node.id,
+          target: route.next,
+          type: 'treeEdge',
+          data: { choiceLabel: route.key, choiceIndex: i, totalChoices: totalRouteEdges },
+        });
+      }
+      if (hasDefault) {
         edges.push({
           id: `${node.id}-${node.defaultRoute}-default`,
           source: node.id,
-          target: node.defaultRoute,
+          target: node.defaultRoute!,
           type: 'treeEdge',
           label: 'default',
-          data: { choiceLabel: 'default' },
+          data: { choiceLabel: 'default', choiceIndex: uniqueRoutes.length, totalChoices: totalRouteEdges },
         });
       }
     }
