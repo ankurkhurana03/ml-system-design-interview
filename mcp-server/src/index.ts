@@ -77,6 +77,7 @@ interface TreeNode {
   routes?: MultiSelectRoute[];
   defaultRoute?: string;
   dialogue?: DialogueLine[];
+  citations?: string[];
 }
 
 interface Problem {
@@ -85,6 +86,8 @@ interface Problem {
   description: string;
   root: string;
   nodes: TreeNode[];
+  companies?: string[];
+  domains?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -126,6 +129,33 @@ function validateTree(problem: Problem): string[] {
 
   if (!problem.root || typeof problem.root !== "string") {
     errors.push("Problem must have a valid root node id");
+  }
+
+  // Optional companies/domains validation
+  if (problem.companies !== undefined) {
+    if (!Array.isArray(problem.companies)) {
+      errors.push("Problem 'companies' must be an array of strings");
+    } else {
+      for (const c of problem.companies) {
+        if (typeof c !== "string") {
+          errors.push("Problem 'companies' entries must be strings");
+          break;
+        }
+      }
+    }
+  }
+
+  if (problem.domains !== undefined) {
+    if (!Array.isArray(problem.domains)) {
+      errors.push("Problem 'domains' must be an array of strings");
+    } else {
+      for (const d of problem.domains) {
+        if (typeof d !== "string") {
+          errors.push("Problem 'domains' entries must be strings");
+          break;
+        }
+      }
+    }
   }
 
   if (!Array.isArray(problem.nodes) || problem.nodes.length === 0) {
@@ -189,6 +219,19 @@ function validateTree(problem: Problem): string[] {
 
     if (!node.content || typeof node.content !== "string") {
       errors.push(`${nodePrefix} must have valid content`);
+    }
+
+    // Citations validation
+    if (node.citations !== undefined) {
+      if (!Array.isArray(node.citations)) {
+        errors.push(`${nodePrefix} citations must be an array of strings`);
+      } else {
+        for (let i = 0; i < node.citations.length; i++) {
+          if (typeof node.citations[i] !== "string") {
+            errors.push(`${nodePrefix} citations[${i}] must be a string`);
+          }
+        }
+      }
     }
 
     // Dialogue validation
@@ -475,6 +518,21 @@ function repairNodes(nodes: Record<string, unknown>[]): Record<string, unknown>[
       }
     }
 
+    // multi_select nodes with missing/empty dimensionGroups -> convert to info
+    if (node.type === "multi_select") {
+      const dg = node.dimensionGroups as DimensionGroup[] | undefined;
+      if (!dg || !Array.isArray(dg) || dg.length === 0) {
+        node.type = "info";
+        delete node.dimensionGroups;
+        delete node.routes;
+        // Preserve defaultRoute as next for info node
+        if (node.defaultRoute && !node.next) {
+          node.next = node.defaultRoute;
+        }
+        delete node.defaultRoute;
+      }
+    }
+
     // Missing speaker -> default to interviewer
     if (
       !node.speaker ||
@@ -536,17 +594,27 @@ function scaffold(
   const stages = [...ML_STAGES];
   numBranches = Math.max(1, Math.min(numBranches, 4));
 
-  // Decide which stages get branching questions.
-  // Spread them across the first half of stages for maximum divergence.
+  // Stages where branches diverge (questions)
   const branchStageIndices: number[] = [];
   if (numBranches === 1) {
-    branchStageIndices.push(0); // problem_definition
+    branchStageIndices.push(1); // metrics
   } else if (numBranches === 2) {
-    branchStageIndices.push(0, 2); // problem_definition, data
+    branchStageIndices.push(1, 4); // metrics, model
   } else if (numBranches === 3) {
-    branchStageIndices.push(0, 2, 4); // problem_definition, data, model
+    branchStageIndices.push(1, 3, 4); // metrics, features, model
   } else {
-    branchStageIndices.push(0, 1, 2, 4);
+    branchStageIndices.push(1, 3, 4, 6); // metrics, features, model, deployment
+  }
+
+  // Stages where branches converge back to shared nodes (DAG diamond pattern)
+  // Convergence happens at the stage AFTER the branch choices
+  const convergenceStages = new Set<number>();
+  for (const bsi of branchStageIndices) {
+    // Branch choices land in the next stage, then converge at the stage after that
+    const convergeAt = bsi + 2;
+    if (convergeAt < stages.length) {
+      convergenceStages.add(convergeAt);
+    }
   }
 
   interface NodeDef {
@@ -558,41 +626,178 @@ function scaffold(
     content: string;
     next?: string;
     choices?: { label: string; answer: string; next: string }[];
+    dialogue?: DialogueLine[];
+    dimensionGroups?: DimensionGroup[];
+    routes?: MultiSelectRoute[];
+    defaultRoute?: string;
   }
 
   const nodes: NodeDef[] = [];
-  const branchLabels = ["a", "b", "c", "d"];
+  const emptyDialogue: DialogueLine[] = [
+    { speaker: "interviewer", text: "[FILL: interviewer line]" },
+    { speaker: "candidate", text: "[FILL: candidate line]" },
+    { speaker: "interviewer", text: "[FILL: follow-up]" },
+  ];
 
-  // We build paths. Initially 1 path, branching at designated stages.
-  // Each path tracks its current "branch suffix" like "", "_a", "_b", "_a_a", etc.
-  interface PathState {
-    suffix: string;
-    startStageIndex: number;
-  }
+  // --- Stage 0: problem_definition with multi_select ---
+  const pdStartId = "pd_start";
+  const pdScopeId = "pd_scope";
+  const pdFormulationId = "pd_formulation";
 
-  let activePaths: PathState[] = [{ suffix: "", startStageIndex: 0 }];
-  let branchCount = 0;
+  nodes.push({
+    id: pdStartId,
+    stage: "problem_definition",
+    type: "info",
+    label: "[FILL: Problem Statement]",
+    speaker: "interviewer",
+    content: `[FILL: Introduce the ${title} problem]`,
+    next: pdScopeId,
+    dialogue: [...emptyDialogue],
+  });
 
-  for (let stageIdx = 0; stageIdx < stages.length; stageIdx++) {
+  nodes.push({
+    id: pdScopeId,
+    stage: "problem_definition",
+    type: "multi_select",
+    label: "[FILL: Clarifying Questions]",
+    speaker: "interviewer",
+    content: "[FILL: Scope the problem with clarifying dimensions]",
+    dimensionGroups: [
+      {
+        id: "requirements",
+        label: "[FILL: Requirements]",
+        dimensions: [
+          {
+            id: "dim_1",
+            label: "[FILL: Dimension 1]",
+            options: [
+              { value: "opt_a", label: "[FILL: Option A]" },
+              { value: "opt_b", label: "[FILL: Option B]" },
+            ],
+          },
+        ],
+      },
+    ],
+    defaultRoute: pdFormulationId,
+    dialogue: [...emptyDialogue],
+  });
+
+  nodes.push({
+    id: pdFormulationId,
+    stage: "problem_definition",
+    type: "info",
+    label: "[FILL: ML Formulation]",
+    speaker: "interviewer",
+    content: "[FILL: How to frame as ML problem]",
+    next: `${stages[1]}_1`,
+    dialogue: [...emptyDialogue],
+  });
+
+  // --- Stages 1–7: Build with branching + convergence ---
+  // Track active branch suffixes
+  let activeSuffixes = [""];
+
+  for (let stageIdx = 1; stageIdx < stages.length; stageIdx++) {
     const stage = stages[stageIdx];
-    const newPaths: PathState[] = [];
+    const isBranchStage = branchStageIndices.includes(stageIdx);
+    const isConvergenceStage = convergenceStages.has(stageIdx);
+    const isLastStage = stageIdx === stages.length - 1;
 
-    for (const pathState of activePaths) {
-      if (stageIdx < pathState.startStageIndex) {
-        newPaths.push(pathState);
-        continue;
+    if (isConvergenceStage) {
+      // Convergence: single shared node that all branches point to
+      const convergeId = `${stage}_1`;
+      const nextStageIdx = stageIdx + 1;
+      let nextId: string;
+
+      if (isLastStage) {
+        nextId = `${stage}_terminal`;
+      } else if (branchStageIndices.includes(stageIdx)) {
+        nextId = `${stage}_question`;
+      } else {
+        nextId = `${stages[nextStageIdx]}_1`;
       }
 
-      const prefix = `${stage}${pathState.suffix}`;
+      // Only add if not already added
+      if (!nodes.find((n) => n.id === convergeId)) {
+        nodes.push({
+          id: convergeId,
+          stage,
+          type: "info",
+          label: `[FILL: ${stage.replace(/_/g, " ")} overview]`,
+          speaker: "interviewer",
+          content: `[FILL: ${stage.replace(/_/g, " ")} discussion — shared across paths]`,
+          next: isBranchStage ? `${stage}_question` : nextId,
+          dialogue: [...emptyDialogue],
+        });
+      }
 
-      if (
-        branchStageIndices.includes(stageIdx) &&
-        branchCount < numBranches &&
-        stageIdx === branchStageIndices[branchCount]
-      ) {
-        // Add an intro info node for this stage
-        const infoId = `${prefix}_1`;
-        const questionId = `${prefix}_2`;
+      // Reset active suffixes since paths converged
+      activeSuffixes = [""];
+
+      if (isBranchStage) {
+        // This convergence stage also branches again
+        const questionId = `${stage}_question`;
+        const choiceNextStageIdx = stageIdx + 1;
+        const choiceNextStage =
+          choiceNextStageIdx < stages.length
+            ? stages[choiceNextStageIdx]
+            : null;
+
+        const newSuffixes: string[] = [];
+        const choices: { label: string; answer: string; next: string }[] = [];
+
+        for (let c = 0; c < 2; c++) {
+          const label = c === 0 ? "a" : "b";
+          const suffix = `_${label}`;
+          newSuffixes.push(suffix);
+
+          const choiceNextId = choiceNextStage
+            ? convergenceStages.has(choiceNextStageIdx)
+              ? `${choiceNextStage}_1`
+              : `${choiceNextStage}${suffix}_1`
+            : `${stage}${suffix}_terminal`;
+
+          choices.push({
+            label: `[FILL: Option ${label.toUpperCase()}]`,
+            answer: `[FILL: Explanation for ${label.toUpperCase()}]`,
+            next: choiceNextId,
+          });
+
+          // Add answer info node (branch-specific, in next stage)
+          if (choiceNextStage && !convergenceStages.has(choiceNextStageIdx)) {
+            nodes.push({
+              id: `${choiceNextStage}${suffix}_1`,
+              stage: choiceNextStage,
+              type: "info",
+              label: `[FILL: ${choiceNextStage.replace(/_/g, " ")} — path ${label.toUpperCase()}]`,
+              speaker: "candidate",
+              content: `[FILL: Details for path ${label.toUpperCase()}]`,
+              next: convergenceStages.has(choiceNextStageIdx + 1)
+                ? `${stages[choiceNextStageIdx + 1]}_1`
+                : `${choiceNextStage}${suffix}_2`,
+              dialogue: [...emptyDialogue],
+            });
+          }
+        }
+
+        nodes.push({
+          id: questionId,
+          stage,
+          type: "question",
+          label: "[FILL: Key decision]",
+          speaker: "interviewer",
+          content: `[FILL: Decision question for ${stage.replace(/_/g, " ")}]`,
+          choices,
+          dialogue: [...emptyDialogue],
+        });
+
+        activeSuffixes = newSuffixes;
+      }
+    } else if (isBranchStage) {
+      // Pure branch stage (no convergence here)
+      for (const suffix of activeSuffixes) {
+        const infoId = `${stage}${suffix}_1`;
+        const questionId = `${stage}${suffix}_question`;
 
         nodes.push({
           id: infoId,
@@ -600,115 +805,136 @@ function scaffold(
           type: "info",
           label: `[FILL: ${stage.replace(/_/g, " ")} overview]`,
           speaker: "interviewer",
-          content: `[FILL: Describe the ${stage.replace(/_/g, " ")} context]`,
+          content: `[FILL: ${stage.replace(/_/g, " ")} context]`,
           next: questionId,
+          dialogue: [...emptyDialogue],
         });
 
-        // Add branching question node
-        const nextStageIdx = stageIdx + 1;
-        const nextStage =
-          nextStageIdx < stages.length ? stages[nextStageIdx] : null;
+        const choiceNextStageIdx = stageIdx + 1;
+        const choiceNextStage =
+          choiceNextStageIdx < stages.length
+            ? stages[choiceNextStageIdx]
+            : null;
 
+        const newSuffixes: string[] = [];
         const choices: { label: string; answer: string; next: string }[] = [];
+
         for (let c = 0; c < 2; c++) {
-          const branchSuffix = `${pathState.suffix}_${branchLabels[c]}`;
-          const nextNodeId = nextStage
-            ? `${nextStage}${branchSuffix}_1`
+          const label = c === 0 ? "a" : "b";
+          const branchSuffix = `${suffix}_${label}`;
+          newSuffixes.push(branchSuffix);
+
+          const choiceNextId = choiceNextStage
+            ? convergenceStages.has(choiceNextStageIdx)
+              ? `${choiceNextStage}_1`
+              : `${choiceNextStage}${branchSuffix}_1`
             : `monitoring${branchSuffix}_terminal`;
 
           choices.push({
-            label: `[FILL: Option ${branchLabels[c].toUpperCase()}]`,
-            answer: `[FILL: Explanation for option ${branchLabels[c].toUpperCase()}]`,
-            next: nextNodeId,
+            label: `[FILL: Option ${label.toUpperCase()}]`,
+            answer: `[FILL: Explanation for ${label.toUpperCase()}]`,
+            next: choiceNextId,
           });
 
-          newPaths.push({
-            suffix: branchSuffix,
-            startStageIndex: stageIdx + 1,
-          });
+          // Add answer node in next stage (if not converging)
+          if (choiceNextStage && !convergenceStages.has(choiceNextStageIdx)) {
+            const answerNextStageIdx = choiceNextStageIdx + 1;
+            const answerNextId =
+              answerNextStageIdx < stages.length
+                ? convergenceStages.has(answerNextStageIdx)
+                  ? `${stages[answerNextStageIdx]}_1`
+                  : `${stages[answerNextStageIdx]}${branchSuffix}_1`
+                : `monitoring${branchSuffix}_terminal`;
+
+            nodes.push({
+              id: `${choiceNextStage}${branchSuffix}_1`,
+              stage: choiceNextStage,
+              type: "info",
+              label: `[FILL: ${choiceNextStage.replace(/_/g, " ")} — path ${label.toUpperCase()}]`,
+              speaker: "candidate",
+              content: `[FILL: Details for path ${label.toUpperCase()}]`,
+              next: answerNextId,
+              dialogue: [...emptyDialogue],
+            });
+          }
         }
 
         nodes.push({
           id: questionId,
           stage,
           type: "question",
-          label: `[FILL: Key decision question]`,
-          speaker: "candidate",
+          label: "[FILL: Key decision]",
+          speaker: "interviewer",
           content: `[FILL: Decision question for ${stage.replace(/_/g, " ")}]`,
           choices,
+          dialogue: [...emptyDialogue],
         });
 
-        // Mark this branch as used (only for active paths with empty suffix initially)
-        if (pathState.suffix === "" || branchCount < numBranches) {
-          // handled via branchCount below
-        }
-      } else {
-        // Linear info node (or terminal for monitoring)
-        const nodeId = `${prefix}_1`;
-
-        if (stage === "monitoring") {
-          // Terminal node
+        activeSuffixes = newSuffixes;
+      }
+    } else {
+      // Linear stage — one node per active suffix
+      if (isLastStage) {
+        // Terminal nodes
+        for (const suffix of activeSuffixes) {
           nodes.push({
-            id: `${prefix}_terminal`,
+            id: suffix ? `${stage}${suffix}_terminal` : `${stage}_terminal`,
             stage,
             type: "terminal",
-            label: `[FILL: Interview conclusion${pathState.suffix ? " (path " + pathState.suffix.replace(/_/g, " ").trim() + ")" : ""}]`,
+            label: `[FILL: Interview conclusion]`,
             speaker: "interviewer",
-            content: `[FILL: Summary and closing remarks]`,
-          });
-        } else {
-          // Info node pointing to next stage
-          const nextStageIdx = stageIdx + 1;
-          const nextStage = stages[nextStageIdx];
-          const nextNodeId = nextStage === "monitoring"
-            ? `${nextStage}${pathState.suffix}_terminal`
-            : `${nextStage}${pathState.suffix}_1`;
-
-          // Check if next stage has a branch point for this path
-          const nextStageBranchIdx = branchStageIndices.indexOf(nextStageIdx);
-          let actualNextId = nextNodeId;
-          if (
-            nextStageBranchIdx !== -1 &&
-            nextStageBranchIdx < numBranches &&
-            pathState.suffix === ""
-          ) {
-            actualNextId = `${nextStage}${pathState.suffix}_1`;
-          }
-
-          nodes.push({
-            id: nodeId,
-            stage,
-            type: "info",
-            label: `[FILL: ${stage.replace(/_/g, " ")} details]`,
-            speaker: "interviewer",
-            content: `[FILL: Discuss ${stage.replace(/_/g, " ")} considerations]`,
-            next: actualNextId,
+            content: "[FILL: Summary and closing remarks]",
+            dialogue: [...emptyDialogue],
           });
         }
+      } else {
+        for (const suffix of activeSuffixes) {
+          const nodeId = `${stage}${suffix}_1`;
+          const nextStageIdx = stageIdx + 1;
+          const nextStage = stages[nextStageIdx];
+          const isNextConvergence = convergenceStages.has(nextStageIdx);
+          const isNextBranch = branchStageIndices.includes(nextStageIdx);
+          const isNextLast = nextStageIdx === stages.length - 1;
 
-        newPaths.push(pathState);
+          let nextId: string;
+          if (isNextConvergence) {
+            nextId = `${nextStage}_1`;
+          } else if (isNextLast) {
+            nextId = suffix
+              ? `${nextStage}${suffix}_terminal`
+              : `${nextStage}_terminal`;
+          } else if (isNextBranch) {
+            nextId = `${nextStage}${suffix}_1`;
+          } else {
+            nextId = `${nextStage}${suffix}_1`;
+          }
+
+          // Don't add duplicate nodes
+          if (!nodes.find((n) => n.id === nodeId)) {
+            nodes.push({
+              id: nodeId,
+              stage,
+              type: "info",
+              label: `[FILL: ${stage.replace(/_/g, " ")} details]`,
+              speaker: "interviewer",
+              content: `[FILL: Discuss ${stage.replace(/_/g, " ")} considerations]`,
+              next: nextId,
+              dialogue: [...emptyDialogue],
+            });
+          }
+        }
       }
     }
-
-    // Advance branch count if this stage had a branch
-    if (
-      branchStageIndices.includes(stageIdx) &&
-      branchCount < numBranches &&
-      stageIdx === branchStageIndices[branchCount]
-    ) {
-      branchCount++;
-    }
-
-    activePaths = newPaths;
   }
 
-  // Find root
-  const rootId = nodes.length > 0 ? nodes[0].id : "start";
+  const rootId = pdStartId;
 
   const problem = {
     id,
     title,
     description: description || "[FILL: Problem description]",
+    companies: [] as string[],
+    domains: [] as string[],
     root: rootId,
     nodes,
   };
@@ -837,7 +1063,7 @@ interface MultiSelectRoute {
   next: string;   // target node ID
 }
 
-## DialogueLine (optional, for tutor/mock interview modes)
+## DialogueLine (for tutor/mock interview modes)
 interface DialogueLine {
   speaker: Speaker;
   text: string;
@@ -850,13 +1076,14 @@ interface TreeNode {
   type: NodeType;                       // Node behavior type
   label: string;                        // Short display label
   speaker: Speaker;                     // Who is "speaking" this node
-  content: string;                      // Main text content (supports markdown)
+  content: string;                      // Main text content (supports full markdown)
   next?: string;                        // For info nodes: next node ID
   choices?: Choice[];                   // For question nodes: branching choices
   dimensionGroups?: DimensionGroup[];   // For multi_select nodes
   routes?: MultiSelectRoute[];          // For multi_select nodes
   defaultRoute?: string;               // Fallback route for multi_select
-  dialogue?: DialogueLine[];           // Optional dialogue script
+  dialogue?: DialogueLine[];           // Conversational script (3-5 exchanges)
+  citations?: string[];                // Source URLs (papers, docs, industry references)
 }
 
 ## Problem (top-level)
@@ -864,9 +1091,20 @@ interface Problem {
   id: string;           // Kebab-case identifier (e.g., "flight-delay")
   title: string;        // Human-readable title
   description: string;  // Brief description of the problem
+  companies?: string[]; // Companies that ask this type of question (e.g., ["Google", "Meta"])
+  domains?: string[];   // ML domains covered (e.g., ["NLP", "Ranking/Search"])
   root: string;         // ID of the root/starting node
   nodes: TreeNode[];    // All nodes in the tree
 }
+
+## DAG Convergence
+Trees are actually DAGs (directed acyclic graphs). Multiple nodes can have their
+'next' (or choice 'next') point to the SAME target node, creating convergence.
+
+Diamond pattern: Question → Branch A info → shared convergence node ← Branch B info
+
+This is used for stages where content is shared regardless of prior choices
+(e.g., data pipeline, deployment infra, monitoring are often common across paths).
 
 ## Validation Rules Summary
 1. Problem must have: id, title, description, root, nodes (non-empty array)
@@ -880,9 +1118,12 @@ interface Problem {
 9. All nodes must be reachable from root (no orphans)
 10. No cycles allowed (warning)
 11. dialogue (if present): must be array of {speaker, text}
+12. citations (if present): must be array of strings (URLs)
+13. companies/domains (if present): must be arrays of strings
 
 ## YAML Format
 Files are stored as .yaml in src/data/problems/. The YAML structure directly mirrors the Problem interface.
+Content fields support full markdown (headings, bold, lists, code blocks, tables).
 `;
 
 // ---------------------------------------------------------------------------

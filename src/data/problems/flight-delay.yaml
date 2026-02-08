@@ -1,10 +1,17 @@
 id: flight-delay
 title: "Flight Delay Prediction"
-description: "Design an ML system to predict flight delays for a major airline."
-root: start
+description: "Design an ML system to predict flight delays for a major airline, covering problem formulation through production monitoring."
+companies: ["Google", "Amazon", "Uber", "United Airlines", "Delta"]
+domains: ["Time Series", "Tabular/Structured", "Prediction"]
+root: pd_start
 
 nodes:
-  - id: start
+  # ═══════════════════════════════════════════════════════════════════════════
+  # STAGE 1: PROBLEM DEFINITION (5 nodes)
+  # pd_start → pd_scope → pd_data_available → pd_formulation (question) → ...
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  - id: pd_start
     stage: problem_definition
     type: info
     label: "Problem Statement"
@@ -12,31 +19,44 @@ nodes:
     content: |
       Welcome! Today we'll design an ML system for a major airline. They want to predict flight delays to improve customer experience and operational efficiency.
 
-      The airline operates 2,000+ daily flights across 200 airports. They want to notify passengers in advance if their flight might be delayed, and help operations teams prepare resources accordingly.
+      **The airline's scale:**
+      - 2,000+ daily flights across 200 airports
+      - 45 million passengers per year
+      - Revenue impact of delays: ~$8B industry-wide annually
 
-      Current situation: Passengers only learn about delays at the gate, leading to frustration. Operations teams struggle to reallocate gates, crews, and aircraft efficiently.
+      **Current pain points:**
+      - Passengers learn about delays only at the gate, leading to missed connections and frustration
+      - Operations teams scramble reactively — gate reassignments, crew swaps, and aircraft substitutions happen ad hoc
+      - Customer service centers are overwhelmed during disruptions
 
-      Let's start by clarifying the problem scope.
+      **What they want:**
+      - Proactive passenger notifications (push alerts hours before departure)
+      - An operations dashboard with predicted delays for resource planning
+      - Integration with rebooking systems to offer alternatives before delays cascade
+
+      Let's start by scoping the problem.
     dialogue:
       - speaker: interviewer
-        text: "Welcome! Today we'll design an ML system for a major airline. They want to predict flight delays to improve customer experience and operational efficiency."
+        text: "Welcome! Today we'll design an ML system for a major airline that wants to predict flight delays. The airline operates over 2,000 daily flights across 200 airports."
       - speaker: candidate
-        text: "Interesting! Can you tell me more about the airline's scale and what they're looking for?"
+        text: "That's a substantial operation. What's driving this initiative — is it primarily customer-facing or operations-focused?"
       - speaker: interviewer
-        text: "Sure. They operate 2,000+ daily flights across 200 airports. They want to notify passengers in advance if their flight might be delayed, and help operations teams prepare resources accordingly."
+        text: "Both, actually. Passengers currently only learn about delays at the gate, and operations teams scramble reactively. They want proactive notifications and predictive dashboards."
       - speaker: candidate
-        text: "Got it. What's the current experience like for passengers?"
+        text: "Understood. So we're building a system that serves two distinct user groups with different latency and precision needs. I'd like to understand the scale and data available before we scope further."
       - speaker: interviewer
-        text: "Right now, passengers only learn about delays at the gate, leading to frustration. Operations teams struggle to reallocate gates, crews, and aircraft efficiently. Let's start by clarifying the problem scope."
-    next: problem_clarification
+        text: "Good instinct. Let's start by clarifying the requirements."
+    next: pd_scope
 
-  - id: problem_clarification
+  - id: pd_scope
     stage: problem_definition
     type: multi_select
     label: "Clarifying Questions"
     speaker: interviewer
     content: |
-      Before we proceed, let's scope the problem by clarifying several dimensions. Select your assumptions for each dimension below. Your choices will shape the system design approach.
+      Before we proceed, let's scope the problem by clarifying several dimensions. Your choices will shape the system design approach throughout the interview.
+
+      Think about what assumptions would make sense for a real airline system — there's no single "right" answer, but your choices should be internally consistent.
     dimensionGroups:
       - id: system_reqs
         label: "System Requirements"
@@ -86,629 +106,1012 @@ nodes:
                 label: "Continuous (minutes)"
     routes:
       - key: "multi_horizon|real_time|both|continuous"
-        next: problem_scope_answer
+        next: pd_data_available
       - key: "short_term|real_time|operations|binary"
-        next: problem_scope_answer
+        next: pd_data_available
       - key: "long_term|batch|passengers|categorical"
-        next: problem_scope_answer
-    defaultRoute: problem_scope_answer
-
-  - id: problem_scope_answer
-    stage: problem_definition
-    type: info
-    label: "Problem Scope Defined"
-    speaker: interviewer
-    content: |
-      Excellent choices! Based on your selections, here's the refined scope:
-
-      **Prediction Timeline**: We need predictions at two horizons:
-      - 24 hours before departure (for passenger notifications)
-      - 2 hours before departure (for operational adjustments)
-
-      **Delay Definition**: Using the standard 15+ minute threshold for departure delays. We'll focus on departure delays specifically, as they're more actionable.
-
-      **Data Available**:
-      - 5 years of flight history (schedules, actual times, cancellations)
-      - Historical weather data from NOAA
-      - Aircraft maintenance records
-      - Airport congestion metrics
-      - Real-time weather forecasts (via API)
-      - Carrier-specific data (crew schedules, aircraft rotations)
-
-      Now let's think about how to frame this as an ML problem.
+        next: pd_data_available
+    defaultRoute: pd_data_available
     dialogue:
       - speaker: interviewer
-        text: "Excellent choices! Based on your selections, here's the refined scope."
-      - speaker: interviewer
-        text: "We need predictions at two horizons: 24 hours before departure for passenger notifications, and 2 hours before for operational adjustments."
+        text: "Before we dive into the design, I'd like you to make some scoping decisions. What prediction horizon makes sense?"
       - speaker: candidate
-        text: "That makes sense. What about the delay definition? What threshold are we using?"
+        text: "I think we need multi-horizon predictions. 24 hours out for passenger notifications, and 2 hours out for operational adjustments — the available features and accuracy will differ significantly between horizons."
       - speaker: interviewer
-        text: "We'll use the standard 15+ minute threshold for departure delays. Departure delays are more actionable than arrival delays."
+        text: "Good reasoning. What about latency and the primary user?"
       - speaker: candidate
-        text: "And what data do we have available?"
+        text: "Both passengers and operations need this, but with different interfaces. For latency, near real-time seems practical — we don't need sub-100ms for this use case, but hourly batch would be too stale for the 2-hour horizon."
       - speaker: interviewer
-        text: "We have 5 years of flight history, historical weather data from NOAA, aircraft maintenance records, airport congestion metrics, real-time weather forecasts via API, and carrier-specific data like crew schedules and aircraft rotations. Now let's think about how to frame this as an ML problem."
-    next: ml_formulation
+        text: "Solid choices. Let's look at the data we have available."
 
-  - id: ml_formulation
+  - id: pd_data_available
+    stage: problem_definition
+    type: info
+    label: "Available Data"
+    speaker: interviewer
+    content: |
+      Excellent scoping choices. Here's what data the airline has available:
+
+      **Historical flight data (5 years):**
+      - Scheduled vs. actual departure/arrival times for every flight
+      - Cancellation records with reason codes (weather, mechanical, crew, ATC)
+      - Aircraft tail numbers and rotation schedules (which plane flies which legs)
+
+      **External data sources:**
+      - NOAA historical weather observations and NWS forecasts (temperature, wind, precipitation, visibility)
+      - FAA ASPM (Aviation System Performance Metrics) — airport arrival/departure rates, ground delay programs
+      - Airport congestion metrics and runway configuration data
+
+      **Airline-internal data:**
+      - Aircraft maintenance logs (scheduled and unscheduled maintenance events)
+      - Crew scheduling and duty-time records
+      - Gate assignment systems and terminal capacity data
+      - Passenger booking data (connection times, load factors)
+
+      **Real-time feeds (for production):**
+      - Live weather radar and TAF/METAR reports
+      - FAA SWIM (System Wide Information Management) — real-time NAS status
+      - Aircraft tracking (ADS-B) for incoming flight positions
+
+      Now, let's think about how to frame this as an ML problem.
+    dialogue:
+      - speaker: interviewer
+        text: "Let me walk you through the data available. We have 5 years of flight history — scheduled versus actual times for every flight, plus cancellation records."
+      - speaker: candidate
+        text: "Five years is great for capturing seasonal patterns. Do we have the reason codes for delays and cancellations? That would help us understand causality."
+      - speaker: interviewer
+        text: "Yes — reason codes cover weather, mechanical, crew issues, and ATC. We also have NOAA weather data, FAA airport performance metrics, aircraft maintenance logs, and crew schedules."
+      - speaker: candidate
+        text: "That's a rich feature space. The aircraft rotation data is particularly valuable — if a plane's previous leg is delayed, that cascades directly. And the real-time feeds will be critical for the 2-hour prediction horizon."
+      - speaker: interviewer
+        text: "Exactly. Now, given all this data and our scoped requirements, how would you frame this as an ML problem?"
+    next: pd_formulation
+    citations:
+      - "https://www.faa.gov/data_research/aviation_data_statistics"
+      - "https://www.ncdc.noaa.gov/data-access"
+
+  - id: pd_formulation
     stage: problem_definition
     type: question
     label: "ML Problem Formulation"
     speaker: interviewer
     content: |
-      How should we frame this as an ML problem? What are the options?
+      How should we frame this as an ML problem? This is a fundamental design decision that will shape our entire system — the metrics we optimize, the features we engineer, and how users consume predictions.
+
+      Consider: What output format is most useful for both passengers ("Should I leave for the airport now?") and operations ("Do we need to reassign gates?")?
     dialogue:
       - speaker: interviewer
-        text: "Now, how should we frame this as an ML problem? What are the options you'd consider?"
+        text: "Now for a crucial decision — how should we formulate this as an ML problem? Think about what output format is most useful for both passengers and operations teams."
       - speaker: candidate
-        text: "Great question. There are a couple of main approaches we could take - regression to predict exact delay minutes, or classification to predict delay categories."
+        text: "There are two main approaches I'd consider. We could predict exact delay minutes as a regression problem, or classify into delay categories — on-time, minor delay, major delay."
       - speaker: interviewer
-        text: "Let's explore those options. Which approach would you recommend and why?"
+        text: "Walk me through the trade-offs. Which would you recommend and why?"
     choices:
-      - label: "Regression: Predict exact delay duration in minutes"
+      - label: "Regression: Predict delay in minutes"
         answer: |
-          I'd frame this as a regression problem to predict the exact delay in minutes.
+          I'd frame this as a **regression problem** predicting delay duration in minutes.
 
-          The key advantage is granularity - we can provide precise estimates like "your flight will be 37 minutes late." This gives passengers and operations teams the most information for planning. A passenger could decide whether to grab dinner or just coffee. Operations can estimate exactly when a gate will free up.
+          **Why regression?** Granularity is the key advantage. Telling a passenger "your flight will be approximately 40 minutes late" is far more actionable than "you have a minor delay." A 20-minute delay means "grab coffee," while a 90-minute delay means "find a restaurant" — both are "minor delays" in a categorical system but require completely different actions.
 
-          From a modeling perspective, regression captures the continuous nature of delays. We preserve all information in the training data rather than discretizing into buckets. Many powerful regression algorithms are available - gradient boosting, neural networks, etc.
+          **For operations**, precise minute estimates enable optimized resource allocation. If we predict a 45-minute delay, the gate can be temporarily reassigned. The operations team can calculate exactly when the inbound aircraft will be available for turnaround.
 
-          The output can always be converted to classifications post-hoc if needed (e.g., <15 min = on-time, 15-60 min = minor delay, 60+ min = major delay). So regression maintains maximum flexibility for downstream use cases.
-        next: reg_metrics
-      - label: "Classification: Predict delay categories (on-time, minor, major)"
+          **Modeling advantages:**
+          - Preserves full information from training data — no discretization loss
+          - Output naturally converts to categories post-hoc (e.g., `delay > 15 → delayed`)
+          - Prediction intervals (quantile regression) give uncertainty bounds
+          - Many powerful regression algorithms available: gradient boosting, neural nets, quantile forests
+
+          **The challenge** is the target distribution — heavily right-skewed with most flights near zero and a long tail of extreme delays. We'll need to handle this carefully in training.
+        next: met_reg_question
+      - label: "Classification: Predict delay categories"
         answer: |
-          I'd frame this as a multi-class classification problem with three categories: on-time (<15 min), minor delay (15-60 min), and major delay (60+ min).
+          I'd frame this as a **multi-class classification** problem with three categories: on-time (<15 min delay), minor delay (15–60 min), and major delay (60+ min).
 
-          The main advantage is interpretability and actionability. Most stakeholders don't need to know if a delay is 37 vs 42 minutes - they need to know if it's a "grab coffee" delay or a "find another flight" delay. These categories map directly to business actions.
+          **Why classification?** These categories map directly to **actionable decisions**. "On-time" means no action needed. "Minor delay" triggers passenger notifications and standby gate preparation. "Major delay" triggers rebooking offers, meal vouchers, and full operational replanning. The business doesn't need to know if a delay is 37 vs 42 minutes — they need to know which action playbook to execute.
 
-          Classification also handles the data distribution better. Delays follow a long-tail distribution - most flights are on-time, with increasingly rare extreme delays. Classification with balanced classes or class weights handles this more naturally than regression with heavily skewed targets.
+          **Probability calibration** is a major advantage. We can output "75% on-time, 20% minor delay, 5% major delay" — this confidence distribution is invaluable for risk-based decision making. Operations can set different action thresholds for different scenarios.
 
-          From a modeling perspective, we get calibrated probabilities for each class. We can say "80% chance of on-time, 15% minor delay, 5% major delay" which gives users a sense of confidence. Classification metrics like precision/recall are also more intuitive for stakeholders than RMSE.
-        next: class_metrics
+          **Handling the data distribution:** Flight delays follow a heavily imbalanced distribution (~70% on-time, ~20% minor, ~10% major). Classification with class weights or focal loss handles this more naturally than regression with skewed targets. We avoid the problem of optimizing for extreme tail values that regression faces.
 
-  # REGRESSION PATH
-  - id: reg_metrics
+          **Stakeholder communication** is simpler — "there's a 20% chance of a major delay" is easier for product teams and executives to reason about than "predicted delay: 12.7 ± 23.4 minutes."
+        next: met_class_question
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # STAGE 2: METRICS (6 nodes)
+  # met_reg_question → (reg_rmse | reg_custom) ──► data_pipeline (CONVERGE)
+  # met_class_question → (class_f1 | class_auc) ──► data_pipeline (CONVERGE)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  - id: met_reg_question
     stage: metrics
     type: question
     label: "Regression Metrics"
     speaker: interviewer
     content: |
-      Since we're doing regression, what metrics would you use to evaluate the model?
+      Since we're doing regression, we need to choose the right evaluation metrics. The metric we optimize directly shapes model behavior — a poor metric choice means the model optimizes for the wrong thing, even if the architecture is perfect.
+
+      What metrics would you use to evaluate prediction quality?
     dialogue:
       - speaker: interviewer
-        text: "Since we're doing regression, what metrics would you use to evaluate the model?"
+        text: "Good choice on regression. Now, what metrics would you use? Remember, the metric drives model behavior — choosing the wrong one means optimizing for the wrong thing."
       - speaker: candidate
-        text: "For a regression approach to delay prediction, we need to think carefully about what kinds of errors matter most to the business."
+        text: "That's a great point. I need to think about what kinds of errors matter most. A false sense of safety — predicting on-time when there's actually a 2-hour delay — is much worse than over-predicting slightly."
       - speaker: interviewer
-        text: "That's a good framing. Tell me about the specific metrics you'd choose."
+        text: "Exactly. So how does that asymmetry factor into your metric choice?"
     choices:
-      - label: "RMSE as primary metric, with MAE as secondary"
+      - label: "RMSE + MAE as primary/secondary metrics"
         answer: |
-          I'd use Root Mean Squared Error (RMSE) as the primary metric, with Mean Absolute Error (MAE) as a secondary metric.
+          I'd use **RMSE as primary** and **MAE as secondary**, with additional directional metrics.
 
-          RMSE is appropriate because we want to penalize large errors more heavily. Predicting a 2-hour delay as "on-time" is much worse than predicting 45 minutes as 60 minutes. The squared term in RMSE captures this - it penalizes outlier predictions quadratically, which aligns with business impact. A 60-minute prediction error likely causes more than 2x the problems of a 30-minute error.
+          **Why RMSE?** It penalizes large errors quadratically, which aligns with business impact. Predicting a 2-hour delay as "on-time" is catastrophically worse than being off by 10 minutes on a short delay — the squared penalty captures this non-linear impact. In practice, `RMSE = √(mean((predicted - actual)²))`.
 
-          MAE provides a complementary view in interpretable units - "on average, our predictions are off by X minutes." Stakeholders can easily understand this. If RMSE is much higher than MAE, it signals we have issues with outliers that need investigation.
+          **MAE as complement** provides an interpretable sanity check: "on average, we're off by X minutes." When MAE is much lower than RMSE, it signals outlier issues. For example, if MAE=12 min but RMSE=35 min, a few flights have very large prediction errors worth investigating.
 
-          I'd also track directional accuracy - what percentage of actual delays did we predict as delays (even if magnitude was off)? And what percentage of predicted delays actually occurred? This helps understand false alarm rates, which affect user trust.
-        next: reg_data
-      - label: "Custom weighted MSE based on business impact"
+          **Directional accuracy** is my third metric — what fraction of actual delays >15 min did we predict as delays? This "delay detection rate" is critical for the passenger notification use case. I'd target >85% detection of delays >30 min, even at the cost of some false positives.
+
+          **Segmented evaluation**: I'd compute all metrics stratified by route, carrier, time of day, and season. A model with great overall RMSE could still fail badly on winter flights at ORD — segmented metrics catch this.
+        next: data_pipeline
+      - label: "Custom asymmetric loss aligned with business cost"
         answer: |
-          I'd design a custom weighted Mean Squared Error that reflects business impact rather than using standard RMSE.
+          I'd design a **custom asymmetric loss function** that reflects actual business costs of different error types.
 
-          Not all prediction errors are equal. Predicting "on-time" when a flight is delayed by 60 minutes (false negative) causes passengers to miss connections and operations to be unprepared - very costly. Predicting "30 minute delay" when the flight is on-time (false positive) just causes minor inconvenience - passengers arrive early.
+          **The core insight:** not all errors are equal. Under-predicting delays (false negatives) cost far more than over-predicting (false positives).
 
-          The custom loss function would weight errors asymmetrically: L = Σ w(actual, predicted) * (actual - predicted)². Where w() assigns higher weights to false negatives (under-predicting delays) than false positives. We'd derive weights from business impact analysis - cost of missed connections, rebooking, hotel vouchers, etc.
+          **Cost analysis:**
+          - Under-prediction by 60+ min → missed connections ($500-2000 rebooking + hotel), passenger churn, brand damage
+          - Under-prediction by 30 min → rushed gate changes, crew overtime ($200-500)
+          - Over-prediction by 30 min → passengers arrive early (mild inconvenience), slight ops over-preparation ($50-100)
 
-          We'd also weight long-delay errors more heavily than short-delay errors. Being wrong about a 5-minute delay is trivial; being wrong about a 3-hour delay is critical. The weighting function could be exponential in the actual delay time.
+          **Custom loss:** `L = Σ w(actual, pred) × (actual - pred)²` where:
+          - `w = 3.0` when `actual > pred` (under-prediction — worse)
+          - `w = 1.0` when `actual ≤ pred` (over-prediction — acceptable)
+          - Additional multiplier: `w *= 1 + 0.01 × actual` to weight long-delay errors higher
+
+          **Evaluation metrics** still include RMSE and MAE for interpretability, but model optimization uses the asymmetric loss. I'd also track **cost-weighted error**: `Σ business_cost(actual, pred) / N` using the cost table above, giving a direct dollar-value metric that executives can reason about.
 
           This ensures the model optimizes for what the business actually cares about, not mathematical convenience.
-        next: reg_data
+        next: data_pipeline
 
-  - id: reg_data
-    stage: data
-    type: info
-    label: "Data Requirements for Regression"
-    speaker: interviewer
-    content: |
-      Good choice on metrics. Now let's talk about data.
-
-      For regression, we need the full distribution of delay times, including long-tail extreme delays. This means we need several years of data to capture rare but important events - major storms, air traffic control failures, etc.
-
-      Key data sources:
-      - **Flight operations**: Scheduled times, actual times, tail numbers, routes
-      - **Weather**: Temperature, precipitation, wind speed, visibility at origin & destination
-      - **Airport**: Congestion levels, runway availability, gate availability
-      - **Aircraft**: Age, maintenance history, time since last service
-      - **Cascading effects**: Incoming flight delay (aircraft rotation), crew delays
-
-      We'll need to be careful about data leakage - only use information available at prediction time. For 24-hour predictions, we can't use day-of weather observations, only forecasts.
-    dialogue:
-      - speaker: interviewer
-        text: "Good choice on metrics. Now let's talk about data. For regression, we need the full distribution of delay times, including long-tail extreme delays."
-      - speaker: candidate
-        text: "Right, so we'll need several years of data to capture rare but important events - major storms, air traffic control failures, and other outliers."
-      - speaker: interviewer
-        text: "Exactly. The key data sources include flight operations data like scheduled vs actual times, weather data, airport congestion metrics, aircraft maintenance records, and cascading effects from incoming flights."
-      - speaker: candidate
-        text: "We'll also need to be careful about data leakage. For 24-hour predictions, we can only use weather forecasts, not actual observations."
-      - speaker: interviewer
-        text: "Good catch. That's a critical detail. Let's move on to feature engineering."
-    next: reg_features
-
-  - id: reg_features
-    stage: features
-    type: question
-    label: "Feature Engineering"
-    speaker: interviewer
-    content: |
-      What features would you engineer for this regression problem?
-    choices:
-      - label: "Focus on temporal and route features"
-        answer: |
-          I'd prioritize temporal and route-based features since delays are highly time- and location-dependent.
-
-          **Temporal features**: Hour of day, day of week, month, holiday indicators. Morning flights have different delay patterns than evening flights. Mondays vs Fridays differ. Summer thunderstorm season vs winter snow season matter. I'd also create interaction features like "Friday evening" or "December weekend" to capture compound effects.
-
-          **Route features**: Origin-destination pairs, distance, flight duration. Some routes (e.g., NYC-SF) are notoriously delay-prone. Distance affects sensitivity to weather - short flights can wait out storms, long flights can't. I'd encode airports as embeddings to capture learned patterns (some airports are just problematic).
-
-          **Historical delay features**: For this specific route-time combination, what's the historical delay distribution? What was the delay for this exact flight number yesterday, last week, last year? Rolling averages of delay rates by carrier, by airport, by time of day. These historical patterns are often the strongest predictors.
-
-          **Airline network features**: Is this a connecting hub? What percentage of passengers are connections? Hub airports have cascading delay amplification.
-        next: reg_model
-      - label: "Focus on real-time operational features"
-        answer: |
-          I'd prioritize real-time operational features since they capture current conditions better than historical patterns.
-
-          **Incoming aircraft status**: Since most aircraft fly multiple legs per day, the incoming flight's delay is the single best predictor of this flight's delay. I'd track: Is the incoming aircraft delayed? By how much? Is it still en route or already arrived? If delayed, has the airline already swapped in a different aircraft?
-
-          **Crew status**: Are the assigned pilots/flight attendants on time? Coming from a delayed flight? Nearing duty-time limits that might require crew swaps? Crew issues cause delays but are often overlooked in modeling.
-
-          **Current airport conditions**: Real-time runway queue length, current departure rate vs typical rate, gate availability, current weather conditions. These operational metrics reflect the actual state right now, not historical averages.
-
-          **Network ripple effects**: Are other flights from this carrier delayed system-wide today? Is there a ground stop or air traffic control delay program in effect? These indicate broader issues that will affect our flight.
-
-          For 24-hour predictions, some of these won't be available, so I'd also keep historical features as fallbacks.
-        next: reg_model
-
-  - id: reg_model
-    stage: model
-    type: question
-    label: "Model Selection for Regression"
-    speaker: interviewer
-    content: |
-      What model architecture would you choose for this regression problem?
-    choices:
-      - label: "Gradient Boosting (XGBoost/LightGBM)"
-        answer: |
-          I'd use Gradient Boosting, specifically LightGBM, as the primary model for this regression task.
-
-          **Why boosting for this problem?** Flight delays involve complex non-linear interactions between features. Weather + time of day + airport congestion interact in ways that simple linear models can't capture. Boosting excels at learning these feature interactions automatically through its tree-based structure.
-
-          **Handling the delay distribution**: Flight delays are highly skewed - most flights are on-time, with a long tail of delays. Boosting handles this naturally without special preprocessing. We can also use quantile regression with LightGBM to predict multiple quantiles (10th, 50th, 90th percentile delay), giving uncertainty estimates.
-
-          **Feature importance and interpretability**: Unlike neural networks, boosting provides clear feature importance scores. We can show stakeholders "incoming aircraft delay accounts for 35% of prediction importance" which builds trust. SHAP values can explain individual predictions - "this flight is predicted delayed because of weather (15 min contribution) and airport congestion (10 min)."
-
-          **Practical benefits**: Boosting trains quickly, even on millions of flights. It handles missing values gracefully (important for real-world data). It's robust to feature scaling. And it's production-proven for similar problems at companies like Uber and Lyft.
-        next: reg_training
-      - label: "Neural Network with embeddings"
-        answer: |
-          I'd design a neural network with embedding layers for categorical features, trained for regression.
-
-          **Architecture rationale**: The network would have embedding layers for high-cardinality categoricals (airport codes, aircraft tail numbers, flight numbers). These embeddings learn dense representations that capture latent patterns - e.g., airports with similar weather patterns cluster together in embedding space without manual feature engineering.
-
-          **Handling interactions**: The fully-connected layers after embeddings can learn arbitrary feature interactions. We can use attention mechanisms to let the model focus on the most relevant features for each prediction. For example, weather might be critical for some routes but irrelevant for others - attention learns this dynamically.
-
-          **Temporal modeling**: We could use LSTM or transformer layers to model sequential patterns - how delays propagate through an aircraft's daily schedule. If a plane is delayed on leg 1, how does that affect legs 2, 3, 4? The temporal model captures cascading effects naturally.
-
-          **Flexibility**: Neural networks can easily incorporate multiple prediction horizons (24h and 2h) in a multi-task learning setup, sharing representations between tasks. We can also predict uncertainty via Monte Carlo dropout or ensembles.
-
-          **Trade-offs**: This requires more data and tuning than boosting, but offers potentially better performance on complex patterns and easier integration of diverse data types (text, images of weather radar).
-        next: reg_training
-
-  - id: reg_training
-    stage: training
-    type: info
-    label: "Training Strategy for Regression"
-    speaker: interviewer
-    content: |
-      Good model choice. Let's talk about training strategy.
-
-      **Time-based splitting is critical**: We must use temporal splits, not random splits. Train on 2020-2023, validate on Q1 2024, test on Q2 2024. Random splitting would leak future information and overestimate performance - we'd be "predicting" past flights using future patterns.
-
-      **Handling seasonality**: Flight delays are highly seasonal (summer thunderstorms, winter snow). We need at least 2-3 years of training data to capture full seasonal cycles. Consider training separate models per season if patterns differ dramatically.
-
-      **Data imbalance**: Most flights are on-time. For regression, this means most targets are near zero, with rare large delays. Consider using sample weights proportional to delay magnitude, or separate models for "will delay occur?" (classification) and "how long?" (regression on delayed flights only).
-
-      **Online learning**: Since patterns change (new airports, aircraft types, COVID), implement periodic retraining. Start with weekly retraining, monitor performance, adjust frequency.
-
-      Let's move to deployment considerations.
-    next: reg_deployment_question
-
-  - id: reg_deployment_question
-    stage: deployment
-    type: question
-    label: "Deployment Architecture"
-    speaker: interviewer
-    content: |
-      How would you deploy this regression model to serve predictions?
-    choices:
-      - label: "Batch predictions daily for 24-hour horizon"
-        answer: |
-          For the 24-hour prediction horizon, I'd use batch predictions that run daily.
-
-          **Architecture**: Every night at midnight, run a batch job that predicts delays for all scheduled flights departing in the next 24 hours. Store predictions in a database (PostgreSQL or DynamoDB) with keys like (flight_number, scheduled_date). Customer-facing apps and operations tools query this database.
-
-          **Why batch?** At 24 hours out, flight conditions don't change minute-by-minute. Running predictions once daily is sufficient. This is much simpler operationally than real-time serving - no need for low-latency infrastructure, easier monitoring, can use larger models, and predictions are cached naturally.
-
-          **Workflow**: Use Airflow or similar to orchestrate: 1) Fetch scheduled flights for tomorrow, 2) Gather features (weather forecasts, historical patterns), 3) Run model inference (can parallelize across flights), 4) Write predictions to database, 5) Send passenger notifications for high-confidence delay predictions.
-
-          **For 2-hour predictions**: These need fresher data, so I'd run a separate batch job every hour, updating predictions for flights in the next 2-3 hours based on current conditions.
-
-          **Gradual rollout**: Start with batch predictions to a small percentage of flights, monitor accuracy, gradually expand.
-        next: reg_monitoring
-      - label: "Real-time API serving with caching"
-        answer: |
-          I'd deploy a real-time REST API that serves predictions on-demand, with aggressive caching.
-
-          **Architecture**: Model deployed as a containerized service (Docker on Kubernetes). Load balancer fronts multiple replicas for redundancy. Client apps (mobile, web, operations dashboard) make API calls like GET /predict?flight=AA123&date=2024-06-15. Response includes predicted delay, confidence interval, and key contributing factors.
-
-          **Why real-time?** This architecture is more flexible. Different clients can request predictions whenever needed - at booking time, 24 hours before, 2 hours before, or when the user opens the app. We can personalize prediction timing per user. Operations teams can instantly re-predict after conditions change (weather update, aircraft swap).
-
-          **Feature serving**: Critical challenge is assembling features quickly. Use a feature store (Feast, Tecton) that maintains pre-computed features (historical delay stats) and fetches real-time features (current weather, incoming aircraft status) on demand. Cache assembled feature vectors briefly.
-
-          **Caching strategy**: Cache predictions per flight with 1-hour TTL for 24h-horizon predictions, 5-minute TTL for 2h-horizon predictions. This dramatically reduces load while staying reasonably fresh.
-
-          **Model serving**: Use TensorFlow Serving, TorchServe, or similar for optimized inference. For gradient boosting models, compile to ONNX for faster inference.
-        next: reg_monitoring
-
-  - id: reg_monitoring
-    stage: monitoring
-    type: question
-    label: "Monitoring and Evaluation"
-    speaker: interviewer
-    content: |
-      What would you monitor in production to ensure the regression model stays healthy?
-    choices:
-      - label: "Monitor prediction accuracy and data drift"
-        answer: |
-          I'd implement comprehensive monitoring covering both model performance and data health.
-
-          **Prediction accuracy metrics**: Track RMSE and MAE daily, segmented by prediction horizon (24h vs 2h), by route, by carrier, by season. Compare against a simple baseline (historical average delay for this route/time). Alert if RMSE increases by >10% relative to recent average, indicating model degradation.
-
-          **Directional accuracy**: Track what percentage of actual delays we predicted as delays (true positive rate) and what percentage of on-time flights we predicted correctly (true negative rate). Also track false alarm rate - passengers lose trust if we frequently warn about delays that don't occur.
-
-          **Data drift detection**: Monitor feature distributions weekly. Are weather patterns shifted? Are new aircraft types appearing? Has the airline changed hub structure? Use statistical tests (KS test, PSI) to detect significant distribution shifts. Major drift triggers model retraining.
-
-          **Operational metrics**: Track prediction latency (should be <100ms for API, <3 hours for batch), uptime (99.9% target), and error rates. Monitor cache hit rates if using caching.
-
-          **Business impact**: Most importantly, track downstream business metrics - did predicted delays lead to actions? Did customer satisfaction improve? Did operational efficiency improve?
-        next: reg_terminal
-      - label: "A/B testing and continuous evaluation"
-        answer: |
-          I'd implement continuous A/B testing to validate real-world impact and drive model improvements.
-
-          **A/B test framework**: Randomly assign flights to treatment (ML predictions shown) vs control (current system). This isn't fully random - ensure both groups are balanced across routes, times, carriers. Run for 2-3 months minimum to capture seasonal variation and gather statistical power.
-
-          **Metrics to compare**: In treatment group, measure customer actions (rebookings, app engagement with delay info), operational actions (proactive gate changes, crew swaps), and outcomes (passenger complaints, connection misses, on-time performance). Compare against control to isolate ML impact vs other factors.
-
-          **Shadow mode first**: Before A/B testing, run in shadow mode for 1-2 months where predictions are generated but not shown. Evaluate how accurate predictions would have been without risking customer experience. This builds confidence before full rollout.
-
-          **Continuous learning**: Maintain a hold-out set of recent flights that are never used in training. Periodically evaluate all model versions (current production, recent experiments) on this hold-out set. This catches overfitting to quirks in training data.
-
-          **Model versioning**: Keep last 3-5 model versions deployable. If new model performs poorly, instant rollback to previous version. Track which model version served each prediction for post-hoc analysis.
-        next: reg_terminal
-
-  - id: reg_terminal
-    stage: monitoring
-    type: terminal
-    label: "Regression Path Complete"
-    speaker: interviewer
-    content: |
-      Excellent work! You've designed a complete regression-based ML system for flight delay prediction.
-
-      **Key decisions in your approach:**
-      - Framed as regression to predict exact delay minutes
-      - Used RMSE/MAE or custom weighted loss aligned with business impact
-      - Engineered temporal/route or real-time operational features
-      - Selected gradient boosting or neural networks
-      - Deployed via batch processing or real-time API
-      - Monitored accuracy metrics and data drift or ran A/B tests
-
-      **Strengths of regression approach:**
-      - Maximum information preservation and granularity
-      - Precise predictions for planning
-      - Flexibility to derive classifications post-hoc
-      - Natural uncertainty quantification via prediction intervals
-
-      **Challenges to address:**
-      - Skewed target distribution (most flights on-time)
-      - Extreme outliers (very long delays)
-      - Converting precise predictions to actionable decisions
-      - Users may struggle with continuous predictions vs categories
-
-      This design demonstrates strong ML system design skills - you considered problem formulation, metrics aligned with business goals, practical data constraints, appropriate modeling choices, and production concerns. Great job!
-
-  # CLASSIFICATION PATH
-  - id: class_metrics
+  - id: met_class_question
     stage: metrics
     type: question
     label: "Classification Metrics"
     speaker: interviewer
     content: |
-      Since we're doing classification, what metrics would you use to evaluate the model?
+      Since we're doing classification, we need metrics that handle the class imbalance (~70% on-time, ~20% minor, ~10% major) and reflect the asymmetric costs of different misclassifications.
+
+      What metrics framework would you propose?
+    dialogue:
+      - speaker: interviewer
+        text: "For classification, the metric choice is particularly important given the class imbalance. About 70% of flights are on-time. What metrics would you propose?"
+      - speaker: candidate
+        text: "The imbalance is a key concern. Accuracy would be misleading — a model predicting 'on-time' always gets 70% accuracy. We need metrics that are sensitive to the minority classes, especially major delays."
+      - speaker: interviewer
+        text: "Right. And keep in mind that different types of misclassification have very different business costs."
     choices:
-      - label: "Weighted F1 score across all three classes"
+      - label: "Weighted F1 with per-class precision/recall"
         answer: |
-          I'd use weighted F1 score as the primary metric, which balances precision and recall across all three classes (on-time, minor delay, major delay).
+          I'd use **weighted F1 score** as the primary metric, supported by per-class precision and recall breakdowns.
 
-          **Why F1?** For delay prediction, both precision and recall matter. High precision means when we predict a delay, it's usually correct - this maintains user trust. High recall means we catch most actual delays - this ensures we notify passengers who need to know. F1 harmonic mean balances these concerns.
+          **Why F1?** It balances precision and recall, both of which matter here. High precision means "when we predict a delay, it's usually real" — crucial for user trust. High recall means "we catch most actual delays" — crucial for the notification use case. F1's harmonic mean prevents gaming one at the other's expense.
 
-          **Why weighted?** The classes are imbalanced - most flights are on-time, major delays are rare. Macro-averaging would give equal weight to major delays (rare but important) and on-time (common). Weighted F1 accounts for class frequency while still considering all classes. We could alternatively use macro F1 to emphasize rare classes more.
+          **Why weighted?** With 70/20/10 class distribution, macro F1 would over-weight the rare major delay class. Weighted F1 respects class frequencies while still considering all classes. I'd track both: weighted F1 for overall health, macro F1 to ensure we're not ignoring rare classes.
 
-          **Additional metrics**: I'd also track per-class precision/recall separately to diagnose issues. If recall on major delays is low, we're missing critical delays - bad for operations. If precision on minor delays is low, we're crying wolf - bad for trust. Confusion matrix visualization helps identify systematic errors (e.g., confusing minor delays with on-time).
+          **Per-class monitoring** is essential:
+          - **On-time recall** >95% — don't annoy passengers with false delay alerts
+          - **Major delay recall** >80% — we MUST catch these for rebooking
+          - **Minor delay precision** >70% — avoid "cry wolf" effect
 
-          **Business metric**: Ultimately, track cost-weighted accuracy where misclassifications have different business costs. Missing a major delay (false negative) is much worse than a false alarm on minor delay.
-        next: class_data
-      - label: "ROC-AUC for each class (one-vs-rest)"
+          **Confusion matrix heatmaps** weekly, segmented by route type (hub-hub, hub-spoke, point-to-point) to catch systematic biases. The most dangerous error pattern is major delays predicted as on-time — I'd set a separate alert if this exceeds 5%.
+        next: data_pipeline
+      - label: "ROC-AUC per class with probability calibration"
         answer: |
-          I'd use ROC-AUC (Area Under the Receiver Operating Characteristic curve) in a one-vs-rest approach for each class.
+          I'd use **one-vs-rest ROC-AUC** for each class, combined with calibration metrics.
 
-          **Why AUC?** AUC is threshold-independent, which is crucial because optimal thresholds differ by use case. For passenger notifications, we might want high precision (few false alarms) so we'd set a high threshold. For operations, we might want high recall (catch all delays) so we'd set a lower threshold. AUC evaluates performance across all thresholds, giving us flexibility.
+          **Why AUC?** It's threshold-independent, which is critical because different use cases need different operating points:
+          - Passenger notifications: high precision threshold (avoid false alarms that erode trust)
+          - Operations planning: low threshold (catch everything, over-preparation is cheap)
+          - Rebooking offers: moderate threshold (cost of rebooking vs cost of missed connection)
 
-          **One-vs-rest approach**: Compute three AUCs - on-time vs (delayed), minor delay vs (other), major delay vs (other). This handles multi-class evaluation cleanly. We can also compute micro-average and macro-average AUC for an overall score.
+          AUC evaluates across ALL thresholds simultaneously, so one metric captures performance for all downstream consumers.
 
-          **Probability calibration**: AUC also reflects how well-calibrated our probability estimates are. If the model outputs 70% probability of on-time, we want roughly 70% of those flights to actually be on-time. Well-calibrated probabilities are essential - operations teams make resource allocation decisions based on these probabilities.
+          **Per-class AUC breakdown:**
+          - On-time vs rest: target AUC > 0.90
+          - Minor delay vs rest: target AUC > 0.85
+          - Major delay vs rest: target AUC > 0.88 (critical to detect)
 
-          **Complementary metrics**: I'd pair AUC with confusion matrix for interpretability, and track log-loss (cross-entropy) which directly measures probability calibration quality. Log-loss penalizes confident wrong predictions heavily, encouraging better uncertainty estimates.
-        next: class_data
+          **Probability calibration** is equally important. If the model says "70% on-time," roughly 70% of those flights should actually be on-time. I'd track calibration using **Expected Calibration Error (ECE)** and reliability diagrams. Well-calibrated probabilities enable principled downstream decision-making.
 
-  - id: class_data
+          **Log-loss (cross-entropy)** as a secondary metric — it directly measures probability quality and heavily penalizes confident wrong predictions. A model that says "99% on-time" for a flight that gets a major delay gets severely penalized, which is exactly what we want.
+        next: data_pipeline
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # STAGE 3: DATA (4 nodes)
+  # data_pipeline (CONVERGENCE) → data_quality_question → (data_missing | data_imbalance) → feat_question (CONVERGE)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  - id: data_pipeline
     stage: data
     type: info
-    label: "Data Requirements for Classification"
+    label: "Data Pipeline Architecture"
     speaker: interviewer
     content: |
-      Good metric choices. Now let's discuss data requirements for classification.
+      Good metric choices. Now let's design the data pipeline. Regardless of whether we chose regression or classification, the data infrastructure is largely shared.
 
-      **Class imbalance is a key challenge**: Historically, airlines have ~70% on-time, ~20% minor delays, ~10% major delays. This imbalance affects model training - models can achieve high accuracy by just predicting "on-time" always.
+      **Data sources to integrate:**
 
-      **Mitigation strategies**:
-      - **Stratified sampling**: Ensure train/validation/test splits maintain class proportions
-      - **Class weights**: Weight rare classes higher in the loss function during training
-      - **Oversampling/SMOTE**: Synthetically generate more examples of rare classes
-      - **Collect more data**: Especially for rare but critical major delays - need enough examples to learn patterns
+      | Source | Refresh Rate | Volume | Format |
+      |--------|-------------|--------|--------|
+      | Flight schedules | Daily | ~2K flights/day | Structured (SQL) |
+      | Historical delays | Append-only | 5 years × 730K flights/year | Parquet |
+      | Weather (NOAA) | Hourly | Per-airport observations | JSON API |
+      | Weather forecasts (NWS) | 6-hourly | Grid-based forecasts | GRIB2/JSON |
+      | FAA ASPM | 15-min | Airport metrics | XML/CSV |
+      | Maintenance logs | Event-driven | ~50K events/year | Structured |
+      | Crew schedules | Daily | ~8K crew/day | Structured |
 
-      **Labeling considerations**: We need to carefully define class boundaries. Is a 14-minute delay "on-time" but 16 minutes "minor delay"? This arbitrary threshold creates noisy labels near boundaries. Consider using soft labels or fuzzy boundaries.
+      **Key data engineering decisions:**
+      - **Feature computation window**: What lookback period for rolling statistics? (7-day, 30-day, seasonal)
+      - **Join strategy**: Point-in-time joins to prevent data leakage — only use data available at prediction time
+      - **Storage**: Feature store (Feast/Tecton) for online features, Parquet on S3 for offline training data
+      - **Freshness**: Different features have different staleness tolerance. Weather forecasts must be <6h old; historical delay rates can be daily.
 
-      **Temporal aspects**: Similar to regression, we need multiple years to capture seasonality and rare events (hurricanes, volcanic ash, pandemics). Time-based splits are essential to prevent leakage.
+      Let's dig into data quality challenges.
+    dialogue:
+      - speaker: interviewer
+        text: "Now let's talk about the data pipeline. We have multiple sources to integrate — flight schedules, weather, FAA metrics, maintenance, crew schedules. How would you architect this?"
+      - speaker: candidate
+        text: "I'd build a layered pipeline. A batch layer computes historical features daily — rolling delay rates, seasonal patterns, airport statistics. Then a streaming layer for real-time features like current weather and incoming aircraft status."
+      - speaker: interviewer
+        text: "Good. What about data leakage? That's a common pitfall in time-series prediction."
+      - speaker: candidate
+        text: "Critical point. Every feature must use point-in-time joins — we can only use data that was actually available at the moment we'd make the prediction. For the 24-hour horizon, that means weather forecasts, not observations. I'd implement strict temporal validation in the feature pipeline."
+      - speaker: interviewer
+        text: "Exactly right. Now, what data quality challenges do you anticipate?"
+    next: data_quality_question
+    citations:
+      - "https://feast.dev/docs"
 
-      Same data sources as discussed earlier: flight ops, weather, airport, aircraft, cascading effects.
-    next: class_features
+  - id: data_quality_question
+    stage: data
+    type: question
+    label: "Data Quality Strategy"
+    speaker: interviewer
+    content: |
+      Real-world airline data has significant quality issues. What's your biggest data quality concern, and how would you address it?
 
-  - id: class_features
+      Consider: the data isn't just noisy — it has systematic biases and structural problems that can silently corrupt your model.
+    dialogue:
+      - speaker: interviewer
+        text: "Real-world airline data has significant quality issues — it's not just noisy, there are systematic biases. What's your biggest concern?"
+      - speaker: candidate
+        text: "I see two major challenges. Missing data is pervasive — weather stations go offline, maintenance logs are inconsistently recorded. And for classification, we have severe class imbalance."
+      - speaker: interviewer
+        text: "Good identification. Which would you prioritize tackling first?"
+    choices:
+      - label: "Missing data and sensor gaps"
+        answer: |
+          My primary concern is **missing and unreliable data**, which is pervasive across multiple sources.
+
+          **Weather data gaps**: Weather stations have outages, especially during severe weather — ironically, exactly when predictions matter most. METAR reports can be delayed or missing for remote airports. Strategy: maintain multiple weather sources (NOAA, Weather Company, OpenMeteo) and implement automatic fallback. For missing observations, use spatial interpolation from nearby stations (kriging) rather than simple imputation.
+
+          **Maintenance log inconsistency**: Different maintenance teams use different logging practices. Some record every inspection detail; others just log major events. Strategy: focus on structured fields (date, aircraft ID, maintenance type code) rather than free-text. Create binary features ("had unscheduled maintenance in last 7 days") that are robust to logging detail variation.
+
+          **Crew scheduling gaps**: Crew data often updates late — reassignments happen last-minute. Strategy: compute features at multiple time snapshots and accept graceful degradation when crew data is stale.
+
+          **General approach**: For each feature, track its **missingness rate** over time. If a feature's missingness exceeds 20%, it should be excluded or replaced. Use models that handle missing values natively (LightGBM, XGBoost) rather than imputation, which can introduce bias. Always include a **"data available" binary indicator** feature for each source — the model can learn when data absence itself is predictive.
+        next: feat_question
+      - label: "Class imbalance and label noise"
+        answer: |
+          My primary concern is **class imbalance and label noise**, which directly corrupt model training.
+
+          **The imbalance problem**: ~70% on-time, ~20% minor delays, ~10% major delays. A naive model achieves 70% accuracy by always predicting "on-time." For regression, the equivalent issue is target skew — most targets cluster near zero with a long tail.
+
+          **My strategy — multi-pronged:**
+          1. **Stratified temporal splits**: Ensure train/val/test maintain class proportions within each time period. Don't just stratify globally — stratify within each month to preserve seasonal balance.
+          2. **Class weights in loss function**: Weight inversely proportional to frequency. For regression, use sample weights based on delay magnitude.
+          3. **Focused sampling**: Over-sample severe weather days and holiday periods where delays cluster. These are high-information training examples.
+          4. **Threshold calibration**: Don't use default 0.5 — optimize thresholds on validation data separately for each use case.
+
+          **Label noise** at class boundaries is equally dangerous. Is a 14-minute delay "on-time" but 16 minutes a "minor delay"? This 2-minute difference creates noisy labels near boundaries. Strategy: use **soft labels** during training (e.g., a 14-min delay gets label [0.7, 0.3, 0.0] instead of hard [1, 0, 0]). Alternatively, for regression, this boundary issue disappears entirely.
+
+          **Label definition drift**: Airlines occasionally change how they report delays (e.g., redefining "gate arrival" vs "wheels down"). I'd monitor label distribution monthly and flag sudden shifts.
+        next: feat_question
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # STAGE 4: FEATURES (4 nodes)
+  # feat_question (CONVERGENCE) → (feat_temporal | feat_realtime | feat_weather) → mod_question (CONVERGE)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  - id: feat_question
     stage: features
     type: question
-    label: "Feature Engineering for Classification"
+    label: "Feature Engineering Strategy"
     speaker: interviewer
     content: |
-      What features would you prioritize for this classification problem?
+      Now for feature engineering — arguably the most impactful part of the system. With dozens of data sources, we can't use everything. What's your primary feature engineering strategy?
+
+      Think about which features provide the most predictive signal relative to their engineering and maintenance cost.
+    dialogue:
+      - speaker: interviewer
+        text: "Feature engineering is where the real predictive power comes from. With all these data sources, what's your primary strategy? Think about signal-to-cost ratio."
+      - speaker: candidate
+        text: "I'd organize features into three tiers based on predictive value and engineering complexity. Let me walk through the options."
+      - speaker: interviewer
+        text: "Go ahead. I'm particularly interested in which features you think provide the most bang for the buck."
     choices:
-      - label: "Historical delay rate features"
+      - label: "Temporal patterns and historical delay features"
         answer: |
-          I'd prioritize aggregated historical delay rate features since we're predicting categories, not exact times.
+          I'd prioritize **temporal and historical features** — they're the highest signal-to-cost ratio because they capture stable, recurring patterns.
 
-          **Route-level statistics**: For each origin-destination pair, compute historical delay rates - what percentage of flights are on-time, minor delay, major delay? Calculate this for different time windows (same day of week, same month, same hour). These capture systematic route patterns.
+          **Historical delay statistics** (strongest predictors):
+          - Rolling delay rate for this flight number: 7-day, 30-day, seasonal averages
+          - Route-level delay distribution: what percentage of LAX→JFK flights are delayed, by hour and day of week?
+          - Carrier reliability scores: each airline has a characteristic delay profile
+          - Airport delay rates by hour: ORD at 5pm vs 8am have very different delay distributions
 
-          **Carrier statistics**: Different airlines have different delay profiles. Calculate delay class distribution by carrier, by carrier-route combo, by carrier-airport. Some airlines pad schedules (appear on-time more) while others optimize tightly (more delays).
+          **Temporal features** (capture periodicity):
+          - Hour of day, day of week, month — encoded as cyclical features (`sin/cos` encoding) to capture periodic patterns
+          - Holiday indicators (Thanksgiving week vs normal Tuesday) and special event flags
+          - Interaction features: "Friday 5pm at JFK" captures the compound effect of end-of-week + peak hour + busy airport
+          - Season-weather interaction: "January at ORD" is very different from "January at PHX"
 
-          **Airport statistics**: Some airports are delay hotspots (LGA, ORD). Compute delay class rates by origin airport, by destination airport, by time of day. Also track airport congestion - when the airport is above 80% capacity, delay rates spike.
+          **Network position features**:
+          - Is this airport a hub for this carrier? (Hub flights have more backup options but also more congestion)
+          - What percentage of passengers on this flight are connecting? (Higher connection rates mean delays cascade more)
+          - Flight leg position in aircraft's daily schedule (first flight of the day is rarely delayed; last flight inherits all prior delays)
 
-          **Temporal statistics**: Delay rates vary by hour, day of week, season. Friday evening departures have different delay profiles than Tuesday mornings. Holiday periods are distinct. Create categorical features or embeddings for these temporal patterns.
-
-          **Rolling statistics**: Compute 7-day, 30-day rolling delay rates for this specific flight number or route. Recent trends are often better predictors than all-time averages. If a route has been plagued by delays the past week, likely continues.
-        next: class_model
-      - label: "Weather and operational status features"
+          These features are cheap to compute, stable over time, and provide strong baselines. In my experience, historical delay rates alone achieve ~75% of the final model's performance.
+        next: mod_question
+      - label: "Real-time operational status features"
         answer: |
-          I'd prioritize current weather conditions and operational status since these predict delay categories effectively.
+          I'd prioritize **real-time operational features** — they capture current conditions that historical patterns miss, which is critical for the 2-hour prediction horizon.
 
-          **Weather features**: Current and forecasted weather at origin and destination - precipitation level (none/light/heavy), visibility category (good/poor/very poor), wind speed category (calm/moderate/high), temperature extremes (freezing/hot). Categorize continuous weather into bins that align with operational impact. For instance, <50ft visibility triggers specific procedures regardless of exact footage.
+          **Incoming aircraft status** (single strongest real-time predictor):
+          - Current position and estimated arrival time of the inbound aircraft (via ADS-B tracking)
+          - Delay status of the inbound aircraft's current flight — if it's 45 minutes late, ours will be too
+          - Has the airline already swapped in a different aircraft? (Indicates they know about the issue)
+          - Turnaround buffer: scheduled ground time minus minimum required turnaround
 
-          **Airport operational status**: Is there currently a ground stop or delay program at origin or destination? What's the current departure queue length bin (short/medium/long)? Are runways at reduced capacity (snow removal, construction, winds)? These operational states directly trigger delays.
+          **Airport operational state:**
+          - Current departure queue length and average taxi time (from FAA ASPM, updated every 15 minutes)
+          - Runway configuration and closures — reduced runways means reduced throughput
+          - Active ground delay programs (GDP) or ground stops — these are explicit delay orders from ATC
+          - Gate availability: if the arrival gate is occupied, the inbound aircraft has to wait
 
-          **Aircraft status features**: Is the incoming aircraft currently delayed? If so, which delay category? Has it already arrived or still en route? Aircraft turnaround time category (quick/normal/slow). Aircraft age category (new/medium/old) as older planes need more maintenance.
+          **Crew and resource status:**
+          - Are assigned crew members currently on delayed flights?
+          - Crew duty-time remaining — if pilots are near the 8-hour limit, a swap might be needed (adds 30-60 min)
+          - Maintenance status: any deferred maintenance items that need checks?
 
-          **Crew status**: Are pilots/crew coming from a delayed flight? Are they nearing duty-time limits? These binary/categorical features predict delay likelihood.
+          **Network ripple effects:**
+          - What percentage of this carrier's flights are delayed system-wide right now?
+          - Any cascade events detected? (When >40% of flights at a hub are delayed, it typically takes 6+ hours to recover)
 
-          **Network effects**: Is this carrier experiencing system-wide delays today? What percentage of their flights are delayed right now? This captures airline operational health.
-        next: class_model
+          For the 24-hour horizon, many of these aren't available yet, so I'd fall back to historical patterns. But for the 2-hour horizon, real-time features dominate prediction accuracy.
+        next: mod_question
+      - label: "Weather-centric features with derived indices"
+        answer: |
+          I'd prioritize **weather-derived features** — weather causes ~40% of all flight delays and is the most impactful external factor, yet most models use raw weather variables poorly.
 
-  - id: class_model
+          **The key insight:** raw weather values (temperature: 32°F, wind: 25 knots) aren't as predictive as **operational weather indices** that map weather to aviation impact.
+
+          **Composite weather indices:**
+          - **Crosswind component**: `wind_speed × sin(wind_direction - runway_heading)` — crosswind above 25 knots forces runway changes
+          - **Ceiling/visibility category**: Map continuous values to FAA flight categories (VFR → MVFR → IFR → LIFR), each triggers specific ATC procedures
+          - **Deicing probability**: `max(0, freezing_point - temperature) × precipitation_rate` — deicing adds 15-45 minutes per aircraft
+          - **Thunderstorm impact score**: Combines convective SIGMET coverage, lightning density, and storm cell movement direction relative to approach paths
+
+          **Weather at BOTH endpoints:**
+          - Origin weather at departure time (affects taxi, deicing, departure queue)
+          - Destination weather at arrival time (affects approach, holding patterns, diversions)
+          - En-route weather (affects flight time, potential rerouting)
+
+          **Forecast vs observation features:**
+          - For 24h predictions: use NWS TAF (Terminal Aerodrome Forecast) — issued every 6 hours, covers 24h ahead
+          - For 2h predictions: use METAR observations (current) + TAF short-term (2h ahead)
+          - Include **forecast uncertainty** as a feature: NWS provides confidence intervals; high uncertainty itself predicts delays
+
+          **Temporal weather patterns:**
+          - Weather trend (improving vs deteriorating) — a clearing storm has different impact than an approaching one
+          - Season × weather interaction: 2 inches of snow at DEN (routine) vs ATL (shutdown)
+
+          Weather features require more engineering than historical stats, but they capture the causal mechanism behind delays, making the model more robust to distribution shift.
+        next: mod_question
+        citations:
+          - "https://www.weather.gov/media/aviation/TAF_Card.pdf"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # STAGE 5: MODEL (4 nodes)
+  # mod_question (CONVERGENCE) → (mod_boosting | mod_neural | mod_ensemble) → train_strategy (CONVERGE)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  - id: mod_question
     stage: model
     type: question
-    label: "Model Selection for Classification"
+    label: "Model Architecture"
     speaker: interviewer
     content: |
-      What model would you choose for this multi-class classification problem?
+      Now let's choose a model architecture. Given our feature set, what model would you use?
+
+      Consider: this is tabular data with a mix of continuous, categorical, and temporal features. We need both accuracy and interpretability for operations teams. And we need to serve predictions at scale — 2,000 flights × multiple prediction horizons per day.
+    dialogue:
+      - speaker: interviewer
+        text: "Time to choose a model architecture. We have tabular data with mixed feature types, need interpretability for operations, and must serve at scale. What would you recommend?"
+      - speaker: candidate
+        text: "For tabular data like this, there are three strong contenders — gradient boosting, neural networks with embeddings, or an ensemble approach. Each has different trade-offs."
+      - speaker: interviewer
+        text: "Walk me through your recommendation and why you'd choose it over the alternatives."
     choices:
-      - label: "Random Forest with class balancing"
+      - label: "Gradient Boosting (LightGBM/XGBoost)"
         answer: |
-          I'd use Random Forest as the primary classification model, with class balancing techniques.
+          I'd use **LightGBM** as the primary model. For tabular prediction tasks with mixed feature types, gradient boosting consistently outperforms or matches deep learning while being dramatically simpler to deploy.
 
-          **Why Random Forest?** It's an ensemble of decision trees, each trained on bootstrapped samples and random feature subsets. This makes it robust and less prone to overfitting than single decision trees. For delay prediction, where we have many features with non-linear relationships (weather, time, airport), Random Forest naturally captures these interactions.
+          **Why LightGBM specifically (vs XGBoost)?**
+          - 5-10x faster training on large datasets (histogram-based splitting)
+          - Native categorical feature support (no one-hot encoding needed for airport codes, carrier codes)
+          - Better handling of high-cardinality features (thousands of route combinations)
+          - Leaf-wise growth finds better splits than XGBoost's level-wise approach
 
-          **Handling class imbalance**: Use the class_weight='balanced' parameter which automatically adjusts weights inversely proportional to class frequencies. This prevents the model from being biased toward the majority "on-time" class. Alternatively, use stratified bootstrapping to ensure each tree sees balanced classes.
+          **Architecture for our problem:**
+          - **Two-model setup**: Separate models for 24h and 2h prediction horizons (they use different feature sets and have different accuracy profiles)
+          - **Quantile regression**: Train three models predicting 10th, 50th, and 90th percentile delays to get uncertainty bounds. Or use the `quantile` objective with `alpha=[0.1, 0.5, 0.9]`
+          - **Feature interactions**: LightGBM naturally learns `weather × airport × time` interactions through its tree structure — no manual interaction engineering needed
 
-          **Advantages for this problem**: Random Forest provides feature importance scores, showing which factors most influence delays - critical for explaining predictions to operations teams. It handles mixed categorical and numerical features well. It's inherently multi-class without needing one-vs-rest. And it outputs calibrated probabilities for each class.
+          **Interpretability advantage:**
+          - SHAP values explain individual predictions: "This flight is predicted 45 min late because: incoming aircraft delayed (+25 min), thunderstorm at destination (+15 min), historical route pattern (+5 min)"
+          - Feature importance rankings show operations teams which factors drive delays system-wide
+          - These explanations build trust and enable human override when needed
 
-          **Interpretability**: We can extract and visualize individual trees to show decision logic - "if weather is poor AND airport congestion is high AND incoming aircraft delayed THEN predict major delay." This transparency builds stakeholder trust.
-
-          **Practical benefits**: Relatively fast to train, robust to hyperparameter choices, and production-proven.
-        next: class_training
-      - label: "Gradient Boosting with focal loss"
+          **Practical benefits:** Trains in minutes on millions of rows. Handles missing values natively. No GPU required. Production-proven at Uber (ETA prediction), Booking.com, and multiple airlines.
+        next: train_strategy
+      - label: "Neural Network with embeddings"
         answer: |
-          I'd use Gradient Boosting (XGBoost or LightGBM) with focal loss to handle class imbalance.
+          I'd design a **neural network with learned embeddings** for categorical features and a multi-task architecture.
 
-          **Why Gradient Boosting?** It typically outperforms Random Forest by sequentially building trees that correct previous errors. For delay prediction with complex feature interactions, boosting's iterative refinement learns subtle patterns that single-pass methods miss.
+          **Architecture design:**
+          - **Embedding layers** for high-cardinality categoricals: airport codes (200 airports → 16-dim embedding), carrier codes (20 carriers → 8-dim), aircraft type (50 types → 8-dim), route pairs (5000+ routes → 32-dim). These embeddings learn semantic relationships — airports with similar weather patterns cluster together automatically.
+          - **Continuous feature processing**: Batch normalization → dense layers for numerical features (weather values, delay statistics, congestion metrics)
+          - **Concatenation + deep layers**: Merge embeddings and continuous features → 3 dense layers (256→128→64) with residual connections and dropout (0.3)
+          - **Multi-task output heads**: One head for 24h prediction, one for 2h prediction. Shared representation layers learn common patterns; task-specific heads specialize.
 
-          **Focal loss for imbalance**: Standard cross-entropy loss treats all examples equally, so the abundant "on-time" class dominates training. Focal loss down-weights easy examples (confident correct predictions) and focuses on hard examples. This naturally addresses imbalance - the model works harder on rare "major delay" class without manual reweighting.
+          **Temporal modeling (optional but powerful):**
+          - LSTM or Transformer layer processing the aircraft's daily flight sequence — learns how delays propagate through rotation schedules
+          - Attention mechanism over historical flights for this route — weights recent similar conditions higher
 
-          **Multi-class handling**: Use native multi-class objective (softmax) rather than one-vs-rest. This learns correlations between classes - e.g., factors that distinguish major delay from minor delay might differ from on-time vs any delay.
+          **Uncertainty quantification:**
+          - Monte Carlo dropout at inference: run 10 forward passes, compute mean and std of predictions
+          - Or mixture density network output: predict parameters of a delay distribution, not just point estimates
 
-          **Probability calibration**: Boosting models can be poorly calibrated (over-confident). Apply Platt scaling or isotonic regression post-training to calibrate probabilities. This is critical for downstream decision-making.
+          **Trade-offs:**
+          - Requires more data and tuning than boosting (but we have 3.6M flights over 5 years — plenty)
+          - Needs GPU for training (but inference can be CPU or ONNX-optimized)
+          - Less interpretable natively (use integrated gradients or attention weights for explanations)
+          - Potentially better for capturing complex temporal dynamics and cross-feature interactions
+        next: train_strategy
+      - label: "Ensemble: Boosting + NN with learned stacking"
+        answer: |
+          I'd build a **two-layer ensemble** combining gradient boosting and a neural network, with learned stacking for optimal combination.
 
-          **Feature interactions**: Boosting automatically learns feature interactions through its tree structure. This captures things like "weather + time of day" effects without manual feature engineering.
+          **Layer 1 — Base models:**
+          - **LightGBM**: Excels at tabular feature interactions, fast to train, handles missing values. Trained on all features including high-cardinality categoricals.
+          - **Neural Network**: Embedding-based architecture for categoricals, multi-task for both prediction horizons. Better at capturing complex temporal sequences and cross-source patterns.
+          - **Linear model** (optional third base): Elastic-net regularized regression as a calibration anchor. Simple but surprisingly competitive for well-engineered features.
 
-          **Performance advantages**: Usually achieves best accuracy on tabular data competitions. Worth the extra tuning effort.
-        next: class_training
+          **Layer 2 — Meta-learner (stacking):**
+          - Take base model predictions + key features as input to a final LightGBM model
+          - Train on out-of-fold predictions from Layer 1 (5-fold temporal cross-validation to prevent leakage)
+          - The meta-learner learns WHEN each base model is most reliable: "trust the NN more during weather events, trust LightGBM more for routine delays"
 
-  - id: class_training
+          **Why ensemble?**
+          - Empirically, ensembles reduce error by 3-8% over best single model for tabular prediction tasks
+          - Model diversity: tree-based and neural models make different types of errors, so combining them reduces variance
+          - Robustness: if one model degrades (e.g., a feature source breaks), the ensemble degrades gracefully
+
+          **Practical considerations:**
+          - Increased serving complexity (2-3 models to maintain, but inference is still fast if base models are optimized)
+          - More training infrastructure needed (can justify if prediction accuracy has clear $ value)
+          - A/B testable: serve single model vs ensemble, measure if the accuracy gain translates to business value
+
+          The ensemble approach is warranted here because delay prediction accuracy has direct revenue impact — even a 1% improvement in major delay detection saves millions in rebooking costs.
+        next: train_strategy
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # STAGE 6: TRAINING (5 nodes)
+  # train_strategy (CONVERGENCE) → train_validation → train_approach_question → (train_offline | train_online) → deploy_question (CONVERGE)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  - id: train_strategy
     stage: training
     type: info
-    label: "Training Strategy for Classification"
+    label: "Training Strategy"
     speaker: interviewer
     content: |
-      Good model choice. Let's discuss training strategy for classification.
+      Good model choice. Let's design the training strategy. For time-series prediction like flight delays, training methodology is critical — standard cross-validation will give you misleadingly optimistic results.
 
-      **Handling class imbalance during training**:
-      - Use stratified K-fold cross-validation to ensure each fold has representative class proportions
-      - Apply class weights during training (inverse frequency weighting)
-      - Consider oversampling minority classes or undersampling majority class
-      - Use focal loss or other imbalance-aware loss functions
+      **Temporal splitting is non-negotiable:**
+      - Train: Jan 2020 – Dec 2023 (4 years, captures COVID disruption and recovery)
+      - Validation: Jan – Mar 2024 (tune hyperparameters, select features)
+      - Test: Apr – Jun 2024 (final evaluation, never touched during development)
 
-      **Threshold optimization**: After training, optimize classification thresholds separately for each use case. For passenger notifications, use high threshold (high precision, low false alarms). For operations, use lower threshold (high recall, catch all delays). Don't use default 0.5 threshold.
+      **Why not random splits?** Random splitting lets the model "cheat" — it could learn that Flight AA123 was delayed on June 15 using data from June 16. In production, we never have future data.
 
-      **Temporal splits**: Train on 2020-2023, validate on Q1 2024, test on Q2 2024. Never randomly shuffle - this leaks future information.
+      **Seasonal considerations:**
+      - Summer (June–Aug): thunderstorm season, ATC flow control programs
+      - Winter (Dec–Feb): deicing, snow closures, polar vortex events
+      - Holiday surges: Thanksgiving, Christmas, Spring Break — higher load, more cascading delays
+      - We need at least 2-3 years to see these patterns repeat
 
-      **Cost-sensitive learning**: Assign different misclassification costs based on business impact. Missing a major delay (false negative) might cost 10x more than falsely predicting a minor delay (false positive). Incorporate these costs into loss function or decision thresholds.
+      **COVID data handling:** 2020-2021 data has dramatically different patterns (reduced flights, different delay causes). Options: exclude it, down-weight it, or include with a "COVID era" binary feature. I'd include with the binary feature — the model learns to discount those patterns while keeping the data volume.
 
-      **Regular retraining**: Retrain weekly or monthly as delay patterns shift (new routes, airport changes, seasonal transitions).
+      Let's discuss validation approach and retraining strategy.
+    dialogue:
+      - speaker: interviewer
+        text: "Training strategy is crucial for time-series problems. How would you split the data?"
+      - speaker: candidate
+        text: "Temporal splits only — never random. I'd train on 2020-2023, validate on Q1 2024, and hold out Q2 2024 for final testing. Random splits would introduce look-ahead bias."
+      - speaker: interviewer
+        text: "Good. What about the COVID period? 2020-2021 data looks very different."
+      - speaker: candidate
+        text: "I'd include it with a binary 'COVID era' feature rather than excluding. We keep the data volume, and the model learns to weight those patterns appropriately. Excluding two years would leave gaps in our seasonal coverage."
+      - speaker: interviewer
+        text: "Smart approach. Let's talk about validation methodology."
+    next: train_validation
 
-      Now let's discuss deployment.
-    next: class_deployment_question
+  - id: train_validation
+    stage: training
+    type: info
+    label: "Validation & Hyperparameter Tuning"
+    speaker: candidate
+    content: |
+      For validation and hyperparameter tuning, I'd use **expanding-window temporal cross-validation**:
 
-  - id: class_deployment_question
+      **Expanding window CV (5 folds):**
+      - Fold 1: Train Jan 2020–Jun 2021, Val Jul–Sep 2021
+      - Fold 2: Train Jan 2020–Dec 2021, Val Jan–Mar 2022
+      - Fold 3: Train Jan 2020–Jun 2022, Val Jul–Sep 2022
+      - Fold 4: Train Jan 2020–Dec 2022, Val Jan–Mar 2023
+      - Fold 5: Train Jan 2020–Jun 2023, Val Jul–Sep 2023
+
+      Each fold adds more training data (expanding window) and validates on the next unseen period. This mimics production: we always train on all available history and predict the future.
+
+      **Hyperparameter search:**
+      - Use Optuna with Bayesian optimization (more efficient than grid search)
+      - Key hyperparameters for LightGBM: `num_leaves` (31-255), `learning_rate` (0.01-0.1), `feature_fraction` (0.6-0.9), `min_child_samples` (20-100), `reg_alpha` (0-10), `reg_lambda` (0-10)
+      - 100-200 trials with early stopping on validation metric
+      - Evaluate stability: if optimal hyperparameters vary wildly across CV folds, the search surface is noisy — use more regularization
+
+      **Feature selection:**
+      - Start with all features, compute SHAP-based importance
+      - Remove features with near-zero importance (noisy, slow inference)
+      - Remove highly correlated features (keep the one with higher importance)
+      - Target: 50-100 features for production (manageable, fast inference)
+
+      Now, what retraining strategy should we use?
+    dialogue:
+      - speaker: interviewer
+        text: "Good validation framework. How would you tune hyperparameters?"
+      - speaker: candidate
+        text: "Optuna with Bayesian optimization across the temporal CV folds. I'd focus on regularization parameters — for LightGBM, that's num_leaves, learning rate, and L1/L2 regularization. About 100-200 trials with early stopping."
+      - speaker: interviewer
+        text: "And feature selection?"
+      - speaker: candidate
+        text: "SHAP-based importance analysis. Remove near-zero importance features and deduplicate correlated ones. I'd target 50-100 features for production — enough signal without excessive complexity."
+      - speaker: interviewer
+        text: "Good. Now, how do you keep the model fresh in production?"
+    next: train_approach_question
+
+  - id: train_approach_question
+    stage: training
+    type: question
+    label: "Retraining Strategy"
+    speaker: interviewer
+    content: |
+      How would you handle model retraining in production? Flight delay patterns shift over time — new routes, seasonal changes, airline mergers, and even gradual infrastructure improvements affect delay distributions.
+    dialogue:
+      - speaker: interviewer
+        text: "Flight delay patterns shift over time. New routes, airline mergers, infrastructure changes. How would you keep the model current?"
+      - speaker: candidate
+        text: "This is really about how quickly we need to adapt versus the cost and risk of retraining. Let me consider the options."
+      - speaker: interviewer
+        text: "Right. And think about what could go wrong — a bad retrain could degrade predictions for thousands of flights."
+    choices:
+      - label: "Scheduled offline retraining (weekly)"
+        answer: |
+          I'd implement **weekly scheduled retraining** with automated quality gates.
+
+          **Pipeline:**
+          1. **Sunday midnight**: Trigger retraining pipeline via Airflow
+          2. **Data refresh**: Pull latest week of flight data, recompute all features
+          3. **Train**: Retrain on expanding window (all history up to last week)
+          4. **Evaluate**: Run automated quality checks on holdout data:
+             - Primary metric must be within 5% of current production model
+             - No class has recall drop >10%
+             - Calibration error <0.05
+             - No single route has RMSE spike >3x
+          5. **Stage**: If quality gates pass, deploy to shadow mode alongside production model
+          6. **Promote**: After 24h shadow validation, promote to production (blue-green deployment)
+
+          **Why weekly?**
+          - Weekly captures route/schedule changes promptly
+          - Weather pattern shifts propagate within 1-2 weeks
+          - Keeps model fresh without excessive infrastructure cost
+          - Gives enough new data for meaningful model updates (~14K new flights per week)
+
+          **Safety mechanisms:**
+          - Automatic rollback if production metrics degrade within 4h of promotion
+          - Keep last 5 model versions deployable (instant rollback)
+          - Human-in-the-loop approval for models that diverge significantly from prior version (feature importance shifts >20%)
+
+          This approach is operationally manageable, catches drift within a week, and has strong safety rails against bad retrains.
+        next: deploy_question
+      - label: "Online learning with incremental updates"
+        answer: |
+          I'd implement **online learning with incremental model updates** for maximum freshness.
+
+          **Architecture:**
+          - Base model retrained weekly (for stability and seasonal patterns)
+          - **Online adaptation layer** updated hourly with recent flight outcomes
+          - The online layer learns short-term corrections: "delays are running 10 minutes longer than the base model predicts today at ORD" → adjust predictions accordingly
+
+          **Implementation for LightGBM:**
+          - Use `init_model` parameter to continue training from existing model (incremental boosting)
+          - Add 10-20 new trees per update, each trained on last 24h of data
+          - Cap total tree count (prune oldest trees when exceeding limit)
+          - Alternatively: calibration layer (isotonic regression) updated hourly on recent predictions vs actuals
+
+          **For neural networks:**
+          - Fine-tune last 2 layers with small learning rate on recent data
+          - Use exponential moving average of weights for stability
+          - Implement gradient clipping to prevent catastrophic forgetting
+
+          **Why online learning for this problem?**
+          - Delay patterns change intra-day (morning clear, afternoon storms)
+          - System-wide disruptions (ground stops, ATC issues) create temporary regime changes
+          - Online adaptation captures these within hours, not days
+
+          **Challenges:**
+          - Requires low-latency feedback loop (actual departure times available ~30min after scheduled departure)
+          - Risk of over-fitting to transient patterns (mitigate with regularization + base model anchor)
+          - More complex infrastructure (streaming pipeline for label collection and model update)
+          - Must handle concept drift detection to trigger full retrains when online adaptation is insufficient
+
+          Worth the complexity if prediction freshness directly impacts business value (real-time operations decisions).
+        next: deploy_question
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # STAGE 7: DEPLOYMENT (3 nodes)
+  # deploy_question (CONVERGENCE) → (deploy_batch | deploy_realtime) → mon_strategy (CONVERGE)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  - id: deploy_question
     stage: deployment
     type: question
-    label: "Deployment Strategy"
+    label: "Deployment Architecture"
     speaker: interviewer
     content: |
-      How would you architect the deployment for this classification system?
+      How would you deploy this model to serve predictions at scale? Remember, we need predictions for 2,000+ flights per day at two horizons (24h and 2h before departure).
+
+      Think about the trade-offs between infrastructure simplicity, prediction freshness, and operational reliability.
+    dialogue:
+      - speaker: interviewer
+        text: "Now for deployment. We need predictions for 2,000+ flights at two horizons. What architecture would you propose?"
+      - speaker: candidate
+        text: "The two main options are batch prediction — pre-compute everything on a schedule — versus real-time serving with an API. The right choice depends on how dynamic our predictions need to be."
+      - speaker: interviewer
+        text: "Good framing. Which would you recommend and what are the key trade-offs?"
     choices:
-      - label: "Batch predictions with priority queues"
+      - label: "Batch predictions with scheduled refresh"
         answer: |
-          I'd deploy using batch prediction with priority-based processing and caching.
+          I'd use **batch prediction** with scheduled refresh at different cadences for each prediction horizon.
 
-          **Batch architecture**: Run scheduled batch jobs at different frequencies based on prediction horizon. For 24-hour predictions, run once daily at midnight. For 2-hour predictions, run every 15 minutes for flights departing in next 2-4 hours. Use Airflow or AWS Step Functions for orchestration.
+          **Architecture:**
+          ```
+          Airflow Scheduler
+           ├─ Daily job (midnight): 24h predictions for tomorrow's flights
+           │   └─ Predict all ~2,000 flights → write to PostgreSQL/DynamoDB
+           ├─ Hourly job: 2h predictions for flights departing in next 3 hours
+           │   └─ Re-predict ~250 flights/batch → update predictions table
+           └─ Event-triggered: Re-predict specific flights on major input changes
+               └─ Weather alert, aircraft swap, ground stop → targeted re-prediction
+          ```
 
-          **Priority queues**: Not all flights need predictions at the same time. Prioritize flights that:
-          - Depart soon (next 2 hours) - need fresh predictions
-          - Have high delay probability based on preliminary signals - recompute more frequently
-          - Have many passengers or connections - higher impact
-          This optimizes compute resources and ensures critical predictions are fresh.
+          **Storage:** Predictions table with columns: `flight_id, date, horizon, predicted_delay, confidence_interval, prediction_time, model_version, top_3_factors`. Apps query this table — no real-time model inference needed.
 
-          **Caching strategy**: Store predictions in Redis with TTL based on prediction horizon. 24-hour predictions can be cached for hours since conditions don't change rapidly. 2-hour predictions need 5-15 minute TTLs. Customer apps query cache first, avoiding redundant predictions.
+          **Why batch?**
+          - **Operationally simpler**: No model serving infrastructure to maintain, no API latency concerns, no autoscaling complexity
+          - **Allows larger models**: Can use ensemble or even expensive models since prediction isn't latency-sensitive
+          - **Natural monitoring**: Each batch run produces a complete snapshot — easy to compare across runs
+          - **Cost-effective**: ~2K predictions per run, even a slow model finishes in minutes
 
-          **Graceful degradation**: If prediction service fails, fall back to simple rules (historical average delay rate for this route/time). Always return something rather than erroring - availability is critical.
+          **Event-triggered re-prediction** handles the freshness concern: when a significant input changes (severe weather warning, aircraft substitution, ground delay program), re-run prediction for affected flights immediately. This gives ~90% of real-time's benefit at ~20% of the infrastructure complexity.
 
-          **Advantages**: Batch is operationally simpler, easier to monitor, allows larger/slower models, and naturally handles high load.
-        next: class_monitoring
-      - label: "Real-time serving with feature store"
+          **Failure handling:** If a batch job fails, the previous predictions remain valid (stale but not absent). Alert on-call, retry within 30 minutes. Passengers see slightly stale predictions rather than no predictions.
+        next: mon_strategy
+      - label: "Real-time API with feature store"
         answer: |
-          I'd deploy as a real-time prediction API backed by a feature store for low-latency serving.
+          I'd deploy a **real-time prediction API** backed by a feature store for sub-second inference.
 
-          **API design**: RESTful API endpoint: POST /predict with request body containing flight details. Response includes predicted class (on-time/minor delay/major delay), probability distribution across classes, top contributing features, and prediction confidence. Typical latency target: <100ms at p99.
+          **Architecture:**
+          ```
+          Client Apps (mobile/web/ops dashboard)
+               │
+               ▼
+          API Gateway (rate limiting, auth)
+               │
+               ▼
+          Prediction Service (K8s pods, auto-scaling)
+           ├─ Feature Assembly: Feature Store (Feast/Tecton)
+           │   ├─ Online store (Redis): real-time features, <10ms lookup
+           │   └─ Offline store (S3/Parquet): historical features, materialized hourly
+           ├─ Model Inference: ONNX-compiled LightGBM, <5ms inference
+           └─ Response: prediction + confidence + explanation
+          ```
 
-          **Feature store architecture**: This is the critical component. Use Feast, Tecton, or AWS Feature Store to manage:
-          - **Offline features**: Historical delay statistics, precomputed daily. Batch jobs populate these.
-          - **Online features**: Real-time data fetched on-demand - current weather, incoming aircraft status, airport congestion. APIs to external services (weather, airport).
-          - Feature serving layer combines offline + online features in milliseconds.
+          **API design:** `GET /v1/predict?flight=AA123&date=2024-07-15`
+          Response: `{ delay_minutes: 35, confidence_interval: [15, 55], probability: { on_time: 0.25, minor: 0.55, major: 0.20 }, top_factors: [...], model_version: "v2.4.1" }`
 
-          **Model serving**: Containerize model (Docker), deploy to Kubernetes with auto-scaling. Use dedicated model serving frameworks like TF Serving, Seldon, or SageMaker for optimized inference. For tree-based models, compile to ONNX or TreeLite for 10-100x speedup.
+          **Feature store** is the critical component:
+          - **Online features** (Redis, <10ms): current weather, incoming aircraft status, airport queue length — updated every 5 minutes by streaming jobs
+          - **Offline features** (precomputed, materialized hourly): historical delay rates, route statistics, seasonal patterns
+          - Point-in-time correctness guaranteed by the feature store's timestamp-based lookups
 
-          **Caching**: Cache predictions per flight for 5-15 minutes to handle duplicate requests (user refreshing app). Cache feature vectors briefly to avoid re-fetching.
+          **Serving optimization:**
+          - Compile LightGBM to ONNX for 10x faster inference
+          - Cache predictions per flight with 5-minute TTL (handles multiple users checking same flight)
+          - Auto-scale pods: 2-10 replicas based on request rate, target <70% CPU
 
-          **Load balancing**: Multiple API replicas behind load balancer. Auto-scale based on request rate (target: <70% CPU utilization). Implement rate limiting per client to prevent abuse.
+          **Advantages:** Predictions are always fresh (use latest real-time features), can be personalized per request, and clients can request predictions at any time (not limited to batch schedule). This matters for the operations dashboard where controllers need instant re-prediction after they make changes.
+        next: mon_strategy
 
-          **Advantages**: Maximum flexibility, personalized timing, instant re-prediction after condition changes.
-        next: class_monitoring
+  # ═══════════════════════════════════════════════════════════════════════════
+  # STAGE 8: MONITORING (6 nodes)
+  # mon_strategy (CONVERGENCE) → mon_question → (mon_drift | mon_ab) → mon_scaling → mon_summary → mon_terminal
+  # ═══════════════════════════════════════════════════════════════════════════
 
-  - id: class_monitoring
+  - id: mon_strategy
+    stage: monitoring
+    type: info
+    label: "Monitoring Strategy Overview"
+    speaker: interviewer
+    content: |
+      Great deployment design. Now, a model in production is only as good as its monitoring. Flight delay prediction has some unique monitoring challenges:
+
+      **Why monitoring is especially critical here:**
+      - **Concept drift is guaranteed**: Weather patterns shift seasonally, airlines change routes quarterly, airport construction alters capacity annually. The world the model learned about is constantly changing.
+      - **Feedback delay**: We know ground truth within hours (actual departure time), which is fast compared to many ML problems. We should exploit this for rapid evaluation.
+      - **High-stakes errors**: A wrong prediction for 200 passengers has real consequences — missed connections, hours of frustration, and brand damage.
+      - **Multiple failure modes**: The model can degrade (slow drift), fail suddenly (data pipeline break), or be correct but unused (if operations teams don't trust it).
+
+      **Monitoring layers we need:**
+      1. **Data quality**: Are inputs arriving? Are distributions normal?
+      2. **Model performance**: Are predictions accurate? Any degradation?
+      3. **System health**: Is serving fast? Are errors low?
+      4. **Business impact**: Are predictions being used? Are outcomes improving?
+
+      What monitoring approach would you prioritize?
+    dialogue:
+      - speaker: interviewer
+        text: "A model in production is only as good as its monitoring. What makes monitoring especially critical for flight delay prediction?"
+      - speaker: candidate
+        text: "Several things. Concept drift is guaranteed — weather patterns, route changes, airline mergers. But we also have a major advantage: fast ground truth feedback. We know actual departure times within hours."
+      - speaker: interviewer
+        text: "Good point. That fast feedback loop is unusual in ML — most domains wait days or weeks for labels. How would you exploit it?"
+      - speaker: candidate
+        text: "We can compute accuracy metrics daily — sometimes hourly. That means we can detect model degradation within a day rather than waiting weeks. We should set up automated quality dashboards and alerts."
+      - speaker: interviewer
+        text: "Exactly. Let's discuss your monitoring approach in detail."
+    next: mon_question
+
+  - id: mon_question
     stage: monitoring
     type: question
-    label: "Monitoring and Maintenance"
+    label: "Monitoring Focus"
     speaker: interviewer
     content: |
-      How would you monitor this classification system in production?
+      What's your primary monitoring and evaluation strategy? We need to balance comprehensive monitoring with operational simplicity — monitoring itself shouldn't become more complex than the system it monitors.
+    dialogue:
+      - speaker: interviewer
+        text: "What's your primary monitoring strategy? Remember, monitoring shouldn't be more complex than the system it monitors."
+      - speaker: candidate
+        text: "I see two main approaches. We can focus on technical monitoring — tracking prediction accuracy and data drift. Or we can focus on business impact monitoring — A/B testing and outcome measurement."
+      - speaker: interviewer
+        text: "Which would you prioritize, and why?"
     choices:
-      - label: "Classification metrics and confusion matrix analysis"
+      - label: "Prediction accuracy and data drift monitoring"
         answer: |
-          I'd implement comprehensive monitoring focused on classification-specific metrics and error analysis.
+          I'd build a **comprehensive technical monitoring stack** focused on prediction accuracy and data health.
 
-          **Daily classification metrics**: Compute and log precision, recall, F1 for each class (on-time, minor delay, major delay) daily. Track weighted F1 and macro F1 as overall scores. Alert if any metric drops >5% from rolling 7-day average. This catches degradation early.
+          **Real-time accuracy dashboard (updated hourly):**
+          - RMSE/MAE or F1/AUC (depending on formulation) computed on rolling 24h window
+          - Segmented by: prediction horizon (24h vs 2h), carrier, airport, route type, time of day
+          - Comparison line showing same period last year (captures seasonal expectations)
+          - Alert: primary metric degrades >10% vs 7-day rolling average → page on-call ML engineer
 
-          **Confusion matrix analysis**: Generate daily confusion matrices showing predicted vs actual classes. Key patterns to watch:
-          - Are we systematically under-predicting delays? (false negatives - bad for passengers)
-          - Are we over-predicting delays? (false positives - cry wolf problem)
-          - Are we confusing minor vs major delays? (impacts action taken)
-          Visualize confusion matrix trends over time to identify emerging patterns.
+          **Data drift detection (daily):**
+          - For each input feature, compute PSI (Population Stability Index) comparing last 7 days vs training distribution
+          - PSI > 0.1: yellow alert (investigate). PSI > 0.25: red alert (likely need retraining)
+          - Special attention to weather features (seasonal shift) and network features (route changes)
+          - Monitor feature missingness rates — if a data source goes partial, model degrades silently
 
-          **Segmented performance**: Break down metrics by route, carrier, airport, time of day, season. Model might work well overall but fail on specific segments (e.g., west coast winter storms). Identify weak spots for targeted improvements.
+          **Prediction distribution monitoring:**
+          - Track daily distribution of predictions vs actuals (are we systematically over/under-predicting?)
+          - Confusion matrix heatmap (classification) or residual plots (regression) updated daily
+          - Alert on systematic bias: if mean residual deviates >5 min from zero for 3+ consecutive days
 
-          **Calibration monitoring**: For each predicted probability bin (0-10%, 10-20%, ..., 90-100%), track actual outcome frequencies. If we predict 70% on-time but only 50% are actually on-time, probabilities are miscalibrated. Recalibrate monthly using recent data.
+          **Calibration monitoring (weekly):**
+          - Reliability diagrams: predicted probability vs observed frequency
+          - ECE (Expected Calibration Error) — if it exceeds 0.05, trigger recalibration
+          - Particularly important for the operations dashboard where probabilities drive resource allocation
 
-          **Data quality checks**: Monitor feature distributions for drift. Are more flights being added? New airports? Weather data missing? Alert on significant distribution shifts (PSI > 0.2).
-        next: class_terminal
-      - label: "Business impact and A/B testing"
+          **Root cause analysis toolkit:**
+          - When an alert fires, auto-generate a report: which segment degraded, which features drifted, when it started
+          - This saves hours of investigation and accelerates remediation
+
+          This gives us multi-layered visibility: we catch data issues (upstream), model issues (midstream), and serving issues (downstream) before they impact users significantly.
+        next: mon_scaling
+      - label: "A/B testing and business impact measurement"
         answer: |
-          I'd focus monitoring on real-world business impact through A/B testing and operational metrics.
+          I'd prioritize **A/B testing and business impact monitoring** because ultimately, a technically accurate model that nobody uses provides zero value.
 
-          **A/B test design**: Split flights into control (baseline system) vs treatment (ML predictions shown). Ensure stratification by route, time, carrier for fair comparison. Run for 8+ weeks to capture weekday/weekend and various weather conditions.
+          **A/B test design:**
+          - **Unit of randomization**: Route-day combinations (not individual flights — passengers compare notes)
+          - **Treatment**: ML-powered predictions shown to passengers and operations teams
+          - **Control**: Current system (no proactive predictions, status quo gate announcements)
+          - **Duration**: 12 weeks minimum (captures multiple weather events, holiday period, and gathers statistical power)
+          - **Stratification**: Balance by hub/non-hub, domestic/international, peak/off-peak to ensure fair comparison
 
-          **Business KPIs**: Track metrics that actually matter to the business:
-          - **Customer satisfaction**: Surveys, NPS, complaints about delays. Did proactive notifications help?
-          - **Operational efficiency**: Were gates/crews reallocated proactively? Did this reduce downstream delays?
-          - **Revenue impact**: Did customers rebook to other airlines due to predicted delays? Or appreciate transparency?
-          - **Cost savings**: Reduced compensation for missed connections, fewer hotel vouchers, less overtime for crews.
+          **Primary business metrics:**
+          - **Passenger satisfaction (NPS)**: Survey passengers in treatment vs control groups
+          - **Proactive action rate**: How often did predictions trigger early rebooking, gate changes, or crew adjustments?
+          - **Operational cost savings**: Fewer last-minute hotel vouchers, less crew overtime, fewer missed connection rebookings
+          - **Revenue impact**: Did passengers in the treatment group rebook to competitors less often?
 
-          **Action rates**: What percentage of predictions led to actions? High delay probability should trigger passenger notifications and operational adjustments. Low action rates suggest predictions aren't actionable or trusted.
+          **Trust metrics (critical for adoption):**
+          - **Engagement rate**: What percentage of passengers view delay predictions when available?
+          - **Action rate**: Of those who view predictions, how many take actions (rebook, change plans)?
+          - **Trust decay**: After a false alarm (predicted delay that didn't happen), does engagement drop? How long to recover?
+          - **Operations adoption**: Are shift supervisors actually using the dashboard, or ignoring it?
 
-          **Trust metrics**: Track user engagement with predictions over time. Do passengers check predictions and act on them? Or do they ignore predictions after false alarms? Trust degrades with poor precision.
+          **Shadow mode before A/B:**
+          - Run predictions for 4 weeks without showing anyone. Evaluate: how accurate would we have been?
+          - This validates technical quality before risking customer-facing exposure
+          - Also calibrates expectations — if shadow accuracy is 85%, we know A/B test results will include 15% "wrong" predictions
 
-          **Continuous learning**: Maintain an online learning pipeline that retrains weekly on recent data. Compare new model vs production model on holdout set before deployment. Track model version performance over time.
+          **Continuous evaluation pipeline:**
+          - Model performance metrics still tracked (accuracy, calibration, drift)
+          - But business metrics are the **promotion criteria**: a model with 2% lower RMSE but no business impact improvement doesn't get deployed
+          - Quarterly model reviews: is the ML system actually improving outcomes, or should we invest elsewhere?
 
-          **Incident response**: Define alert thresholds (e.g., F1 drops >10%, latency >200ms) that page on-call. Have rollback procedures to previous model version within 5 minutes.
-        next: class_terminal
+          This approach ensures we're not just building an accurate model — we're building a system that creates measurable business value.
+        next: mon_scaling
 
-  - id: class_terminal
+  - id: mon_scaling
+    stage: monitoring
+    type: info
+    label: "Scaling and Edge Cases"
+    speaker: candidate
+    content: |
+      Before we wrap up, let me address **scaling considerations and edge cases** that often trip up ML systems in production:
+
+      **Handling extreme events:**
+      - **Mass disruptions** (hurricanes, volcanic ash, system-wide ATC failures): The model hasn't seen enough examples to predict these well. Fallback strategy: when >30% of flights at an airport are cancelled, switch to rule-based predictions ("all flights likely delayed 2+ hours") rather than trusting the ML model.
+      - **Novel situations**: New airports, new routes, new aircraft types that weren't in training data. Use graceful degradation: fall back to carrier-level or airport-level average delay predictions when route-specific features are missing.
+
+      **Scaling to multi-airline or platform:**
+      - Feature pipeline generalizes: weather, airport, ATC data are carrier-independent
+      - Carrier-specific features (crew, maintenance, aircraft) need per-airline integration
+      - Multi-tenant architecture: shared model infrastructure, per-airline model instances
+
+      **Feedback loops to avoid:**
+      - If our predictions cause passengers to arrive later (expecting a delay), the airline might hold the gate longer, creating a self-fulfilling prophecy
+      - If operations acts on predictions (pre-positioning crews), the delay might be shorter — making our prediction look wrong (but we actually helped!)
+      - Track **counterfactual impact**: what would have happened without our prediction?
+
+      **Compliance and fairness:**
+      - Ensure predictions don't systematically disadvantage specific routes or passenger groups
+      - DOT requires accurate delay reporting — our predictions shouldn't influence official statistics
+      - Data retention policies: how long do we keep prediction logs? (Usually 2 years for audit)
+    dialogue:
+      - speaker: interviewer
+        text: "Good monitoring plan. Before we wrap up, what about extreme events and edge cases?"
+      - speaker: candidate
+        text: "Extreme events are where ML models typically fail. Hurricanes, volcanic ash, system-wide ATC failures — the model hasn't seen enough examples. I'd implement a fallback: when more than 30% of flights at an airport are cancelled, switch to rule-based predictions."
+      - speaker: interviewer
+        text: "What about feedback loops? Our predictions could actually change the outcomes we're predicting."
+      - speaker: candidate
+        text: "That's a subtle but important issue. If passengers arrive later expecting a delay, the airline might hold the gate, creating a self-fulfilling prophecy. Conversely, if operations acts on our predictions, the delay might be shorter — making our prediction look wrong even though we helped. We need to track counterfactual impact."
+      - speaker: interviewer
+        text: "Excellent awareness. Those feedback loops are often missed in system design interviews. Let's summarize your overall design."
+    next: mon_summary
+
+  - id: mon_summary
+    stage: monitoring
+    type: info
+    label: "Design Summary"
+    speaker: interviewer
+    content: |
+      Let's summarize the complete system you've designed:
+
+      **End-to-end architecture:**
+      ```
+      Data Sources (flight ops, weather, FAA, maintenance, crew)
+           │
+           ▼
+      Feature Pipeline (batch + streaming, feature store)
+           │
+           ▼
+      Model Training (temporal splits, expanding window CV, scheduled retraining)
+           │
+           ▼
+      Model Serving (batch/real-time predictions, two horizons)
+           │
+           ▼
+      Consumers (passenger app, operations dashboard, rebooking system)
+           │
+           ▼
+      Monitoring (accuracy tracking, drift detection, business impact)
+           │
+           ▼
+      Feedback Loop (ground truth collection → retraining trigger)
+      ```
+
+      **Your key design decisions across the interview:**
+      1. **Problem formulation**: Your ML framing shaped everything downstream
+      2. **Metrics**: Aligned evaluation with business impact, not just mathematical convenience
+      3. **Data pipeline**: Point-in-time correctness, multiple sources, quality monitoring
+      4. **Features**: Prioritized high-signal features with practical engineering considerations
+      5. **Model**: Selected architecture balancing accuracy, interpretability, and operational simplicity
+      6. **Training**: Temporal splits with expanding window CV and automated retraining
+      7. **Deployment**: Architecture matching latency requirements and operational constraints
+      8. **Monitoring**: Multi-layered monitoring from data quality through business impact
+
+      You're almost done. Let's discuss any final thoughts.
+    dialogue:
+      - speaker: interviewer
+        text: "Let me summarize your overall design. You've covered all eight stages — from problem formulation through production monitoring."
+      - speaker: candidate
+        text: "I think the key strengths of this design are the temporal correctness of the feature pipeline, the multi-horizon prediction approach, and the strong monitoring with fast feedback loops."
+      - speaker: interviewer
+        text: "I agree. What would you say is the highest-risk aspect of this design?"
+      - speaker: candidate
+        text: "Honestly, the data pipeline. Integrating real-time feeds from multiple external sources — FAA, NOAA, ADS-B — creates many potential failure points. I'd invest heavily in data quality monitoring and graceful degradation when sources go down."
+      - speaker: interviewer
+        text: "That's a mature engineering perspective. The data pipeline is almost always the bottleneck in production ML systems. Any final thoughts before we wrap up?"
+    next: mon_terminal
+
+  - id: mon_terminal
     stage: monitoring
     type: terminal
-    label: "Classification Path Complete"
+    label: "Interview Complete"
     speaker: interviewer
     content: |
-      Excellent work! You've designed a comprehensive classification-based ML system for flight delay prediction.
+      Excellent work! You've designed a comprehensive ML system for flight delay prediction that demonstrates strong end-to-end thinking.
 
-      **Your design decisions:**
-      - Framed as multi-class classification (on-time, minor delay, major delay)
-      - Used F1 score or ROC-AUC with class imbalance handling
-      - Engineered historical delay rates or weather/operational features
-      - Selected Random Forest or Gradient Boosting with focal loss
-      - Deployed via batch with caching or real-time API with feature store
-      - Monitored classification metrics or business impact through A/B testing
+      **What you did well:**
+      - **Problem scoping**: Identified the dual-user need (passengers + operations) and multi-horizon requirement early
+      - **Principled metric selection**: Chose metrics aligned with business impact rather than defaulting to generic accuracy
+      - **Data engineering awareness**: Emphasized point-in-time correctness, data quality, and the challenge of integrating diverse real-time sources
+      - **Feature engineering depth**: Showed understanding of which features provide highest signal-to-cost ratio
+      - **Model pragmatism**: Selected architecture appropriate for tabular data rather than over-engineering with deep learning
+      - **Production readiness**: Addressed retraining strategy, deployment architecture, monitoring, and edge cases
+      - **Systems thinking**: Considered feedback loops, scaling, fairness, and business impact measurement
 
-      **Strengths of classification approach:**
-      - Directly actionable categories aligned with business decisions
-      - Natural handling of imbalanced delay distribution
-      - Interpretable results - stakeholders understand "minor delay" intuitively
-      - Calibrated probabilities provide uncertainty quantification
-      - Threshold tuning allows optimization for different use cases
+      **Areas for further exploration:**
+      - How would you handle multi-airport cascading delays (a storm at ORD affects flights nationwide)?
+      - Could you use causal inference to separate "delays we predicted" from "delays we prevented"?
+      - How would you extend this to predict cancellations (related but distinct problem)?
+      - What's the cold-start strategy for new routes with no historical data?
 
-      **Considerations addressed:**
-      - Class imbalance through weighting, focal loss, or sampling
-      - Feature engineering specific to categorical outcomes
-      - Threshold optimization for precision/recall tradeoff
-      - Production monitoring of classification-specific metrics
-      - Business impact validation through A/B testing
-
-      This demonstrates strong end-to-end ML system design thinking. You considered problem formulation trade-offs, aligned metrics with business goals, chose appropriate modeling approaches, and planned for production challenges. The classification framing is well-suited to this problem's operational decision-making needs. Great job!
+      This is the kind of thorough, structured thinking that succeeds in ML system design interviews. You covered the breadth of the problem while diving deep on key decisions, showed awareness of practical engineering constraints, and kept the business impact front and center. Great job!
+    dialogue:
+      - speaker: interviewer
+        text: "Excellent work! You've designed a comprehensive system covering all aspects from problem formulation to production monitoring."
+      - speaker: candidate
+        text: "Thank you! I think the key insight throughout was keeping the dual-user need in mind — passengers want proactive notifications, operations teams want predictive dashboards. That shaped our multi-horizon approach."
+      - speaker: interviewer
+        text: "Agreed. Your data pipeline design was particularly strong — the emphasis on point-in-time correctness and graceful degradation shows production experience."
+      - speaker: candidate
+        text: "I'd want to iterate quickly after launch. Start with the batch approach for reliability, monitor business impact, and migrate to real-time serving only if the freshness actually drives measurable improvements."
+      - speaker: interviewer
+        text: "That pragmatic approach is exactly right. Ship something reliable first, then optimize. Great interview — you've demonstrated exactly the kind of structured, practical thinking we're looking for."
