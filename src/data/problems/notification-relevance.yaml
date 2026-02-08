@@ -1,0 +1,585 @@
+id: notification-relevance
+title: "Smart Notification Ranking"
+description: "Design a system to decide which notifications to send, when to send them, and how to rank them."
+companies: ["Meta", "LinkedIn", "Pinterest"]
+domains: ["Ranking/Search", "Recommendation", "Tabular/Structured"]
+root: pd_start
+
+nodes:
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we are going to design a **smart notification ranking system** -- the system that decides which notifications to send to users, when to send them, and how to prioritize them.
+
+      Notifications are one of the most powerful re-engagement tools in mobile products. LinkedIn sends over **1 billion notifications per week**, Facebook sends even more. But notifications are a **double-edged sword**: a relevant notification brings a user back to the app, while an irrelevant one annoys them and may lead to muting, uninstalling, or disabling notifications entirely.
+
+      **The scale**: Consider a platform like LinkedIn with **900+ million members**. At any given moment, there are hundreds of potential notification triggers: someone viewed your profile, a connection posted an article, a job matching your criteria was listed, a group you are in has a new discussion, a recruiter sent you a message. For an active user, this could be **50-200 candidate notifications per day**. We cannot send all of them.
+
+      **Key challenges:**
+      - **Negative externality of over-sending**: Unlike content recommendation (where a bad suggestion is just scrolled past), a bad notification actively interrupts the user. Too many push notifications lead to **notification fatigue** -- muting (15-20% of users mute within 3 months), uninstalls (5-8% cite notifications as the primary reason), and reduced trust in the platform.
+      - **Channel selection**: Should this be a push notification, email, in-app notification, or SMS? Each channel has different costs and user tolerance.
+      - **Timing**: A notification about a job posting sent at 2am is worthless. The same notification at 9am could lead to a hire.
+
+      Let's scope the problem.
+    dialogue:
+      - speaker: interviewer
+        text: "We're designing a smart notification system. LinkedIn sends over 1 billion notifications per week. The core challenge: too many notifications cause fatigue and uninstalls."
+      - speaker: candidate
+        text: "What's the main tension we're trying to resolve?"
+      - speaker: interviewer
+        text: "Notifications are a double-edged sword. A relevant one brings users back; an irrelevant one drives them away. 15-20% of users mute notifications within 3 months."
+      - speaker: candidate
+        text: "So we need to decide what to send, when to send it, and through which channel. What's the candidate volume?"
+      - speaker: interviewer
+        text: "An active user might have 50-200 candidate notification triggers per day. We can send maybe 5-15. Let's scope the problem."
+    next: pd_objective_q
+
+  - id: pd_objective_q
+    stage: problem_definition
+    type: question
+    label: "Optimization Objective"
+    speaker: interviewer
+    content: |
+      The first critical decision: what should the notification system optimize for? This determines the fundamental character of the notification experience.
+    dialogue:
+      - speaker: interviewer
+        text: "What should the notification system optimize for? This is the most consequential design decision."
+      - speaker: candidate
+        text: "The two main philosophies are optimizing for engagement or optimizing for user satisfaction."
+      - speaker: interviewer
+        text: "And they can be surprisingly different. Walk me through why."
+    choices:
+      - label: "Engagement: maximize notification opens + downstream actions"
+        answer: |
+          I would optimize for **notification engagement** -- specifically, P(open) * E[downstream_value | open], where downstream value includes actions taken after opening (likes, comments, messages, job applications).
+
+          **Why engagement?** It is the most **directly measurable** objective. Within minutes of sending a notification, we know if the user opened it. Within an hour, we know what actions they took. This fast feedback loop enables rapid model iteration and A/B testing.
+
+          **Value model:**
+          ```
+          Score = P(open) * [w1*P(session > 5min | open) + w2*P(action | open) + w3*E[revenue | open]]
+          ```
+          This goes beyond raw opens to model the **quality of the engagement**. A notification that leads to a 10-minute session with multiple actions is more valuable than one that is opened and immediately dismissed.
+
+          **Notification-specific signals:**
+          - P(open) varies enormously by notification type: direct messages (~60% open rate) vs "trending in your network" (~5% open rate). The model must capture this.
+          - Time-of-day matters: push notifications sent during commute hours (7-9am, 5-7pm) have 2-3x higher open rates than mid-afternoon.
+          - Channel matters: push notifications have ~15% average open rate; emails ~3%; in-app ~25%.
+
+          **Guardrails**: Monitor mute rate, notification-attributed uninstalls, and long-term DAU. If engagement goes up but muting increases, we are likely over-sending.
+
+          **Trade-off**: Engagement optimization has a well-documented failure mode: it optimizes for **clickbait notifications**. "You won't believe who viewed your profile!" gets high open rates but erodes user trust. Facebook's notification team found that pure engagement optimization increased short-term opens by 8% but decreased 30-day retention by 2% because users felt manipulated. This is the canonical example of **Goodhart's Law** in ML: when the measure becomes the target, it ceases to be a good measure.
+        next: met_metrics
+      - label: "User satisfaction: minimize fatigue + maximize long-term value"
+        answer: |
+          I would optimize for **user satisfaction**, defined as the long-term relationship between the user and the notification channel.
+
+          **Why satisfaction over engagement?** Notifications are fundamentally different from in-app recommendations. In-app, users are already engaged -- a bad recommendation is just ignored. But a notification **interrupts the user's life**. The cost of a bad notification is not zero engagement; it is **negative engagement** (annoyance, muting, uninstalling). We must model this asymmetric cost.
+
+          **Satisfaction signals:**
+          - **Positive**: User opens notification and takes meaningful action (>30 seconds in app), user keeps notifications enabled over time, user increases app usage frequency after receiving notifications
+          - **Negative**: User swipes away without opening, user mutes notification type, user mutes all notifications, user reduces app usage frequency, user uninstalls within 7 days of notification spike
+          - **Implicit satisfaction**: Notification-attributed DAU (does the user return to the app on days when they receive notifications vs days they don't?) -- measured via **causal analysis** (randomized holdout groups)
+
+          **Value model:**
+          ```
+          Score = P(positive_outcome) - lambda * P(negative_outcome)
+          ```
+          Where lambda > 1 (typically 3-5x) to reflect the **asymmetric cost**: one bad notification is more damaging than one good notification is beneficial. LinkedIn's notification team reported that lambda=3 yielded the best 90-day DAU outcomes.
+
+          **Per-user notification budget**: Instead of a global send limit, model a **per-user tolerance threshold**. Some users want 20 notifications/day; others want 3. The model learns each user's tolerance from their muting behavior, open rates, and notification response velocity (quick opens = engaged; delayed opens = lower tolerance).
+
+          **Trade-off**: Satisfaction signals are **noisy and delayed**. We cannot know for 30-90 days whether a notification strategy improved retention. In the short term, the satisfaction model will send **fewer notifications** than the engagement model (because it is conservative about negative outcomes). This means lower short-term metrics -- fewer opens, fewer sessions -- which can be hard to defend in a product organization focused on quarterly metrics.
+
+          **Practical compromise**: Use engagement prediction for scoring individual notifications, but apply a satisfaction-optimized **volume controller** that caps total notifications per user based on their learned tolerance.
+        next: met_metrics
+
+  - id: met_metrics
+    stage: metrics
+    type: info
+    label: "Metrics Framework"
+    speaker: interviewer
+    content: |
+      Let's define the metrics framework for the notification system.
+
+      **Online metrics (A/B testing):**
+      - **Primary**: Notification-attributed DAU (% of DAU where the user session started from a notification click). This measures whether notifications actually bring users back.
+      - **Engagement**: Notification open rate, click-through rate, downstream action rate
+      - **Anti-spam guardrails**: Mute rate (target <2% per month), notification-attributed uninstall rate (target <0.1% per month), "Mark as spam" rate
+      - **User health**: 7-day retention of notification recipients, DAU/MAU ratio, session frequency
+
+      **Offline metrics (model evaluation):**
+      - **P(open) AUC**: Target >0.75. Notification open prediction is noisy because context (time, location, activity) matters enormously. A 0.75 AUC is strong for this domain.
+      - **P(action | open) AUC**: Target >0.70. Predicting downstream actions conditional on opening.
+      - **Calibration**: ECE <0.02. Critical because predicted probabilities feed into the volume controller.
+      - **Coverage**: % of notification types that the model handles effectively (some rare types may have too few examples for reliable prediction).
+
+      **The "notification quality score" (NQS):**
+      A composite metric that LinkedIn pioneered:
+      ```
+      NQS = open_rate * action_rate * (1 - mute_rate) * (1 - dismiss_rate_within_3s)
+      ```
+      NQS ranges from 0 to 1. Notifications with NQS <0.01 should be suppressed entirely (they do more harm than good). LinkedIn found that eliminating the bottom 20% of notifications by NQS improved 30-day retention by **+0.8%** while reducing total notification volume by 35%.
+
+      **Critical insight -- cannibalization**: Notifications cannibalize each other. If we send 10 notifications in a day, the 10th one has a much lower open rate than the 1st -- not because it is less relevant, but because the user is fatigued. We must model **within-day notification fatigue** as a feature, not just rank notifications independently.
+
+      Before diving into data, let's make a key decision about channel strategy.
+    dialogue:
+      - speaker: interviewer
+        text: "The primary online metric is notification-attributed DAU. For offline, P(open) AUC above 0.75 is the target."
+      - speaker: candidate
+        text: "The notification quality score combining open rate, action rate, mute rate, and dismiss rate is clever. What's the cannibalization issue?"
+      - speaker: interviewer
+        text: "Notifications cannibalize each other -- the 10th notification in a day has much lower open rate than the 1st due to fatigue, not relevance. We must model within-day fatigue as a feature."
+      - speaker: candidate
+        text: "That means we can't just score notifications independently -- the order and volume matter."
+      - speaker: interviewer
+        text: "Exactly. Before data, let's decide on channel strategy."
+    next: met_channel_q
+
+  - id: met_channel_q
+    stage: metrics
+    type: question
+    label: "Channel Strategy"
+    speaker: interviewer
+    content: |
+      A critical design decision: how should we handle **channel selection** -- deciding whether to send a notification as a push notification, email, in-app notification, or suppress it entirely?
+    dialogue:
+      - speaker: interviewer
+        text: "How should we handle channel selection? Push, email, in-app, or suppress -- each has very different costs and user tolerance."
+      - speaker: candidate
+        text: "The two approaches are modeling channel as part of the scoring decision, or treating it as a separate routing decision after scoring."
+      - speaker: interviewer
+        text: "Walk me through the trade-offs."
+    choices:
+      - label: "Unified multi-channel scorer (joint optimization)"
+        answer: |
+          I would build a **unified model that jointly scores notification relevance and channel suitability** in a single pass.
+
+          **How it works**: For each notification candidate, the model produces scores for multiple channels simultaneously:
+          ```
+          P(open | push), P(open | email), P(open | in_app), P(action | push, open), P(action | email, open)
+          ```
+          The channel with the highest expected value wins. If no channel exceeds a minimum threshold, the notification is suppressed.
+
+          **Why joint?** Channel suitability depends on the **interaction between notification content and user context**. A job recommendation is better as an email (users browse jobs carefully); a direct message needs push (time-sensitive). A user who commutes at 8am is reachable via push during commute but not via in-app. The joint model learns these interactions from data.
+
+          **Implementation**: Add channel as a **categorical feature** in the scoring model, and produce per-channel predictions. The training data naturally contains channel labels (each sent notification was sent via a specific channel with observed outcomes). Use **multi-task learning** with shared lower layers and channel-specific heads.
+
+          **Channel budget management**: Beyond per-notification scoring, enforce **per-channel daily budgets**: max 8 push, 3 email, unlimited in-app. The channel router respects these budgets when selecting the winning channel.
+
+          **Trade-off**: Joint optimization requires **3-4x more training data** per notification type (need sufficient examples of each type sent via each channel). For rare notification types, we may not have enough email examples to reliably estimate P(open | email). Also, the model is more complex to debug -- when a notification is sent via the wrong channel, it is harder to trace why the model preferred that channel.
+        next: data_pipeline
+      - label: "Score first, then route (decoupled)"
+        answer: |
+          I would **decouple scoring from channel routing**: first score the notification's relevance, then separately decide the best channel.
+
+          **Two-stage process**:
+          1. **Relevance scorer**: Scores how important this notification is to the user, independent of channel. Produces a single relevance score.
+          2. **Channel router**: Given the notification type, user preferences, and current context, selects the optimal channel from {push, email, in_app, suppress}.
+
+          **Channel routing rules (learned + heuristic hybrid)**:
+          - **Direct messages, security alerts**: Always push (time-sensitive, high-value)
+          - **Job recommendations, weekly digest**: Always email (users prefer browsing these at their desk)
+          - **Social updates (likes, comments)**: Push if relevance score > 0.7, in-app otherwise
+          - **Content recommendations**: In-app only (lowest user tolerance for push)
+          - **Learned overrides**: A lightweight model that predicts P(open | channel, user, time_of_day) can override defaults. For example, a user who never opens emails but always checks push notifications should get job recommendations via push.
+
+          **Per-user channel preferences**: Track each user's open rate by channel. Some users are "push people" (60% push open rate, 1% email). Others are "email people" (5% push, 25% email). The router adapts to individual preferences.
+
+          **Why decoupled?** Simpler to build, debug, and iterate. The relevance model and channel router can be developed by different teams on different timelines. When a new channel is added (e.g., SMS), we only update the router, not the core model. The routing rules are also **interpretable** -- product managers can review and adjust them without retraining the model.
+
+          **Trade-off**: The decoupled approach misses **content-channel interactions**. The relevance of a notification genuinely changes by channel -- "Sarah liked your post" is mildly interesting as push but irrelevant as email. The decoupled scorer produces the same relevance score regardless of channel, which means the router must approximate these interactions with heuristics rather than learning them from data. LinkedIn's data shows that joint optimization produces **+8% notification-attributed DAU** compared to decoupled routing, primarily because the joint model learns to suppress low-value push notifications that the decoupled approach would still send.
+        next: data_pipeline
+
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      The data pipeline for notification ranking has unique characteristics compared to in-app recommendation.
+
+      **Scale**: LinkedIn processes approximately **200 million notification candidates per hour** across all users. Of these, roughly 10-15% are actually sent (after scoring and volume control). Each sent notification logs: user, notification type, content, channel, send timestamp, and outcome (opened, dismissed, ignored, muted).
+
+      **Key data sources:**
+      - **Notification event logs**: Every trigger event that could generate a notification (profile view, connection post, job match, message received, endorsement, etc.). LinkedIn has **50+ notification types**.
+      - **User notification behavior**: Open rates by type, time-to-open, mute history, notification setting preferences, device notification permission status (iOS/Android)
+      - **User activity patterns**: App open times (captures daily rhythm), last active timestamp, typical session duration, engagement level (power user vs casual)
+      - **Content relevance signals**: For each notification candidate, the relationship between the user and the triggering entity (how close is the connection who posted? How relevant is the job listing?)
+      - **Channel-specific data**: Push notification delivery status (delivered, bounced, suppressed by OS), email open tracking (pixel-based), in-app notification badge count
+
+      **Data challenges unique to notifications:**
+      - **Delayed feedback**: A user may open a notification 6 hours after it was sent. Our label join window needs to be **24 hours** for push notifications and **72 hours** for emails.
+      - **Counterfactual problem**: If we did not send a notification, we do not know if the user would have opened the app anyway. We need **randomized holdout groups** (1-2% of users receive no notifications) to measure causal impact.
+      - **Platform-level censoring**: iOS and Android can suppress notifications without the app knowing. Apple's notification summary feature (introduced in iOS 15) groups low-priority notifications, reducing their visibility. We must account for **platform-level delivery uncertainty** in our models.
+      - **Channel interaction effects**: A user who received a push notification and ignores it may still open the corresponding email 3 hours later. Channel attribution is complex.
+
+      **Label construction:**
+      - **Primary**: Opened (binary, within 24h of send)
+      - **Quality**: Action taken (binary, within 1h of open), session duration after open
+      - **Negative**: Dismissed within 3 seconds (strong negative), muted notification type (very strong negative), uninstalled within 7 days (strongest negative signal)
+      - **Absence**: Not opened (weak negative -- could mean user did not see it, not that it was irrelevant)
+
+      Let's talk about features.
+    dialogue:
+      - speaker: interviewer
+        text: "LinkedIn processes about 200 million notification candidates per hour, sending only 10-15% of them. 50+ notification types exist."
+      - speaker: candidate
+        text: "The counterfactual problem is key -- how do we know notifications actually drive engagement rather than just correlating with it?"
+      - speaker: interviewer
+        text: "Randomized holdout groups. Keep 1-2% of users with no notifications to measure causal impact. Also, iOS notification summaries suppress visibility -- we must model platform-level delivery uncertainty."
+      - speaker: candidate
+        text: "The channel interaction effects are tricky too -- a user might ignore the push but open the email."
+      - speaker: interviewer
+        text: "Yes, channel attribution requires careful modeling. Let's discuss features."
+    next: feat_question
+
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Strategy"
+    speaker: interviewer
+    content: |
+      What feature engineering strategy would you use? The core tension in notification ranking is between **content relevance** (how interesting is this notification to this user?) and **user engagement history** (how does this user respond to notifications in general?).
+    dialogue:
+      - speaker: interviewer
+        text: "The core tension: content relevance of the notification versus user engagement history with notifications. How do you balance them?"
+      - speaker: candidate
+        text: "I think both are essential, but the weighting changes based on what we know about the user."
+      - speaker: interviewer
+        text: "Interesting. Walk me through your approach."
+    choices:
+      - label: "User-behavior-first: engagement patterns + fatigue modeling"
+        answer: |
+          I would build a **user-behavior-first feature set** that models each user's notification engagement patterns and fatigue dynamics, supplemented by content relevance signals.
+
+          **User notification behavior features (~40 features):**
+          - **Per-type engagement rates**: Open rate for each of the 50+ notification types, smoothed with Bayesian priors (important for new users). Example: this user opens 45% of direct messages but only 3% of "trending article" notifications.
+          - **Temporal engagement patterns**: Hour-of-day engagement heatmap (24 bins). Some users check notifications religiously at 8am; others never open before noon. Modeled as a 24-dim vector of P(open | hour).
+          - **Fatigue signals**: Number of notifications already sent today, number opened today, time since last notification sent, time since last notification opened. These capture the **diminishing returns** of additional notifications.
+          - **Muting history**: Which notification types has the user muted? Which have they re-enabled? Muting history is the strongest predictor of future muting.
+          - **Device state**: iOS vs Android (iOS users have lower open rates due to notification summary), notification permissions status, badge count on app icon.
+          - **User engagement level**: App opens per week (7-day rolling), average session duration, active days per month. Power users tolerate more notifications than casual users.
+
+          **Content relevance features (~20 features):**
+          - Notification type (categorical -- e.g., message, connection_post, job_match, endorsement)
+          - Relationship strength with trigger entity (connection degree, interaction frequency, recency of interaction)
+          - Content quality score (for posts/articles: engagement rate; for jobs: match score from job recommender)
+
+          **Why user-behavior-first?** Notifications are fundamentally about the **receiver, not the content**. A brilliant job recommendation notification is worthless if sent to a user who muted job notifications, never opens push notifications, or is sleeping. LinkedIn's research shows that **user behavior features explain 60-70% of notification open variance**, while content features explain only 20-30%.
+
+          **Fatigue modeling in detail**: Build an explicit **fatigue function**: P(open | N_sent_today) that decays with each additional notification. Typical decay: 1st notification ~18% open rate, 5th notification ~8%, 10th notification ~3%. This is modeled as a feature, not a hard cap, so the model can override it for truly exceptional notifications (e.g., a direct message from a recruiter).
+
+          **Trade-off**: Over-indexing on user behavior creates a **cold-start problem for new notification types**. If LinkedIn launches a new notification type (e.g., "AI-generated career insights"), the model has no behavioral data and will predict low engagement. Mitigation: default to content-relevance features for new types and use explore-exploit for the first 30 days.
+        next: mod_question
+      - label: "Content-relevance-first: notification quality + personalization"
+        answer: |
+          I would build a **content-relevance-first feature set** that deeply models the quality and relevance of each notification candidate, supplemented by user engagement patterns.
+
+          **Content relevance features (~40 features):**
+          - **Notification type and sub-type**: Not just "connection_post" but "connection_post_article" vs "connection_post_photo" vs "connection_post_milestone". Sub-types have dramatically different open rates (milestone: 25%, generic post: 4%).
+          - **Trigger entity relevance**: For social notifications, model the **relationship strength** between user and trigger entity using:
+            - Connection degree (1st, 2nd, group member, followed)
+            - Interaction recency: Days since last interaction (message, like, comment, profile view)
+            - Interaction frequency: Total interactions in last 90 days
+            - Professional overlap: Shared industry, company, skills, school
+          - **Content quality signals**: For content-based notifications (posts, articles, jobs):
+            - Content engagement rate (likes/impressions, comments/impressions) from other users
+            - Content freshness (hours since published)
+            - Content relevance to user's interests (cosine similarity of content embedding to user interest embedding)
+            - For jobs: match score from the job recommender (salary fit, skill overlap, location match)
+          - **Urgency and timeliness**: Is this time-sensitive? Direct messages, event reminders, and job application deadlines are urgent. "Weekly digest" is not. Encode urgency as a feature (1-5 scale).
+          - **Notification content quality**: Length of notification text, presence of personalization tokens (e.g., "John viewed your profile" vs "Someone viewed your profile"), presence of actionable CTA.
+
+          **User engagement features (~15 features):**
+          - Overall notification open rate (7-day rolling average)
+          - Hours since last app open (is user "due" for a notification?)
+          - Preferred notification times (learned from historical open patterns)
+          - Total notifications sent today (for fatigue adjustment)
+
+          **Why content-relevance-first?** The quality of the notification **is the product**. A user who receives 5 highly relevant notifications per day is happier than one who receives 15 marginally relevant ones. By deeply modeling content relevance, we can be **more selective** -- sending fewer, higher-quality notifications that each provide genuine value. Meta's notification team found that improving notification relevance scoring by 10% (as measured by downstream action rate) allowed them to **reduce volume by 25%** while maintaining the same notification-attributed DAU.
+
+          **Trade-off**: Content relevance features require **deep integration with multiple ML systems** (job recommender, feed ranker, connection strength model). Each dependency adds latency and failure modes to the notification pipeline. If the job recommender is down, we cannot score job notification relevance. Also, content relevance alone does not capture user-level notification fatigue -- a relevant notification sent at the wrong time or as the 20th notification of the day will still be ignored.
+        next: mod_question
+
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Model Architecture"
+    speaker: interviewer
+    content: |
+      What model architecture would you use for the notification ranking system? Remember, this is not just a "score each notification" problem -- we need to decide the **set of notifications to send**, their **timing**, and their **channel**, which is a more complex optimization than standard ranking.
+    dialogue:
+      - speaker: interviewer
+        text: "This is not standard ranking -- we need to decide the set, timing, and channel for notifications. What architecture would you use?"
+      - speaker: candidate
+        text: "The two main paradigms are a point-wise scoring model with a separate volume controller, or a contextual bandit that jointly optimizes what, when, and how many to send."
+      - speaker: interviewer
+        text: "The volume control problem is key. Sending the top-K by score is too simplistic because notifications cannibalize each other."
+    choices:
+      - label: "Point-wise scorer + learned volume controller"
+        answer: |
+          I would use a **two-component architecture**: a point-wise scoring model that predicts per-notification value, and a learned volume controller that decides how many to send per user.
+
+          **Component 1 -- Point-wise scorer (GBDT + neural hybrid):**
+          - **Primary model**: LightGBM gradient-boosted trees predicting P(open) and P(action | open) for each notification candidate
+          - **Why GBDT?** Notification features are predominantly tabular (engagement rates, time features, counts, categorical notification types). GBDTs handle tabular data exceptionally well, are fast to train and serve, and provide interpretable feature importances -- critical for debugging notification quality issues.
+          - **Neural supplement**: A 2-layer MLP head that takes the GBDT's leaf indices as input (GBDT as feature extractor) plus dense embeddings (user embedding, content embedding). This captures embedding-based signals the GBDT cannot use directly.
+          - **Output**: Value score = P(open) * P(action | open) * (1 - P(mute)) * urgency_weight
+
+          **Component 2 -- Learned volume controller:**
+          - A **per-user volume model** that predicts the optimal number of notifications to send today based on:
+            - User's historical engagement level (open rate, mute history)
+            - Notifications already sent today (fatigue state)
+            - Quality distribution of today's candidates (if all are high quality, send more; if mediocre, send fewer)
+            - Day of week and time context
+          - Trained on a **causal objective**: maximizing 7-day notification-attributed DAU. Uses data from randomized volume experiments where different users received different notification budgets.
+          - Output: N_optimal for this user today (typically 3-15)
+
+          **Sending flow:**
+          1. Every 2 hours, score all pending notification candidates for each user
+          2. Volume controller determines user's remaining budget for the day
+          3. Rank candidates by value score, send top-N up to budget
+          4. Time-optimize: for each selected notification, predict optimal send time using the user's hourly engagement pattern
+
+          **Why this approach?** The two-component design separates **relevance scoring** (which notification is best?) from **volume optimization** (how many should we send?). These are fundamentally different problems. The scorer optimizes per-notification quality; the volume controller optimizes the per-user notification experience over time.
+
+          **Trade-off**: The point-wise scorer does not model **interactions between notifications**. Sending two notifications about the same topic in an hour is worse than the scorer predicts (because it treats them independently). Mitigation: add a **diversity filter** that suppresses notifications from the same type/topic within a 4-hour window.
+        next: train_strategy
+      - label: "Contextual bandit with per-user policy"
+        answer: |
+          I would use a **contextual bandit framework** that jointly optimizes the notification selection, volume, and timing as a single policy.
+
+          **Formulation:**
+          - **Context**: User features (engagement history, fatigue state, time of day), candidate notification set (types, relevance scores, urgency)
+          - **Actions**: For each notification candidate, the action space is: {send_now_push, send_now_email, send_later_push, send_later_email, send_in_app, suppress}
+          - **Reward**: Weighted combination of immediate reward (open, action) and long-term reward (7-day DAU contribution, -penalty for mute/uninstall)
+          - **Policy**: A neural network that maps (context, notification) -> action distribution
+
+          **Architecture:**
+          - **State encoder** (3-layer Transformer): Encodes the user's recent notification history (last 50 notifications sent, with outcomes) as a sequence. This captures **temporal dynamics**: "user opened the last 3 but ignored the previous 10 -- they might be re-engaging" vs "user has been ignoring everything for a week."
+          - **Candidate encoder** (2-layer MLP): Encodes each notification candidate's features into a 64-dim representation.
+          - **Policy head**: Cross-attention between user state and each candidate, followed by a softmax over the action space. This produces P(action | user_state, notification) for each candidate.
+          - **Value head**: Predicts expected long-term reward for the selected action set. Used for training but not serving.
+
+          **Training:**
+          - **Off-policy learning**: Train on logged notification data using Inverse Propensity Scoring (IPS) or Doubly Robust estimators. This is critical because we can only observe outcomes for notifications we actually sent.
+          - **Exploration**: Thompson Sampling over the policy's output distribution. During serving, sample from the action distribution rather than always taking the argmax. This provides exploration of new notification strategies.
+          - **Long-term reward shaping**: Use a **temporal difference (TD) approach** where the reward for today's notification decisions includes a discounted estimate of tomorrow's user engagement. This prevents the policy from over-sending today at the expense of tomorrow's fatigue.
+
+          **Why contextual bandit?** The notification problem is inherently **sequential and interactive**. Today's notifications affect tomorrow's user behavior (fatigue, expectations). A bandit framework models this temporal dependency, while a point-wise scorer treats each decision independently. LinkedIn's notification team reported that their bandit-based system outperformed point-wise scoring by **+5% notification-attributed DAU** after 3 months, because it learned to pace notifications optimally throughout the day.
+
+          **Trade-off**: Bandit approaches are **significantly harder to build, debug, and trust**. Off-policy evaluation is noisy. The policy can be sensitive to reward function design -- a small change in lambda (the mute penalty) can dramatically change notification volume. It also requires significant exploration, which means some users receive sub-optimal notifications during learning. The Transformer state encoder adds serving latency (~20ms) compared to a simple GBDT (~2ms). For most teams, the point-wise scorer + volume controller is the pragmatic first step, with bandits as a later optimization.
+        next: train_strategy
+
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: interviewer
+    content: |
+      Let's discuss the training pipeline for the notification ranking system.
+
+      **Training data construction:**
+      - Window: Last **14 days** of notification data (notifications have weekly patterns -- weekday vs weekend, work hours vs evenings)
+      - Volume: ~2 billion sent notifications per 14-day window, plus ~15 billion suppressed candidates (for counterfactual learning)
+      - **Positive labels**: Opened within 24h (push/in-app) or 72h (email), action taken within 1h of open
+      - **Negative labels**: Not opened (weak negative), dismissed within 3s (moderate negative), muted (strong negative)
+      - **Label delay handling**: For the point-wise model, wait 24h before finalizing labels. For the volume controller's long-term objective, use a 7-day delayed reward with bootstrapped estimates for recent data.
+
+      **Training specifics:**
+      - **GBDT scorer**: LightGBM with 500 trees, max depth 8, learning rate 0.05. Trained on CPU cluster in ~1 hour.
+      - **Neural supplement**: 3M parameters, trained on 4 GPUs in ~3 hours.
+      - **Volume controller**: Trained weekly (needs longer data for causal estimation). Uses randomized experiment data from 1-2% holdout groups.
+      - **Bandit policy** (if used): Trained daily via off-policy learning. Requires careful logging of the selection policy (propensity scores) for IPS estimation.
+
+      **Key training challenges:**
+      - **Selection bias**: We only observe outcomes for notifications we sent. The model can develop blind spots for notification types it historically suppressed. Counterfactual correction is essential -- use IPS weights with clipping (max weight = 10) to control variance.
+      - **Class imbalance**: Open rate is ~10-15% for push, ~3% for email. Use focal loss or aggressive negative downsampling with calibration adjustment.
+      - **Feature leakage**: Do not include "number of notifications sent today" as a feature at training time if the training data comes from a system that already used this feature for volume control (circular dependency). Instead, use the **raw candidate count** and **time since last notification**.
+      - **Notification type cold-start**: New notification types have zero training data. Bootstrap by mapping to the most similar existing type and applying a conservative prior (assume 50th percentile engagement until we have 10K examples).
+
+      **Retraining cadence**: GBDT model retrained daily. Volume controller retrained weekly. Bandit policy updated daily.
+
+      Let's discuss deployment.
+    dialogue:
+      - speaker: interviewer
+        text: "Training uses 14 days of data to capture weekly patterns. The GBDT trains in about 1 hour on CPU, retrained daily."
+      - speaker: candidate
+        text: "Selection bias seems like the biggest challenge -- we only see outcomes for notifications we sent."
+      - speaker: interviewer
+        text: "Exactly. Use IPS weights with clipping for counterfactual correction. Also watch for feature leakage with volume-related features."
+      - speaker: candidate
+        text: "The notification type cold-start is interesting too -- new notification types need a bootstrap strategy."
+      - speaker: interviewer
+        text: "Map to the most similar existing type with a conservative prior. Let's discuss deployment."
+    next: deploy_question
+
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Deployment Architecture"
+    speaker: interviewer
+    content: |
+      How would you deploy the notification ranking system? A unique challenge is that notifications are **not on-demand** -- we proactively send them, so we control the timing and pacing entirely.
+    dialogue:
+      - speaker: interviewer
+        text: "Unlike recommendation, notifications are proactive -- we control when and how fast to send. How does this affect deployment?"
+      - speaker: candidate
+        text: "It means we can batch scoring and optimize send timing, but we also need to handle real-time triggers like direct messages."
+      - speaker: interviewer
+        text: "Exactly. Some notifications need real-time sending, others can be optimized for the best time. Walk me through your architecture."
+    choices:
+      - label: "Batch scoring + send-time optimization"
+        answer: |
+          I would use a **batch scoring architecture** with a send-time optimization layer that determines the ideal moment to deliver each notification.
+
+          **Architecture:**
+          - **Candidate collection** (continuous): As notification triggers occur (profile views, new posts, job matches), they are queued in a **per-user candidate buffer** (Redis, with TTL = 24 hours for non-urgent, 1 hour for urgent).
+          - **Batch scoring** (every 2 hours): A batch job scores all pending candidates for each user:
+            1. Score each candidate using the GBDT + neural model
+            2. Apply volume controller to determine user's budget for the next 2-hour window
+            3. Select top-N candidates within budget
+            4. Apply diversity filter (no duplicate types within 4 hours)
+            5. For each selected notification, predict **optimal send time** within the 2-hour window using the user's hourly engagement model
+          - **Send scheduler**: A queue-based scheduler dispatches notifications at their predicted optimal times. Handles channel routing (push vs email vs in-app) based on the model's channel prediction.
+          - **Real-time override**: Direct messages, event reminders, and security alerts bypass the batch system and are sent immediately via a fast-path pipeline (~5s latency).
+
+          **Send-time optimization model:**
+          - A lightweight model that predicts P(open | hour_of_day, user_pattern) for each user
+          - Trained on historical open-time data: for each user, build a 24-bin histogram of notification opens by hour
+          - At serving time, predict the best send hour within the next 2-hour window
+          - Reduces notification volume by 0% (same count) but improves open rate by **15-25%** through better timing
+
+          **Infrastructure:**
+          - Batch scoring: Spark job running on 200 CPU instances, processes 900M users in ~90 minutes
+          - Send scheduler: 50 instances running a priority queue, handling ~50K sends per second at peak
+          - Feature store: Redis cluster with user features, candidate features, and fatigue state
+
+          **Why batch?** Notifications are **not latency-sensitive** (unlike search or feed ranking). A 2-hour batching delay is imperceptible to users and enables much more efficient infrastructure. Batch processing also enables **global optimization** -- the volume controller can see ALL candidates for a user before deciding which to send, rather than making myopic per-trigger decisions.
+
+          **Trade-off**: 2-hour batching means some notifications are stale by the time they are sent. If a connection posts at 10:01am and the batch runs at 10:00am, the notification is not sent until 12:00pm -- by which time 50 other people have already commented and the notification feels less relevant. For time-sensitive content, this matters. Also, the batch architecture is more complex to operate (cron jobs, backfill, failure recovery) than a simple real-time system.
+        next: mon_setup
+      - label: "Event-driven real-time scoring + throttling"
+        answer: |
+          I would use an **event-driven architecture** where each notification trigger is scored in real-time, with a per-user throttling layer that controls volume.
+
+          **Architecture:**
+          - **Event ingestion**: Every notification trigger (profile view, post, message, job match) is published to a Kafka topic as an event.
+          - **Scoring service** (stateless, real-time): A microservice that receives each event, assembles features, runs the model, and produces a score + channel recommendation. Latency target: <50ms per notification candidate.
+          - **Throttling layer** (stateful, per-user): A Redis-backed service that maintains per-user state:
+            - Notifications sent today (count and timestamps)
+            - Current fatigue estimate (decaying counter)
+            - Remaining daily budget from volume controller
+            - Last notification timestamp
+            - The throttler gates each scored notification: if score > user's current threshold AND budget remaining AND minimum interval passed (15 min between notifications), approve send. Otherwise, queue for later evaluation.
+          - **Channel router**: Based on the model's channel prediction and user preferences, routes to push, email, in-app, or a combination.
+          - **Delayed queue**: Notifications that pass scoring but fail throttling are re-evaluated at the next scoring window. If still relevant and user has budget, send then.
+
+          **Advantages of real-time:**
+          - **Freshness**: Notifications are scored and potentially sent within seconds of the trigger event. "John just viewed your profile" is much more engaging when sent immediately vs 2 hours later.
+          - **Responsiveness**: The system adapts instantly to user behavior. If a user opens 3 notifications in a row, the throttler can increase their budget in real-time. If they mute, the throttler immediately reduces future sends.
+          - **Simpler mental model**: Each notification is scored independently, making the system easier to debug and understand.
+
+          **Scaling:**
+          - Scoring service: 500 CPU instances, each handling ~2K events/second = 1M events/second total capacity
+          - Throttling layer: Redis Cluster with 50 shards, handling 500K reads+writes/second
+          - Cost: ~$300K/month for scoring infrastructure
+
+          **Trade-off**: Real-time scoring is **locally optimal but globally sub-optimal**. When scoring a notification at 9am, the system does not know what candidates will arrive at 2pm. It might send a mediocre notification now, consuming the user's budget, when a much better one was 5 hours away. The throttler partially mitigates this by reserving budget, but it cannot perfectly predict future candidate quality.
+
+          **Hybrid element**: For non-urgent notification types (weekly digest, "people you may know"), run a daily batch job that scores and queues them. Only use real-time scoring for time-sensitive triggers (messages, mentions, event changes).
+        next: mon_setup
+
+  - id: mon_setup
+    stage: monitoring
+    type: info
+    label: "Monitoring & Anti-Fatigue Guardrails"
+    speaker: interviewer
+    content: |
+      Monitoring a notification system requires vigilant tracking of user health because the cost of over-sending is permanent (uninstalls cannot be undone).
+
+      **Model health monitoring (real-time):**
+      - **Scoring model**: Track P(open) prediction distributions hourly. Alert on calibration drift (ECE >0.03). Monitor feature availability -- if the job recommender goes down, job notification scores become unreliable.
+      - **Volume controller**: Track average notifications sent per user per day, broken down by user engagement cohort. Alert if high-engagement users suddenly receive fewer notifications (model regression) or low-engagement users receive more (aggression creep).
+      - **Send-time model**: Track open rates by send hour. Alert if predicted optimal times diverge from actual optimal times.
+
+      **User health monitoring (the most critical):**
+      - **Notification mute rate**: Tracked daily by notification type. Alert if any type exceeds 3% monthly mute rate. LinkedIn's threshold for suppressing a notification type entirely is 5% monthly mute rate.
+      - **Notification permission revocation**: Track the rate of users disabling push notifications at the OS level. This is the **nuclear option** -- once disabled, we lose the push channel entirely. Alert on >0.5% monthly revocation rate.
+      - **Uninstall attribution**: Using a causal model (notification holdout vs control), estimate the % of uninstalls attributable to notification fatigue. Target: notifications should cause <1% of total uninstalls.
+      - **Engagement cannibalization**: Measure whether notification-driven sessions **replace** organic sessions (user would have opened the app anyway) or **add** new sessions. Use the holdout group to compute the **incremental session rate** -- only count sessions that would not have happened without the notification.
+
+      **Anti-fatigue guardrails (hard limits):**
+      - Maximum **8 push notifications per user per day** (hard cap, model cannot override)
+      - Maximum **3 emails per user per day**
+      - Minimum **15-minute interval** between consecutive push notifications
+      - If a user mutes 2+ notification types in a week, reduce their total volume by 50% for 30 days
+      - If a user has not opened any notifications in 14 days, reduce to **1 notification per day** (re-engagement mode)
+
+      **A/B testing framework:**
+      - Minimum experiment duration: **28 days** (notification effects compound over weeks -- short experiments underestimate long-term fatigue)
+      - **Mandatory long-term holdouts**: Every experiment retains a 5% holdout for 6 months. Notification changes that look good at 2 weeks sometimes cause retention drops at 8 weeks as fatigue accumulates.
+      - **User-level randomization**: Randomize at user level (not notification level) to measure per-user outcomes correctly.
+      - **Kill-switch metrics**: If mute rate increases >20% or notification-attributed uninstalls increase >50%, **auto-rollback** the experiment immediately.
+
+      Let's wrap up.
+    dialogue:
+      - speaker: interviewer
+        text: "Notification monitoring must be vigilant about user health. What are the most critical anti-fatigue guardrails?"
+      - speaker: candidate
+        text: "I'd enforce hard caps: max 8 push notifications per day, 15-minute minimum interval, and automatic volume reduction for users who mute multiple types."
+      - speaker: interviewer
+        text: "Good. Also crucial: track notification permission revocation at the OS level and measure incremental session rate, not just total sessions attributed to notifications."
+      - speaker: candidate
+        text: "The 28-day minimum experiment duration is important too -- short experiments miss the long-term fatigue accumulation."
+      - speaker: interviewer
+        text: "Exactly. LinkedIn found that some changes looked great at 2 weeks but caused retention drops at 8 weeks. Let's wrap up."
+    next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Design Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You have designed a comprehensive smart notification ranking system. Let's summarize.
+
+      **Architecture summary:**
+      - **Optimization**: Engagement (notification opens + downstream actions) or user satisfaction (minimize fatigue, maximize long-term value)
+      - **Metrics**: Notification-attributed DAU, P(open) AUC >0.75, notification quality score, with strict anti-fatigue guardrails
+      - **Data**: 200M candidates/hour, 50+ notification types, 14-day training window with 24-72h label delay, counterfactual holdout groups
+      - **Features**: User-behavior-first (engagement patterns + fatigue modeling) or content-relevance-first (notification quality + personalization)
+      - **Model**: Point-wise GBDT scorer + learned volume controller, or contextual bandit with per-user policy
+      - **Serving**: Batch scoring + send-time optimization, or event-driven real-time scoring + throttling
+      - **Monitoring**: User health metrics (mute rate, permission revocation, uninstall attribution), anti-fatigue hard caps, 28-day A/B tests with long-term holdouts
+
+      **Strengths of your design:**
+      - Models the asymmetric cost of notifications (bad notification > missed notification)
+      - Addresses the unique challenges: cannibalization, fatigue, timing, channel selection
+      - Includes causal measurement (holdout groups) to measure true incremental impact
+      - Anti-fatigue guardrails protect user health even if the model misbehaves
+
+      **Areas to explore further:**
+      - **Channel optimization**: How to jointly optimize across push, email, in-app, and SMS channels, considering cannibalization between channels
+      - **Notification content optimization**: A/B testing notification text, emoji use, personalization depth
+      - **Contextual awareness**: Using device sensor data (phone face-down, driving, in a meeting) to defer notifications
+      - **User preference learning**: Explicit user controls ("notify me about job postings but not post likes") combined with implicit learning
+      - **Cross-platform coordination**: Ensuring notifications on mobile, desktop, and email are coordinated, not duplicated
+
+      This design demonstrates strong understanding of the unique challenges in notification systems, particularly the asymmetric cost structure and the importance of long-term user health over short-term engagement. Well done!
+    dialogue:
+      - speaker: interviewer
+        text: "Great design! You addressed the core challenges of notifications: asymmetric cost, fatigue modeling, timing, and channel selection."
+      - speaker: candidate
+        text: "Thank you. The key insight is that notifications are the one ML system where doing less can be better than doing more."
+      - speaker: interviewer
+        text: "That's a great way to put it. Unlike content recommendation, restraint is a feature, not a bug."
+      - speaker: candidate
+        text: "I'd want to explore cross-channel optimization and contextual awareness next -- knowing the user's current activity state could dramatically improve timing."
+      - speaker: interviewer
+        text: "Those are excellent follow-up areas. Well done!"

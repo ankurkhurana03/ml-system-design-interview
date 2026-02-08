@@ -58,6 +58,24 @@ import driftMonitoringYaml from './drift-monitoring.yaml?raw';
 import distributedTrainingYaml from './distributed-training.yaml?raw';
 import evaluationStoreYaml from './evaluation-store.yaml?raw';
 
+// Recommendations & Marketplace (Wave 2)
+import tiktokForYouYaml from './tiktok-for-you.yaml?raw';
+import foodDeliveryRankingYaml from './food-delivery-ranking.yaml?raw';
+import notificationRelevanceYaml from './notification-relevance.yaml?raw';
+import rideMatchingYaml from './ride-matching.yaml?raw';
+import creditRiskYaml from './credit-risk.yaml?raw';
+import experimentationPlatformYaml from './experimentation-platform.yaml?raw';
+
+// Multimodal & Generation (Wave 2)
+import harmfulContentVisualYaml from './harmful-content-visual.yaml?raw';
+import machineTranslationYaml from './machine-translation.yaml?raw';
+import textToImageYaml from './text-to-image.yaml?raw';
+
+// NLP Understanding (Wave 2)
+import queryUnderstandingYaml from './query-understanding.yaml?raw';
+import voiceAssistantYaml from './voice-assistant.yaml?raw';
+import documentExtractionYaml from './document-extraction.yaml?raw';
+
 export interface BuiltinProblem extends Problem {
   companies?: string[];
   domains?: string[];
@@ -112,6 +130,21 @@ const yamlSources: string[] = [
   driftMonitoringYaml,
   distributedTrainingYaml,
   evaluationStoreYaml,
+  // Recommendations & Marketplace (Wave 2)
+  tiktokForYouYaml,
+  foodDeliveryRankingYaml,
+  notificationRelevanceYaml,
+  rideMatchingYaml,
+  creditRiskYaml,
+  experimentationPlatformYaml,
+  // Multimodal & Generation (Wave 2)
+  harmfulContentVisualYaml,
+  machineTranslationYaml,
+  textToImageYaml,
+  // NLP Understanding (Wave 2)
+  queryUnderstandingYaml,
+  voiceAssistantYaml,
+  documentExtractionYaml,
 ];
 
 export function loadBuiltinProblems(): BuiltinProblem[] {

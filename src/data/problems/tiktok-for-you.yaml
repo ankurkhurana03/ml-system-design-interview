@@ -1,0 +1,519 @@
+id: tiktok-for-you
+title: "TikTok For You Page"
+description: "Design the recommendation system behind TikTok's For You feed for short-form video."
+companies: ["TikTok", "Meta", "YouTube"]
+domains: ["Recommendation", "Computer Vision", "Ranking/Search"]
+root: pd_start
+
+nodes:
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we are going to design the recommendation system behind **TikTok's For You Page (FYP)** -- the core feed that has driven TikTok to over **1.5 billion monthly active users** and fundamentally changed how short-form video is consumed.
+
+      Unlike Instagram or YouTube, TikTok's FYP is **not primarily follow-based**. Over **70% of content consumed on TikTok comes from accounts the user does not follow**. The algorithm must discover and surface relevant content from a corpus of **5+ million new videos uploaded daily**, with an average video length of just 15-60 seconds.
+
+      The unique challenge here is the **speed of the content lifecycle**. A TikTok video can go viral within 2-4 hours of posting and become stale within 24-48 hours. Compare this to Netflix (weeks-long relevance) or Spotify (months). The recommendation system must react in near real-time to rapidly shifting user interests and trending content.
+
+      Current pain points: creator discoverability (new creators struggle to get initial views), content diversity (users can fall into narrow interest loops), and the tension between maximizing short-term engagement vs long-term user well-being.
+
+      Let's start by defining how we scope this problem.
+    dialogue:
+      - speaker: interviewer
+        text: "Today we're designing TikTok's For You Page recommendation system. It serves 1.5 billion MAUs, and over 70% of content comes from non-followed accounts."
+      - speaker: candidate
+        text: "That's fundamentally different from a follow-based feed. What makes this especially challenging?"
+      - speaker: interviewer
+        text: "The content lifecycle is incredibly fast -- videos go viral in 2-4 hours and become stale in 24-48 hours. Plus 5 million new videos are uploaded daily."
+      - speaker: candidate
+        text: "So we need near real-time responsiveness to both user interest shifts and content trends. What are the main issues today?"
+      - speaker: interviewer
+        text: "Creator discoverability for new creators, narrow interest loops, and the tension between engagement maximization and user well-being. Let's scope the problem."
+    next: pd_coldstart
+
+  - id: pd_coldstart
+    stage: problem_definition
+    type: question
+    label: "Cold-Start Strategy"
+    speaker: interviewer
+    content: |
+      One of the most critical decisions for TikTok's FYP is how to handle **cold-start** -- both for new users who have zero interaction history and for new videos that have never been shown to anyone.
+
+      TikTok famously hooks new users within their first session, often within 10-15 minutes. How would you approach the cold-start problem?
+    dialogue:
+      - speaker: interviewer
+        text: "TikTok hooks new users within 10-15 minutes. How would you handle cold-start for both new users and new videos?"
+      - speaker: candidate
+        text: "There are two main approaches -- we could lean heavily on content understanding to match new content with user signals, or we could use collaborative filtering with exploration."
+      - speaker: interviewer
+        text: "Walk me through the trade-offs of each."
+    choices:
+      - label: "Content-based: video understanding + user signals"
+        answer: |
+          I would use a **content-based approach** that leans heavily on understanding what the video is about before it has any engagement data.
+
+          **For new videos**, we extract rich multimodal features at upload time: visual features from a pre-trained video encoder (e.g., VideoMAE or InternVideo), audio features (music recognition, speech-to-text via Whisper), text features from captions and hashtags, and even OCR from on-screen text. These features go into a **content embedding** that places the video in a semantic space.
+
+          **For new users**, we start with a **popularity-biased diverse slate** -- the top trending videos across 8-10 interest categories (comedy, dance, cooking, pets, sports, etc.). Within 5-7 swipes, the user's early engagement signals (watch completion, replays, likes) give us enough signal to build a rough interest profile using the **content embeddings of engaged videos**.
+
+          **Why content-based for cold-start?** TikTok's own research (published at CIKM 2022) showed that content understanding features are the single most predictive signal for new content. A 30-second video contains enormous information -- visual style, music genre, topic, energy level -- that maps to user preferences even without collaborative data.
+
+          **Trade-off**: Content-based matching can miss serendipitous discoveries. If a video is about "cooking" but the creator's comedic style is what makes it special, content features may not capture that nuance. Also, multimodal feature extraction at scale (5M videos/day) requires significant GPU infrastructure -- TikTok reportedly uses **thousands of GPUs** just for content understanding.
+        next: met_engagement_q
+      - label: "Collaborative filtering with explore/exploit"
+        answer: |
+          I would use a **collaborative filtering approach with systematic exploration** to handle cold-start.
+
+          **For new videos**, instead of trying to understand the content, we use an **explore/exploit framework**. Every new video gets a **guaranteed initial exposure** to a small, diverse sample of users (e.g., 300-500 users matching the creator's audience demographics). Based on these initial reactions (watch completion rate, like rate), we quickly estimate the video's appeal profile using a **multi-armed bandit** (e.g., Thompson Sampling).
+
+          **For new users**, we use **contextual bandits** that leverage device signals (language, country, time of day, device type) and registration flow data (age, selected interests if any) to bootstrap a user profile. The system explores broadly in the first 20-30 videos, then rapidly narrows based on engagement patterns. TikTok's reported "interest lock-in" within 10 minutes is achieved through aggressive exploitation after the initial exploration phase.
+
+          **Why collaborative filtering?** It captures the **wisdom of the crowd**. Two users with similar engagement patterns will enjoy similar content, even if the content itself is hard to describe. This is especially powerful for meme culture and trending sounds, where the appeal is social/viral rather than content-inherent.
+
+          **Trade-off**: Requires a minimum number of impressions before the system has signal, creating a "cold-start within cold-start" problem. New videos must be shown to enough users before collaborative signals emerge, which means some users see content that is not optimized for them. TikTok mitigates this by using creator track record as a prior -- if a creator's last 10 videos averaged 85% completion, the new video starts with a strong prior.
+        next: met_engagement_q
+
+  - id: met_engagement_q
+    stage: metrics
+    type: question
+    label: "Engagement Metric"
+    speaker: interviewer
+    content: |
+      Now let's define what we are optimizing for. TikTok's core interaction is the **full-screen, auto-playing swipe feed**. Users swipe up to skip, or watch/rewatch. What should the primary engagement metric be?
+    dialogue:
+      - speaker: interviewer
+        text: "The core interaction is the full-screen swipe feed. What should we optimize as the primary engagement metric?"
+      - speaker: candidate
+        text: "The two main candidates are watch time and completion rate, but they have very different implications."
+      - speaker: interviewer
+        text: "Exactly. Walk me through your recommendation."
+    choices:
+      - label: "Watch time (total seconds consumed)"
+        answer: |
+          I would optimize for **total watch time** as the primary metric, with important guardrails.
+
+          **Why watch time?** It is the most direct measure of value delivered. If a user watches a 30-second video for 25 seconds, that is more signal than a binary "liked" or "completed." Watch time naturally handles variable-length content -- a 60-second video watched for 45 seconds contributes more than a 15-second video watched fully. At TikTok's scale, total watch time directly correlates with ad revenue (**estimated $20B+ annually**) since more time in feed means more ad impressions.
+
+          **Specific formulation**: `Score = E[watch_time] + w1*P(like) + w2*P(share) + w3*P(follow) + w4*P(comment)`. Watch time dominates, with secondary engagement signals adding 10-20% weight.
+
+          **Guardrails**: Raw watch time optimization can create a "rabbit hole" effect where users binge for hours and later regret it. TikTok's own screen time management features suggest they are aware of this. Guardrails include: session length caps in the value model (diminishing returns after 45 minutes), diversity constraints (no more than 3 consecutive videos from the same topic), and monitoring the "regret ratio" (users who uninstall or reduce usage after long sessions).
+
+          **Trade-off**: Watch time favors longer videos and can incentivize creators to pad content. TikTok's shift from 15s to 60s to 3-minute to 10-minute max length shows this tension. It can also favor low-effort content that is passively consumed (e.g., satisfying ASMR loops) over high-effort content that drives shares and follows.
+        next: met_metrics_detail
+      - label: "Diverse engagement (completion + shares + follows)"
+        answer: |
+          I would optimize for a **diverse engagement composite** that weights multiple signals, not just time spent.
+
+          **Why diverse engagement?** Optimizing purely for watch time leads to a feed full of passively-consumed, "snackable" content -- satisfying loops, rage-bait, and cliffhangers that keep you watching but provide little lasting value. TikTok's competitive moat is **creator ecosystem health**: if creators who make genuinely good content get rewarded, they keep creating on TikTok instead of moving to YouTube Shorts or Instagram Reels.
+
+          **Proposed value model**:
+          ```
+          Score = w1*completion_rate + w2*P(share) + w3*P(follow) + w4*P(like) + w5*P(comment)
+          ```
+          Where `w2 (share)` and `w3 (follow)` are weighted **5-8x higher** than likes. Shares indicate the user found it valuable enough to send to someone. Follows indicate the user wants to see more from this creator -- this is the ultimate signal of content quality.
+
+          **Completion rate over raw watch time**: A 15-second video watched fully (100% completion) should score higher than a 60-second video watched for 40 seconds (67% completion). Completion rate normalizes for video length, preventing the system from systematically favoring longer content.
+
+          **Creator-side metrics**: Track creator retention (do creators who get Explore impressions keep posting?) and diversity of creator impressions (Gini coefficient across creators). A healthy ecosystem has a **long tail** of creators receiving meaningful distribution, not a winner-take-all dynamic.
+
+          **Trade-off**: Completion rate can be gamed by making very short videos (a 3-second video is easy to "complete"). Mitigation: apply a minimum length threshold (e.g., only count completion for videos >8 seconds) and weight completion by video duration.
+        next: met_metrics_detail
+
+  - id: met_metrics_detail
+    stage: metrics
+    type: info
+    label: "Metrics Framework"
+    speaker: interviewer
+    content: |
+      Let's formalize the full metrics framework.
+
+      **Online metrics (A/B testing):**
+      - **Primary**: Your chosen value model score (watch time or composite engagement)
+      - **Topline KPIs**: Daily active users (DAU), time spent per session, sessions per day
+      - **Guardrails**: 7-day retention (must not decrease), "Not Interested" rate, report rate, creator posting frequency (creator health)
+      - **Diversity metrics**: Unique creators shown per session, topic entropy of recommended content, new creator impression share
+
+      **Offline metrics (model evaluation):**
+      - **AUC-ROC per task**: Target >0.82 for watch completion, >0.78 for likes, >0.72 for shares (harder to predict)
+      - **NDCG@10**: Ranking quality in the top-10 positions (most impactful)
+      - **Calibration**: Expected Calibration Error (ECE) <0.015 for the primary engagement prediction
+      - **Freshness-aware evaluation**: Separately evaluate model performance on videos <6 hours old vs >24 hours old
+
+      **Critical consideration -- feedback loops**: The FYP creates one of the strongest feedback loops in ML. Users can only engage with what we show them, so the model reinforces its own biases. To combat this, TikTok uses **counterfactual evaluation** with logged bandit data and reserves **5-10% of feed slots for exploration** (random or epsilon-greedy sampling).
+
+      Now let's talk about the data pipeline.
+    dialogue:
+      - speaker: interviewer
+        text: "Let's formalize the metrics. For offline evaluation, what AUC targets would you set?"
+      - speaker: candidate
+        text: "I'd target above 0.82 for watch completion, 0.78 for likes, and 0.72 for shares since sharing is the hardest signal to predict."
+      - speaker: interviewer
+        text: "Good. We also need freshness-aware evaluation since Explore content has a very short lifecycle. And feedback loops are critical to address."
+      - speaker: candidate
+        text: "Right -- we should reserve 5-10% of slots for exploration and use counterfactual evaluation on logged bandit data."
+      - speaker: interviewer
+        text: "Exactly. Now let's discuss the data pipeline."
+    next: data_pipeline
+
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      TikTok's data pipeline is one of the most demanding in the industry. Let's break it down.
+
+      **Scale**: TikTok generates roughly **50 billion video impressions per day** globally. Each impression logs: user ID, video ID, watch duration (millisecond precision), engagement actions, device context (screen size, network quality), session context, and the timestamp. That is approximately **5-10 TB of engagement data per day** after compression.
+
+      **Key data sources**:
+      - **Video content signals**: Pre-extracted at upload time by a dedicated ML pipeline. Includes visual embeddings (from a ViT-L model), audio embeddings (music fingerprint + speech transcription via Whisper), text embeddings (caption, hashtags, OCR), and a **content safety score** from the integrity classifier.
+      - **User behavior sequences**: The last 200 videos each user interacted with, including watch duration, replay count, and engagement type. Stored in a real-time user profile service.
+      - **Social graph**: Following relationships, creator-viewer interaction history, and friend-of-friend co-engagement patterns.
+      - **Contextual signals**: Time of day, day of week, user location (country-level), device type, network quality.
+
+      **Data freshness requirements**: Because video lifecycles are so short, training data freshness is critical. TikTok reportedly uses a **streaming data pipeline** (Apache Flink) that makes new engagement data available for model training within **15-30 minutes** of the event. This enables near-real-time model updates via online learning.
+
+      **Label construction**: For each impression, we construct labels for: binary completion (watched >80% of video), like, share, follow, comment, and raw watch fraction (continuous 0-1). Negative labels come from "swipe-away" events (user swiped within the first 2 seconds).
+
+      Now, the critical feature engineering question.
+    dialogue:
+      - speaker: interviewer
+        text: "TikTok generates about 50 billion video impressions per day. The data pipeline uses streaming processing with 15-30 minute freshness via Apache Flink."
+      - speaker: candidate
+        text: "What are the main categories of features we'd extract?"
+      - speaker: interviewer
+        text: "Video content signals from multimodal embeddings, user behavior sequences of the last 200 interactions, social graph signals, and contextual signals like time and device."
+      - speaker: candidate
+        text: "The streaming pipeline for near-real-time updates is essential given the short video lifecycle. How are labels constructed?"
+      - speaker: interviewer
+        text: "Binary completion at 80% threshold, individual engagement actions, and raw watch fraction. Swipe-aways within 2 seconds are explicit negatives. Now let's discuss features."
+    next: feat_question
+
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Strategy"
+    speaker: interviewer
+    content: |
+      What feature engineering strategy would you use for the FYP ranking model? The core tension is between leveraging the rich multimodal content of each video versus relying on behavioral collaborative signals.
+    dialogue:
+      - speaker: interviewer
+        text: "What feature strategy would you use? The tension is between multimodal content understanding and behavioral collaborative signals."
+      - speaker: candidate
+        text: "This is a fundamental trade-off. Deep multimodal features capture what the video is, while collaborative features capture how people react to it."
+      - speaker: interviewer
+        text: "Exactly. And remember, TikTok's edge is supposed to be content understanding. How would you approach it?"
+    choices:
+      - label: "Multimodal-first: video, audio, and text embeddings"
+        answer: |
+          I would adopt a **multimodal-first approach** where the video content itself is the primary signal, supplemented by behavioral features.
+
+          **Multimodal feature pipeline:**
+          - **Visual**: Extract frame-level features using a pre-trained ViT-L/14 or VideoMAE model. Sample 8-16 frames uniformly, encode each, then aggregate via temporal attention pooling into a 768-dim video embedding. This captures visual style, scene content, and editing pace.
+          - **Audio**: Use a Whisper-large model for speech-to-text, then encode the transcript with a multilingual sentence transformer. Separately, extract audio features (music genre, tempo, energy) using a music information retrieval model like MERT. Concatenate into a 512-dim audio embedding.
+          - **Text**: Encode captions and hashtags with a multilingual BERT model. Apply TF-IDF weighting to hashtags to capture trending vs evergreen topics. 256-dim text embedding.
+          - **Fused content embedding**: A 3-layer cross-attention fusion network combines visual, audio, and text embeddings into a **unified 512-dim content embedding**. This captures cross-modal relationships (e.g., funny audio + serious visual = irony/comedy).
+
+          **Behavioral supplements** (not primary, but important):
+          - Video engagement velocity: likes/impressions in the first 2 hours
+          - Creator track record: average completion rate of last 20 videos
+          - User-topic affinity: computed from content embeddings of user's engagement history
+
+          **Why multimodal-first?** TikTok's key differentiator is surfacing content from unknown creators. Without follow-based signals, the content itself must carry the recommendation. ByteDance's published research confirms that multimodal features contribute **40-50% of ranking model quality** on FYP. The remaining 50-60% comes from collaborative signals, but those are unavailable for new content.
+
+          **Trade-off**: Multimodal feature extraction requires **2,000-5,000 GPUs** running continuously for the 5M daily uploads. Latency: ~2-5 seconds per video for full multimodal extraction. Also, content embeddings can miss cultural context and trends that are only visible through behavioral data.
+        next: mod_question
+      - label: "Behavioral-first: engagement history + collaborative signals"
+        answer: |
+          I would prioritize **behavioral and collaborative features**, with content features as a supplement for cold-start scenarios.
+
+          **Core behavioral features:**
+          - **User engagement sequence**: The last 200 videos the user engaged with, encoded as a sequence of (content_embedding, watch_fraction, engagement_type, recency) tuples. This is the richest signal of user intent.
+          - **User-cluster affinity**: Map users to 1,000 behavioral clusters using k-means on engagement vectors. For each cluster, compute affinity scores to content topics. This enables collaborative filtering: "users like you watched these videos."
+          - **Video engagement statistics**: For each candidate video, compute: completion rate (smoothed with Bayesian prior), like rate, share-to-impression ratio, replay rate, and **engagement velocity** (how engagement is trending hour-over-hour). These are the strongest predictors for non-cold-start content.
+          - **Creator-viewer interaction features**: Has this user seen this creator before? What was their average watch fraction? Did they follow after previous exposure?
+
+          **Real-time session features:**
+          - Videos watched in current session (count, topic distribution, average watch fraction)
+          - Time since session start (user fatigue signal)
+          - Last 5 engagement actions (captures immediate intent shifts)
+
+          **Content features for cold-start only:**
+          - Use pre-computed content embeddings (CLIP-style) as a fallback when behavioral data is unavailable
+          - Once a video has 500+ impressions, behavioral features dominate and content features are downweighted
+
+          **Why behavioral-first?** At ByteDance's scale, collaborative signals are **incredibly powerful**. With 1.5 billion users, even niche interests have millions of users with similar tastes. Behavioral features also capture the cultural and trend dimensions that content understanding misses -- a trending sound or meme format is best identified by how people react to it, not by what it looks like.
+
+          **Trade-off**: Behavioral features create a **rich-get-richer** dynamic. Videos with early engagement get better features, which leads to more impressions, which leads to better features. New content without behavioral signal is at a systematic disadvantage. Mitigation: the guaranteed exploration budget (5-10% of impressions) ensures new content gets initial exposure.
+        next: mod_question
+
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Model Architecture"
+    speaker: interviewer
+    content: |
+      Now the core modeling question. What architecture would you use for TikTok's FYP ranking model? Remember, we need to score thousands of candidate videos per request within tight latency constraints (~100ms total pipeline, ~30ms for the ranker).
+    dialogue:
+      - speaker: interviewer
+        text: "What model architecture for the FYP ranker? We need to score thousands of candidates within about 30ms."
+      - speaker: candidate
+        text: "The main options are a multi-task learning approach with shared representations, or a two-tower architecture for efficiency."
+      - speaker: interviewer
+        text: "Consider that TikTok reportedly uses a multi-stage funnel. How does that affect your choice?"
+    choices:
+      - label: "Multi-task deep model (MMoE / PLE)"
+        answer: |
+          I would use **PLE (Progressive Layered Extraction)** -- a multi-task architecture that ByteDance themselves published at RecSys 2020 specifically for TikTok's recommendation system.
+
+          **Architecture:**
+          - **Input layer**: Concatenation of user features, video features, context features, and cross features. Total input dimension: ~2,000 after embedding lookups.
+          - **Extraction network** (3 PLE layers): Each layer has **task-specific expert networks** (2 per task, each a 2-layer MLP with 256 units) and **shared expert networks** (4 shared experts). A gating network for each task learns which combination of shared and task-specific experts to use. This prevents the **seesaw phenomenon** where improving one task hurts another.
+          - **Task towers**: Separate prediction towers for P(complete), P(like), P(share), P(follow), P(comment), E[watch_fraction]. Each tower is a 2-layer MLP (128-64-1).
+
+          **Why PLE over simpler multi-task (e.g., shared-bottom, MMoE)?** ByteDance's own ablation shows PLE outperforms MMoE by **+1.8% on completion prediction** and **+3.1% on like prediction** on TikTok data. The task-specific experts prevent negative transfer between loosely related tasks (e.g., completion vs follow have different feature importances).
+
+          **Scale**: ~10M parameters total. With ONNX optimization and FP16 inference, scoring 500 candidates takes ~15ms on a T4 GPU. Well within the 30ms budget.
+
+          **Training**: Multi-task loss with **task-specific uncertainty weighting** (learned sigma per task). Trained on 2 days of data (~100B impressions sampled down to ~5B training examples). Retrained every 6 hours with warm-start.
+
+          **Trade-off**: PLE is more complex to implement and tune than simpler architectures. The gating networks add ~20% parameters and training time. But at TikTok's scale, even 0.1% improvement in completion rate translates to **millions of additional hours of watch time per day**.
+        next: train_realtime
+      - label: "Two-tower with cross-attention re-ranking"
+        answer: |
+          I would use a **two-tower architecture** for the main ranking stage, with a lightweight **cross-attention re-ranker** for the final top-K selection.
+
+          **Two-tower model:**
+          - **User tower**: Processes user features (profile, behavioral sequence, session context) through a 4-layer Transformer encoder that models the user's engagement sequence. Outputs a 256-dim user embedding. Key innovation: the Transformer captures **temporal interest evolution** within and across sessions.
+          - **Video tower**: Processes video features (content embedding, engagement stats, creator features, freshness) through a 3-layer MLP. Outputs a 256-dim video embedding. Pre-computed for all active videos and indexed in a vector database.
+          - **Scoring**: Cosine similarity between user and video embeddings. This is a **maximum inner product search (MIPS)** problem, solvable in <5ms for 10K candidates using FAISS or ScaNN.
+
+          **Cross-attention re-ranker (top 200 -> top 50):**
+          - Takes the top 200 candidates from the two-tower, along with the full user representation
+          - A 2-layer cross-attention network models fine-grained user-video interactions that inner product cannot capture
+          - Produces refined scores for P(complete), P(like), P(share), P(follow)
+          - Latency: ~10ms for 200 candidates on GPU
+
+          **Why two-tower + re-ranker?** The two-tower enables **extreme serving efficiency** -- video embeddings are pre-computed, and user embedding computation is amortized across all candidates. This is critical at TikTok's scale (1M+ QPS globally). The re-ranker adds back the interaction modeling that two-tower sacrifices, but only for the most promising candidates.
+
+          **Trade-off**: The two-tower's inner product scoring is a **bottleneck approximation**. It cannot model complex user-video interactions like "this user likes cooking videos BUT only from Asian cuisine creators." The re-ranker partially addresses this, but the two-stage approach means the first stage might filter out good candidates that the re-ranker would have scored highly. ByteDance's research suggests this "recall gap" costs ~2-3% engagement compared to a full cross-feature model like PLE.
+        next: train_realtime
+
+  - id: train_realtime
+    stage: training
+    type: question
+    label: "Training Pipeline"
+    speaker: interviewer
+    content: |
+      Given TikTok's rapid content lifecycle, the training pipeline is critical. How would you approach model training and updates?
+    dialogue:
+      - speaker: interviewer
+        text: "TikTok videos go viral in hours. How would you design the training pipeline to keep the model fresh?"
+      - speaker: candidate
+        text: "The two main paradigms are batch retraining on a schedule versus online/streaming learning with continuous updates."
+      - speaker: interviewer
+        text: "This is one of the most impactful infrastructure decisions. Walk me through your choice."
+    choices:
+      - label: "Real-time online learning (streaming updates)"
+        answer: |
+          I would implement **real-time online learning** where the model is continuously updated with streaming engagement data.
+
+          **Architecture**: Use a streaming ML framework (like ByteDance's internal Monolith system, or open-source alternatives like River/Vowpal Wabbit at scale). The model receives mini-batches of new engagement data every **5-15 minutes** and performs gradient updates on the fresh data.
+
+          **How it works:**
+          1. User watches a video -> engagement event logged to Kafka within seconds
+          2. Flink streaming job joins engagement events with features, creates training examples within **15-30 minutes**
+          3. Mini-batch of ~1M examples sent to the training service
+          4. Model performs SGD update with small learning rate (1e-5 to 1e-6) to avoid catastrophic forgetting
+          5. Updated model weights pushed to serving fleet via a **shadow deployment** -- verified on a canary set before full rollout
+
+          **Why online learning?** TikTok's content is **maximally non-stationary**. A trending sound can go from zero to 100M views in 4 hours. Batch retraining (even daily) cannot capture this. ByteDance published their Monolith system at KDD 2022, showing **+2.3% engagement lift** from real-time model updates vs daily retraining on TikTok.
+
+          **Safety mechanisms:**
+          - **Replay buffer**: Keep the last 48 hours of training data. If the online model degrades, roll back to a checkpoint and replay from the buffer.
+          - **Quality gates**: Before pushing updates, validate on a held-out set. If AUC drops >0.5%, reject the update.
+          - **Embedding table management**: User/item embedding tables grow continuously. Apply **TTL-based eviction** (remove embeddings not accessed in 30 days) and **frequency-based pruning**.
+
+          **Trade-off**: Online learning is **operationally complex**. Training data bugs, pipeline delays, or adversarial inputs can corrupt the model in real-time. Requires robust monitoring, automated rollback, and significant MLOps investment. Also, online learning cannot easily incorporate architectural changes -- those still require periodic full retraining.
+        next: deploy_serving
+      - label: "Frequent batch retraining (every 4-6 hours)"
+        answer: |
+          I would use **frequent batch retraining** every 4-6 hours, combined with real-time feature updates to keep serving fresh.
+
+          **Training schedule:**
+          - Full model retrain every **4-6 hours** using the most recent 48 hours of engagement data
+          - Warm-start from previous checkpoint (reduces training time from 8 hours to ~2 hours)
+          - Trained on a cluster of **32-64 A100 GPUs** with data parallelism
+          - Dataset: ~10B impressions per 48-hour window, downsampled to ~2B training examples with stratified sampling
+
+          **Why batch over online?** Batch retraining is **significantly simpler and more reliable**. The training pipeline is deterministic, reproducible, and debuggable. If a model degrades, we can trace back to the exact training data and identify the issue. Batch training also allows for **full hyperparameter sweeps**, architecture experiments, and proper validation before deployment.
+
+          **Compensating for staleness with real-time features:**
+          - The model itself is updated every 4-6 hours, but **feature values** are updated in real-time
+          - Video engagement velocity features (likes per hour, completion rate) are recomputed every **5 minutes** in the feature store
+          - User behavior sequence features are updated after every session
+          - This means the model captures trending content through fresh input features, even if the model weights are hours old
+
+          **Practical timeline at TikTok's scale:**
+          - T+0h: New training window starts, data collection begins
+          - T+2h: Data processing complete (Spark/Flink pipeline), training starts
+          - T+4h: Training complete, offline evaluation passes quality gates
+          - T+4.5h: Shadow deployment to 1% canary traffic, monitored for 30 minutes
+          - T+5h: Full deployment to serving fleet via blue-green deployment
+
+          **Trade-off**: Even 4-6 hour batch cycles create a **freshness gap**. A video that starts trending at T+1h will not benefit from model updates until T+5h. During this gap, the model relies on real-time features (engagement velocity) to rank it, which works well but is not as effective as a model that has learned from the trend. Empirically, the freshness gap costs ~1-2% engagement vs online learning, but the operational simplicity is often worth it.
+        next: deploy_serving
+
+  - id: deploy_serving
+    stage: deployment
+    type: question
+    label: "Serving Architecture"
+    speaker: interviewer
+    content: |
+      How would you architect the serving infrastructure for TikTok's FYP? Remember: over **1 million QPS globally**, with users in 150+ countries across all time zones.
+    dialogue:
+      - speaker: interviewer
+        text: "How would you serve this at 1M+ QPS globally, across 150+ countries?"
+      - speaker: candidate
+        text: "The key architectural decision is whether to serve centrally from a few large data centers or distribute serving to edge regions."
+      - speaker: interviewer
+        text: "This has major implications for latency, cost, and model freshness. What's your recommendation?"
+    choices:
+      - label: "Centralized GPU serving with global CDN"
+        answer: |
+          I would use **centralized GPU-based serving** from 3-5 major data centers, with a global CDN handling video delivery.
+
+          **Serving architecture:**
+          - **Data centers**: 5 regional hubs (US-East, US-West, Europe, Singapore, Tokyo) each with 500-1,000 GPU instances (T4 or A10G)
+          - **Model serving**: Triton Inference Server with TensorRT optimization and FP16 precision. Dynamic batching with batch sizes of 64-256.
+          - **Per-request flow**: User opens FYP -> request routed to nearest data center -> candidate generation (10ms) -> feature assembly from Redis (15ms) -> model inference (15ms) -> re-ranking + diversity + safety filters (10ms) -> return ranked video IDs -> CDN delivers video content
+          - **Total latency**: ~50-80ms for ranking, plus 100-200ms for first video frame delivery from CDN
+
+          **Feature infrastructure:**
+          - **Real-time feature store**: Redis Cluster with **500TB+ of feature data** across all data centers, replicated via cross-datacenter sync with ~100ms lag
+          - **User features**: Updated after every engagement event via a streaming pipeline
+          - **Video features**: Pre-computed at upload time and replicated globally within 5 minutes
+
+          **Why centralized?** GPU instances are expensive, and model updates need to be coordinated. With 5 data centers, we can maintain a **single model artifact** and deploy consistently. Cross-datacenter feature replication is fast enough (<100ms) for this use case.
+
+          **Cost estimate**: ~3,000 T4 GPUs globally at ~$0.50/GPU-hour = **~$1.3M/month** for inference compute. Justified by TikTok's estimated **$20B+ annual ad revenue**.
+
+          **Trade-off**: Users in regions far from data centers (e.g., Africa, South America) experience higher latency (100-150ms for ranking). The CDN handles video delivery, but the ranking request still needs to reach a data center. Also, GPU serving is 3-5x more expensive than CPU serving per query.
+        next: mon_setup
+      - label: "Edge-distributed CPU serving with model distillation"
+        answer: |
+          I would use **edge-distributed CPU serving** with a distilled model deployed to 20+ edge regions globally, minimizing latency for all users.
+
+          **Model distillation:**
+          - **Teacher model**: Full PLE/two-tower model (~10M params) trained centrally
+          - **Student model**: Compact 3-layer MLP (~800K params) trained via knowledge distillation to match teacher's output distribution
+          - **Distillation quality**: Student retains **96-98% of teacher's AUC** across all engagement tasks. Validated on 1 week of held-out data.
+          - **Quantization**: INT8 quantization via ONNX Runtime, providing 2-3x speedup with <0.5% quality loss
+
+          **Edge infrastructure:**
+          - **20+ edge regions**: Major cities/regions worldwide (US x4, Europe x4, Asia x6, South America x2, Africa x2, Oceania x2)
+          - **CPU instances**: 100-200 CPU instances (c6i.4xlarge) per region, each handling ~1,000 QPS
+          - **Per-request flow**: Request hits nearest edge -> local feature store lookup (5ms) -> model inference (3-5ms on INT8 CPU) -> re-ranking (5ms) -> return results
+          - **Total ranking latency**: ~15-25ms, regardless of user location
+
+          **Feature distribution:**
+          - Each edge region maintains a **local replica** of the feature store, synced from central every 1-2 minutes
+          - User features for that region's users are stored locally and updated in real-time
+          - Video features are broadcast globally at upload time
+
+          **Why edge?** TikTok serves **150+ countries**. Centralized serving means users in Lagos, Sao Paulo, or Jakarta experience 100-150ms ranking latency. Edge serving brings this to **15-25ms everywhere**, creating a noticeably snappier experience. At TikTok's scale, a 50ms latency improvement translates to **measurable engagement lift** (studies show 100ms latency = ~1% engagement loss).
+
+          **Cost**: CPU edge serving costs ~$400K-600K/month total, which is **50-60% cheaper** than centralized GPU serving. The savings come from avoiding expensive GPU instances and using commodity CPU hardware.
+
+          **Trade-off**: The distilled model is ~2-4% worse in ranking quality than the full model. Feature staleness is slightly higher (1-2 minutes vs real-time at central). Model deployment is more complex -- pushing updates to 20+ regions with verification at each. Also, debugging production issues is harder with a distributed fleet.
+        next: mon_setup
+
+  - id: mon_setup
+    stage: monitoring
+    type: info
+    label: "Monitoring & Ecosystem Health"
+    speaker: interviewer
+    content: |
+      Let's discuss monitoring for TikTok's FYP. This is not just model monitoring -- it is **ecosystem monitoring** because the FYP directly controls the creator economy and user experience.
+
+      **Real-time model monitoring:**
+      - **Prediction distributions**: Track P(complete), P(like), P(share) distributions hourly. Alert on distribution shift (KL divergence >0.05 from 7-day baseline).
+      - **Feature health**: Monitor feature coverage (% of requests with complete features), feature value distributions, and feature store latency. A single stale feature can degrade the entire model.
+      - **Inference performance**: p50/p95/p99 latency, throughput per GPU/CPU, error rates. Alert on p99 >100ms or error rate >0.1%.
+
+      **User-facing metrics (updated hourly):**
+      - **Engagement rates**: Completion rate, like rate, share rate, follow rate -- all broken down by content type, region, and user cohort
+      - **Session health**: Average session length, sessions per DAU, session abandonment rate (user leaves within 30 seconds)
+      - **User retention**: 1-day, 7-day, 30-day retention tracked daily. Alert on 7-day retention drop >0.5%.
+
+      **Creator ecosystem health (unique to TikTok):**
+      - **Creator reach distribution**: Gini coefficient of impressions across creators. A healthy FYP has Gini <0.7 (moderate inequality). If it exceeds 0.8, the algorithm is too winner-take-all.
+      - **New creator ramp**: Track time-to-first-1000-views for new creators. Target: <48 hours for 90% of new creators who post quality content.
+      - **Creator retention**: % of creators who posted this week and post again next week. Alert on >2% drop.
+      - **Content diversity**: Topic entropy of served content. Monitor for narrowing (users getting trapped in filter bubbles) and broadening (users seeing irrelevant content).
+
+      **A/B testing framework:**
+      - Minimum experiment duration: **14 days** (to capture weekly patterns)
+      - Minimum sample: 500K users per variant (TikTok's scale makes this easy)
+      - **Long-term holdouts**: 0.5% of users remain on the previous model for 6 months to detect slow-burn effects on retention and creator health
+      - **Multi-sided evaluation**: Every experiment is evaluated on user metrics AND creator metrics. A change that boosts user engagement by 1% but decreases new creator reach by 5% should not ship.
+
+      Let's wrap up the design.
+    dialogue:
+      - speaker: interviewer
+        text: "Monitoring for TikTok's FYP goes beyond model metrics -- it's ecosystem monitoring affecting creators and users alike."
+      - speaker: candidate
+        text: "What creator metrics are most important to track?"
+      - speaker: interviewer
+        text: "Creator reach distribution via Gini coefficient (target below 0.7), time-to-first-1000-views for new creators, and weekly creator retention. A/B tests must evaluate both user AND creator impact."
+      - speaker: candidate
+        text: "That multi-sided evaluation is critical. A change that helps users but hurts creators is unsustainable."
+      - speaker: interviewer
+        text: "Exactly. Every experiment needs at minimum 14 days and long-term holdouts. Let's wrap up."
+    next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Design Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You have designed a comprehensive recommendation system for TikTok's For You Page. Let's summarize.
+
+      **Architecture summary:**
+      - **Cold-start**: Content-based video understanding or collaborative filtering with explore/exploit
+      - **Optimization**: Watch time or diverse engagement composite balancing creator ecosystem health
+      - **Data pipeline**: Streaming pipeline with 15-30 minute freshness, 50B impressions/day, multimodal content extraction
+      - **Features**: Multimodal-first (video/audio/text embeddings) or behavioral-first (engagement sequences + collaborative signals)
+      - **Model**: PLE multi-task architecture or two-tower + cross-attention re-ranker
+      - **Training**: Real-time online learning or frequent 4-6 hour batch retraining
+      - **Serving**: Centralized GPU or edge-distributed CPU with model distillation
+      - **Monitoring**: Real-time model health, user engagement, and creator ecosystem metrics
+
+      **Strengths of your design:**
+      - Addresses TikTok's unique challenges: ultra-short content lifecycle, creator-centric ecosystem, massive global scale
+      - Balances engagement optimization with creator fairness and content diversity
+      - Considers the full MLOps lifecycle from data freshness to serving latency to monitoring
+
+      **Areas to explore further:**
+      - **Safety integration**: How content safety scores interact with ranking (hard block vs soft demotion vs separate safety model)
+      - **Cross-market adaptation**: How the same model handles vastly different content cultures (US, India, Brazil, Japan)
+      - **Creator incentive alignment**: How ranking signals influence creator behavior and content quality over time
+      - **Responsible AI**: Addressing algorithmic amplification concerns, especially for younger users
+      - **Multi-objective Pareto optimization**: Formal approaches to balancing the many competing objectives (engagement, diversity, safety, creator fairness)
+
+      This design demonstrates deep understanding of recommendation systems at scale with strong awareness of the unique challenges in short-form video platforms. Well done!
+    dialogue:
+      - speaker: interviewer
+        text: "Great design! You covered cold-start, engagement metrics, multimodal features, model architecture, training, serving, and ecosystem monitoring."
+      - speaker: candidate
+        text: "Thank you. The key insight for me is that TikTok's FYP is not just a recommendation system -- it's a marketplace between creators and viewers."
+      - speaker: interviewer
+        text: "Exactly. The creator ecosystem health is what separates a good recommendation system from a great one. Any final thoughts?"
+      - speaker: candidate
+        text: "I'd want to explore cross-market adaptation and responsible AI considerations more deeply, especially around content safety for younger users."
+      - speaker: interviewer
+        text: "Those are excellent follow-up areas. Well done!"

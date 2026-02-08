@@ -1,0 +1,813 @@
+id: voice-assistant
+title: "Voice Assistant & Wake Word Detection"
+description: "Design the speech pipeline for a voice assistant: wake word detection, ASR, and NLU."
+companies: ["Amazon", "Apple", "Google"]
+domains: ["Audio/Speech", "NLP", "Edge ML"]
+root: pd_start
+
+nodes:
+  # ============ PROBLEM DEFINITION ============
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we will design the **speech pipeline for a voice assistant** -- covering wake word detection, automatic speech recognition (ASR), and natural language understanding (NLU).
+
+      **Business context:**
+      - Amazon has sold over **500 million Alexa-enabled devices** worldwide as of 2025
+      - Apple's Siri handles **~25 billion requests per month** across iPhone, HomePod, Mac, and CarPlay
+      - Google Assistant is available on **~1 billion devices** including phones, smart speakers, and smart displays
+      - The voice assistant market is projected at **$30B by 2026**, driven by smart home, automotive, and accessibility
+
+      **Core problem:** Design a system that:
+      1. **Wake word detection** -- Always listening for "Alexa" / "Hey Siri" / "OK Google" while consuming **<1mW of power** on-device
+      2. **Automatic Speech Recognition (ASR)** -- Convert speech to text with **<5% word error rate** and **<200ms latency** for streaming results
+      3. **Natural Language Understanding (NLU)** -- Parse the transcribed text into actionable intents and slots (e.g., "Play jazz music on Spotify" -> intent=PlayMusic, artist=null, genre=jazz, service=Spotify)
+
+      **Key constraints:**
+      - **Always-on power budget**: Wake word runs 24/7 on battery-powered devices. Must consume <1mW -- a human hair's width of power
+      - **False wake rate**: <1 false activation per day per device. With 500M devices, even 0.01% false wake rate = 50K unwanted activations globally
+      - **Privacy**: On-device processing preferred for wake word and optionally ASR. Audio should never leave the device unless wake word is confirmed
+      - **Noise robustness**: Must work in kitchens (60dB background), living rooms with TV (70dB), and cars (80dB highway noise)
+      - **Latency**: Wake word detection in <100ms, streaming ASR with <200ms endpointing, full response in <1 second
+
+      Let's start with the most critical component: wake word detection.
+    dialogue:
+      - speaker: interviewer
+        text: "Let's design the speech pipeline for a voice assistant. What's the most critical component to get right?"
+      - speaker: candidate
+        text: "Wake word detection. It's the gateway to the entire system -- it runs 24/7 on-device with extreme power and accuracy constraints. A bad wake word detector means either constant false activations annoying users or missed wake words making the product feel broken."
+      - speaker: interviewer
+        text: "Good prioritization. What makes wake word detection uniquely challenging?"
+      - speaker: candidate
+        text: "Three things: the always-on power constraint under 1 milliwatt, the extreme class imbalance where the wake word occurs maybe 10 times a day out of 16 hours of audio, and noise robustness across wildly different environments."
+      - speaker: interviewer
+        text: "Let's dive into the wake word model architecture."
+    next: pd_wakeword
+
+  - id: pd_wakeword
+    stage: problem_definition
+    type: question
+    label: "Wake Word Architecture"
+    speaker: interviewer
+    content: |
+      How would you design the wake word detection model? Remember: it must run **24/7 on-device** with **<1mW power consumption**, achieve **>95% true positive rate** with **<1 false activation per day**, and handle diverse acoustic environments.
+    dialogue:
+      - speaker: interviewer
+        text: "What model architecture would you use for wake word detection?"
+      - speaker: candidate
+        text: "The power constraint is the binding constraint. We need something that runs on a dedicated low-power DSP, not the main application processor."
+      - speaker: interviewer
+        text: "How small does the model need to be?"
+    choices:
+      - label: "Depthwise-separable CNN on low-power DSP"
+        answer: |
+          I would use a **depthwise-separable CNN** running on a dedicated **low-power DSP chip**:
+
+          **Architecture:**
+          ```
+          Audio → Mel Filterbank (40 bands, 25ms frames, 10ms hop)
+               → 3x DS-Conv1D (filters: 64→128→64, kernel: 9)
+               → Global Average Pooling
+               → FC(64→32) → FC(32→1) → Sigmoid
+          ```
+
+          **Why depthwise-separable CNN?**
+          - **Power efficiency**: Standard convolutions require N*M*K multiplications per layer. Depthwise-separable factorizes this into N*K + N*M, reducing multiply-accumulate operations by **8-12x**. This is the key to hitting <1mW
+          - **Amazon's approach**: Alexa's wake word detector uses a similar small CNN on a dedicated DSP (the AZ1 Neural Edge processor), consuming **~0.5mW** in always-listening mode
+          - **Model size**: ~50K parameters, ~15KB quantized to INT8. Fits entirely in DSP on-chip SRAM (no external memory access = lower power)
+          - **Inference cost**: ~200K multiply-accumulate ops per frame = ~2M MAC/sec at 10ms frame rate. Well within DSP capabilities at <1mW
+
+          **Two-stage detection for false positive reduction:**
+          ```
+          Stage 1: Tiny CNN on DSP (~0.5mW, always on)
+                   → Detection score > 0.7? → Wake main processor
+          Stage 2: Larger CNN on application processor (~50mW, runs for ~500ms)
+                   → Confirm detection score > 0.9? → Activate assistant
+                   → Else → Return to sleep
+          ```
+          - Stage 1 catches ~98% of true wake words but has ~5 false positives/day
+          - Stage 2 filters false positives down to **<0.5 per day** while only consuming power for 500ms per trigger
+          - Net power: 0.5mW continuous + 50mW * 5 triggers * 0.5s = 0.5mW + negligible
+
+          **Feature extraction:**
+          - 40-band log-mel filterbank, 25ms window, 10ms hop
+          - Context window: 1.5 seconds (150 frames) -- enough for "Alexa" or "Hey Siri"
+          - Features computed by DSP hardware accelerator, not the neural model
+
+          **Trade-off**: CNNs have limited temporal modeling. "Alexa" and "Alaska" have similar spectral patterns -- the CNN relies on the temporal sequence of phonemes. Mitigated by the two-stage architecture where Stage 2 has better temporal resolution.
+        next: met_metrics
+      - label: "Small RNN (GRU) with streaming inference"
+        answer: |
+          I would use a **small GRU-based RNN** optimized for streaming inference on a low-power DSP:
+
+          **Architecture:**
+          ```
+          Audio → Mel Filterbank (40 bands, 25ms frames, 10ms hop)
+               → GRU Layer 1 (hidden=64, streaming - processes one frame at a time)
+               → GRU Layer 2 (hidden=32)
+               → FC(32→1) → Sigmoid
+          ```
+
+          **Why GRU (not LSTM or CNN)?**
+          - **Temporal modeling**: GRUs naturally model the temporal structure of speech. "Alexa" has a specific phoneme sequence (AH-L-EH-K-S-AH) that unfolds over 600-800ms. GRUs capture this sequential dependency better than CNNs
+          - **Streaming-friendly**: GRU maintains a hidden state between frames -- no need to buffer 1.5 seconds of audio. Process each 10ms frame independently, updating state. This reduces memory from ~60KB (CNN buffer) to ~256 bytes (hidden state)
+          - **Fewer parameters than LSTM**: GRU has 2 gates vs. LSTM's 3, reducing parameters by ~25% with comparable accuracy. Google's wake word research shows GRU matches LSTM accuracy for keyword spotting
+          - **Model size**: ~35K parameters, ~10KB quantized. Smaller than equivalent CNN
+
+          **Power optimization:**
+          - **Sparse activation**: Apply magnitude pruning to achieve 70% sparsity. DSPs with sparse MAC support (e.g., Qualcomm Hexagon) can skip zero-weight multiplications, reducing power by ~2.5x
+          - **Low-rank factorization**: Factor the GRU weight matrices using SVD. Rank-16 approximation reduces computation by 4x with <1% accuracy loss
+          - **Fixed-point inference**: INT8 quantization on DSP. GRU weights are well-suited to quantization (smooth distributions)
+          - **Total power**: ~0.7mW on dedicated DSP with sparse + quantized inference
+
+          **Sliding window detection:**
+          - GRU outputs a score at every frame (every 10ms)
+          - Apply a **smoothing filter**: Detection confirmed when average score over 30 consecutive frames (300ms) exceeds 0.8
+          - This eliminates momentary false spikes while keeping detection latency under 100ms after wake word ends
+
+          **False wake rate optimization:**
+          - **Negative mining**: Collect audio segments that cause false wakes from production devices (with user consent). Retrain model with these hard negatives
+          - Amazon reports that targeted negative mining reduces false wake rate by **60%** per training cycle
+          - Especially important for phonetically similar words: "Alexa" vs. "Alaska" vs. "I like to" (fast speech)
+
+          **Trade-off**: RNNs are harder to parallelize than CNNs, making training slower. Also, GRU hidden state creates sequential dependencies that prevent frame-level parallelism. But at the tiny model size (35K params), training is fast regardless, and sequential inference is the natural mode for streaming audio.
+        next: met_metrics
+
+  # ============ METRICS ============
+  - id: met_metrics
+    stage: metrics
+    type: question
+    label: "Evaluation Metrics"
+    speaker: interviewer
+    content: |
+      How would you evaluate the voice assistant pipeline? We need metrics for each component (wake word, ASR, NLU) and end-to-end user experience metrics.
+    dialogue:
+      - speaker: interviewer
+        text: "What metrics matter most for a voice assistant?"
+      - speaker: candidate
+        text: "The wake word and ASR have very different metric profiles. Wake word is about detection rate vs. false alarm rate. ASR is about word accuracy. But ultimately, the user cares about task completion."
+      - speaker: interviewer
+        text: "How do you set targets for these metrics?"
+    choices:
+      - label: "Component-level metrics with strict SLAs"
+        answer: |
+          I would define **strict per-component SLAs** that cascade into end-to-end quality:
+
+          **Wake word metrics:**
+          - **True Positive Rate (TPR / Recall)**: Fraction of intentional wake words correctly detected. Target: **>97%** in quiet environments (<40dB noise), **>90%** in noisy environments (60-80dB)
+          - **False Accepts per Day (FA/day)**: Number of false activations per device per day. Target: **<0.5 FA/day**. At 500M devices, that is still 250M false wakes daily -- so this must be extremely tight
+          - **Detection Latency**: Time from wake word end to system activation. Target: **<100ms** (users perceive >200ms as sluggish)
+          - **ROC-AUC** at operating point: Track the full TPR vs. FA/hour curve. Operating point is chosen to meet the 0.5 FA/day target
+
+          **ASR metrics:**
+          - **Word Error Rate (WER)**: (Substitutions + Insertions + Deletions) / Total Words. Target: **<5% overall**, **<8%** for accented speech, **<12%** for far-field (3+ meters)
+          - **Sentence Error Rate (SER)**: Fraction of utterances with any error. More user-facing -- one wrong word can change the entire intent. Target: **<15%**
+          - **Real-Time Factor (RTF)**: Processing time / audio duration. Must be **<0.3** for streaming (processing 1s of audio in <300ms)
+          - **Endpointing accuracy**: Correctly detect when the user stops speaking. False endpointing (cutting off mid-sentence) is extremely frustrating. Target: **<3%** premature endpointing rate
+
+          **NLU metrics:**
+          - **Intent Accuracy**: Correct intent classification. Target: **>95%** for top 100 intents (music, weather, timer, smart home), **>80%** for long-tail intents
+          - **Slot F1**: Entity/slot extraction accuracy. Target: **>0.92** for common slots (city, song name, contact), **>0.78** for rare slots
+          - **Semantic Error Rate (SemER)**: Combined intent + slot errors. More holistic than separate metrics. Target: **<8%**
+
+          **Why component SLAs?**
+          - Enables **independent team optimization**: The wake word team, ASR team, and NLU team each have clear targets
+          - **Cascading quality**: WER improvements directly improve NLU accuracy. Amazon reports that reducing WER from 8% to 5% improved intent accuracy by **3.2 percentage points**
+          - **Root cause analysis**: When task completion drops, component metrics immediately identify whether it is a wake word, ASR, or NLU problem
+        next: data_collection
+      - label: "End-to-end task completion metrics"
+        answer: |
+          I would focus on **end-to-end task completion metrics** that reflect actual user experience:
+
+          **Primary user experience metrics:**
+          - **Task Completion Rate (TCR)**: Did the assistant successfully complete the user's request? Measured by: action executed + no follow-up correction within 30 seconds. Target: **>85%** for top 20 intent categories, **>70%** overall
+          - **Dialog Turn Efficiency**: Average number of turns to complete a task. Target: **<1.5 turns** for simple tasks (timer, weather), **<3 turns** for complex tasks (multi-step smart home). Each additional turn indicates a failure somewhere in the pipeline
+          - **User Satisfaction Score (USS)**: Post-interaction "thumbs up/down" from 2% of interactions. Target: **>4.2/5.0** average
+          - **Frustration Rate**: Percentage of sessions where the user says "stop," "cancel," "never mind," or physically mutes the device. Target: **<5%**
+
+          **Latency metrics:**
+          - **Wake-to-Response Time**: Total time from wake word to first audio response. Target: **<1.5 seconds** for simple queries, **<3 seconds** for queries requiring external APIs
+          - **Time to First Byte (TTFB)**: Time until ASR starts streaming results to NLU. Target: **<300ms** after utterance start
+          - **Perceived Latency**: Time from user finishing speaking to assistant starting response. Most critical for user experience. Target: **<800ms**
+
+          **Engagement and retention metrics:**
+          - **Daily Active Users (DAU)**: Fraction of device owners who use voice at least once daily. Target: **>35%** (Amazon Alexa is reportedly at ~25-30%)
+          - **Sessions per DAU**: Average voice interactions per active user per day. Target: **>5 sessions/day**
+          - **Feature adoption breadth**: Number of distinct intent categories used per user per month. Indicates the user trusts the assistant for diverse tasks
+          - **28-day retention**: Percentage of new users still active after 28 days. Target: **>60%**
+
+          **Why end-to-end?**
+          - A system with 97% wake word accuracy, 5% WER, and 95% intent accuracy still fails **~12%** of tasks due to cascading errors. Only end-to-end metrics reveal this
+          - Optimizing WER alone can hurt task completion -- a model that transcribes filler words ("um," "like") more accurately but misses key content words is worse for NLU
+          - Apple reports that switching to task-completion-driven development for Siri improved user satisfaction scores by **15%** over two years, even with minimal WER improvement
+        next: data_collection
+
+  # ============ DATA ============
+  - id: data_collection
+    stage: data
+    type: info
+    label: "Training Data & Collection"
+    speaker: interviewer
+    content: |
+      Let's discuss the data requirements for training the voice assistant pipeline. Each component has distinct data needs.
+
+      **Wake word training data:**
+
+      | Data Type | Volume | Collection Method |
+      |-----------|--------|-------------------|
+      | **Positive samples** (wake word) | ~500K utterances | Crowd-sourced recordings from 10K+ speakers across demographics |
+      | **Negative samples** (non-wake word) | ~50M audio segments | Random audio from TV, podcasts, conversation, environmental noise |
+      | **Hard negatives** | ~100K samples | Phonetically similar words ("Alaska," "Alexa play" without proper prosody) |
+      | **Augmented positives** | ~5M samples | Original positives + noise addition, room impulse response, speed perturbation |
+
+      **Data augmentation for robustness:**
+      - **Noise injection**: Add background noise at SNR levels from -5dB to +30dB using the AudioSet noise corpus (~2M clips). Kitchen, TV, traffic, baby crying, dog barking
+      - **Room simulation**: Convolve with room impulse responses (RIRs) to simulate reverb. Use 10K+ measured RIRs from real rooms of varying sizes
+      - **Speed/pitch perturbation**: Vary speaking rate by +/- 10% and pitch by +/- 2 semitones to cover speaker variation
+      - **Far-field simulation**: Apply distance attenuation and multi-microphone array simulation for smart speakers
+
+      **ASR training data:**
+      - **Supervised**: ~100K hours of transcribed speech (LibriSpeech: 960h, Common Voice: 20K+ hours, proprietary: 70K+ hours across 20 languages)
+      - **Semi-supervised**: ~1M hours of untranscribed audio with pseudo-labels from a teacher model. Google's Noisy Student approach achieves **4.2% WER** on LibriSpeech test-clean
+      - **Synthetic**: TTS-generated speech from text corpora. Useful for tail vocabulary (rare names, new product names). Google generates ~50K hours of synthetic speech for ASR training
+
+      **NLU training data:**
+      - **Annotated utterances**: ~5M intent-labeled, slot-annotated utterances across ~500 intent types
+      - **Synthetic utterances**: Template-based generation ("Play {song} by {artist} on {service}") expanded to ~50M examples
+      - **User interaction logs**: Real user utterances (anonymized, consented) with implicit labels from successful task completions
+
+      **Privacy-preserving data collection:**
+      - **Federated learning**: Train wake word and ASR models on-device without centralizing raw audio. Apple uses federated learning for Siri improvements
+      - **Differential privacy**: Add calibrated noise to gradients (epsilon=8, delta=1e-6). Prevents memorization of individual utterances
+      - **On-device annotation**: Use on-device ASR to transcribe audio, send only transcripts (not audio) for NLU training
+    dialogue:
+      - speaker: interviewer
+        text: "What data do you need to train a voice assistant pipeline?"
+      - speaker: candidate
+        text: "Each component needs different data. Wake word needs hundreds of thousands of positive samples with millions of negatives, all heavily augmented for noise robustness. ASR needs tens of thousands of hours of transcribed speech. NLU needs millions of annotated utterances."
+      - speaker: interviewer
+        text: "How do you handle privacy when collecting speech data?"
+      - speaker: candidate
+        text: "Federated learning for on-device models, differential privacy for centralized training, and sending transcripts instead of raw audio whenever possible. Apple's approach of on-device processing first is the gold standard."
+      - speaker: interviewer
+        text: "Good. Let's discuss the audio features."
+    next: feat_audio
+
+  # ============ FEATURES ============
+  - id: feat_audio
+    stage: features
+    type: question
+    label: "Audio Feature Extraction"
+    speaker: interviewer
+    content: |
+      What audio features would you use for the speech pipeline? The choice of features affects model accuracy, computational cost, and noise robustness.
+    dialogue:
+      - speaker: interviewer
+        text: "What audio features work best for wake word detection and ASR?"
+      - speaker: candidate
+        text: "The two main choices are traditional spectral features like mel filterbanks versus learned features from raw waveform processing."
+      - speaker: interviewer
+        text: "Walk me through both approaches and their trade-offs."
+    choices:
+      - label: "Log-mel filterbanks (traditional spectral features)"
+        answer: |
+          I would use **log-mel filterbank features**, the proven standard for speech processing:
+
+          **Feature extraction pipeline:**
+          ```
+          Raw audio (16kHz) → Pre-emphasis (0.97) → Frame (25ms, 10ms hop)
+               → Hamming window → FFT (512-point)
+               → Mel filterbank (40-80 bands) → Log compression
+               → Optional: Delta + Delta-delta (temporal derivatives)
+          ```
+
+          **Why log-mel filterbanks?**
+          - **Psychoacoustically motivated**: Mel scale approximates human auditory perception. Low frequencies (where speech formants concentrate) get finer resolution than high frequencies
+          - **Proven accuracy**: Log-mel features are used by virtually every production ASR system. Google's streaming ASR uses 80-band log-mel features; Amazon Alexa uses 40-band
+          - **Computational efficiency**: FFT + mel filterbank is implementable in fixed-point arithmetic on DSP hardware with **<0.1mW power consumption**. Critical for always-on wake word detection
+          - **Compact representation**: 40 features per 10ms frame = 4000 values/second. Compared to 16,000 raw samples/second, this is a 4x compression with information preservation
+          - **Noise robustness enhancements**:
+            - **CMVN** (Cepstral Mean and Variance Normalization): Subtract running mean, divide by running variance. Removes channel effects and slow-varying noise
+            - **Per-channel energy normalization (PCEN)**: Adaptive gain control that is more robust than static log compression. Used in Google's AudioSet models
+
+          **Specific configurations:**
+
+          | Component | Bands | Window | Extras |
+          |-----------|-------|--------|--------|
+          | Wake word (on-device) | 40 | 25ms/10ms hop | None (minimal compute) |
+          | ASR (cloud) | 80 | 25ms/10ms hop | Delta + delta-delta, SpecAugment |
+          | Speaker ID | 40 | 25ms/10ms hop | CMVN, global mean subtraction |
+
+          **SpecAugment (training-time augmentation):**
+          - Mask 1-2 frequency bands (width 0-27 bands) and 1-2 time steps (width 0-100 frames)
+          - Reduces WER by **~10% relative** with zero inference cost. Google's seminal result
+
+          **Trade-off**: Log-mel features discard phase information from the FFT. Phase carries spatial information useful for multi-microphone array processing. For multi-mic devices (Amazon Echo with 7 mics), beamforming is applied before mel feature extraction.
+        next: mod_asr
+      - label: "Learned features from raw waveform (SincNet / wav2vec)"
+        answer: |
+          I would use **learned features from raw waveform**, letting the model discover optimal representations:
+
+          **Architecture: Learnable filterbank**
+          ```
+          Raw audio (16kHz) → SincNet Layer (80 sinc filters, length 251)
+               → |abs| → Log → BatchNorm
+               → Output: 80-dim features per frame (equivalent to filterbank)
+          ```
+
+          **Alternative: wav2vec 2.0 feature extractor**
+          ```
+          Raw audio → 7-layer CNN (512 channels, strides [5,2,2,2,2,2,2])
+               → 512-dim features at 49Hz (20ms per frame)
+               → Optional: Transformer encoder for contextual features
+          ```
+
+          **Why learned features?**
+          - **Optimal for the task**: Hand-designed mel filterbanks are a one-size-fits-all solution. Learned filterbanks can discover task-specific frequency patterns. SincNet learns filters that emphasize speaker-discriminative frequencies for speaker verification
+          - **End-to-end optimization**: Gradients flow from the task loss all the way to the raw waveform processing. The feature extractor and the downstream model are jointly optimized
+          - **wav2vec 2.0 pre-training**: Self-supervised pre-training on 960K hours of unlabeled audio learns general-purpose speech representations. Fine-tuning with just **10 minutes** of labeled data achieves 4.8% WER on LibriSpeech -- remarkable data efficiency
+          - **Multi-task adaptability**: The same learned features work across wake word, ASR, and speaker verification. Facebook/Meta's wav2vec 2.0 features set state-of-the-art across 5+ speech tasks
+
+          **Performance comparison:**
+
+          | Feature Type | WER (LibriSpeech test-clean) | Compute Cost |
+          |-------------|-----|------|
+          | 80-band log-mel | 3.2% (with Conformer) | 0.05 GFLOPS |
+          | SincNet | 3.0% (with same Conformer) | 0.08 GFLOPS |
+          | wav2vec 2.0 | 1.8% (with CTC fine-tune) | 2.1 GFLOPS |
+
+          **Practical considerations:**
+          - **Power constraint**: wav2vec 2.0's CNN encoder (~10M params) is too large for on-device wake word detection. Use SincNet (learnable sinc filters, ~5K params) for wake word, wav2vec for cloud ASR
+          - **Latency**: wav2vec 2.0's 7-layer CNN adds ~5ms to feature extraction. Acceptable for cloud ASR but not for wake word
+          - **Robustness**: Learned features can be less robust to unseen noise types. Pre-train on diverse audio to mitigate
+
+          **Trade-off**: Learned features require **10-100x more compute** for feature extraction than mel filterbanks. For always-on wake word detection (<1mW), this is prohibitive. Best approach: mel filterbanks for wake word (on-device), wav2vec features for cloud ASR where compute is abundant.
+        next: mod_asr
+
+  # ============ MODEL ============
+  - id: mod_asr
+    stage: model
+    type: question
+    label: "ASR Architecture"
+    speaker: interviewer
+    content: |
+      Now let's design the ASR model. How would you architect the speech-to-text system? The key tension is between **streaming capability** (outputting text as the user speaks) and **accuracy** (which benefits from seeing the complete utterance).
+    dialogue:
+      - speaker: interviewer
+        text: "What ASR architecture would you use?"
+      - speaker: candidate
+        text: "The streaming requirement is the key constraint. Attention-based models are more accurate but inherently non-streaming. CTC and RNN-T are streaming-friendly."
+      - speaker: interviewer
+        text: "How do you choose between them?"
+    choices:
+      - label: "Streaming RNN-T (Conformer encoder)"
+        answer: |
+          I would use a **streaming Conformer-based RNN-Transducer (RNN-T)**, the architecture used by Google's production ASR:
+
+          **Architecture:**
+          ```
+          Audio features → Conformer Encoder (causal, 12 layers)
+                                    │
+                                    ├─────────────────┐
+                                    │                 │
+                              Encoder output    Text history
+                                    │                 │
+                                    └──── Joint Network ────→ Softmax over vocab
+                                                              (4096 WordPiece tokens)
+          ```
+
+          **Conformer encoder (causal/streaming variant):**
+          - 12 layers, each: Feed-Forward → Causal Self-Attention → Causal Convolution → Feed-Forward
+          - **Causal self-attention**: Each frame attends only to past frames (left context only). Enables streaming -- output text as audio arrives
+          - **Left context**: 900ms (90 frames). Longer context = better accuracy, but more latency
+          - **Causal convolution**: Kernel size 15, left-padded. Captures local acoustic patterns without future lookahead
+          - **Model size**: ~120M parameters (Conformer-M). Google reports this achieves **2.1% WER** on LibriSpeech test-clean
+
+          **RNN-T decoder:**
+          - **Prediction network**: 2-layer LSTM (hidden=640) that models text history (language model component)
+          - **Joint network**: FC layer that combines encoder output and prediction network output to produce next-token probabilities
+          - **Streaming**: At each audio frame, the model either emits a token or a "blank" symbol. No need to wait for end-of-utterance
+
+          **Why RNN-T + Conformer?**
+          - **Streaming by design**: RNN-T naturally produces output token-by-token as audio arrives. Users see words appear in real-time on screen
+          - **State-of-the-art accuracy**: Conformer-RNN-T achieves **1.9% WER** on LibriSpeech (Google, 2021), matching or beating attention-based models
+          - **Production-proven**: Google's live transcription, Google Assistant, and YouTube auto-captions all use Conformer-RNN-T
+          - **On-device capable**: With quantization and pruning, a Conformer-S (~30M params) runs on-device at **RTF=0.2** on Pixel phones
+
+          **Endpointing:**
+          - Detect when the user stops speaking using a separate **endpointer model** (small LSTM, 200K params)
+          - Triggered when: silence > 700ms AND RNN-T has emitted a syntactically complete phrase
+          - **Voice Activity Detection (VAD)**: Energy-based + neural VAD to distinguish speech from background noise
+
+          **Trade-off**: Causal self-attention (no future context) loses ~10-15% relative WER compared to bidirectional attention. Mitigate with **chunked attention**: buffer 240ms of future audio (acceptable latency) for a limited lookahead. This recovers ~50% of the accuracy gap.
+        next: mod_nlu
+      - label: "Attention-based encoder-decoder (Whisper-style)"
+        answer: |
+          I would use an **attention-based encoder-decoder model** similar to OpenAI's Whisper, prioritizing accuracy:
+
+          **Architecture:**
+          ```
+          Audio features → Encoder (Transformer, 12 layers, bidirectional)
+                                    │
+                                    ▼
+                           Encoder representations
+                                    │
+                                    ▼
+                           Decoder (Transformer, 12 layers, autoregressive)
+                           [cross-attention to encoder]
+                                    │
+                                    ▼
+                           Text tokens (BPE vocabulary, 50K tokens)
+          ```
+
+          **Why attention-based?**
+          - **Highest accuracy**: Whisper-large achieves **2.7% WER** on LibriSpeech with zero fine-tuning, and **<5% WER** across 96 languages. After fine-tuning, it can reach **<2% WER** on English
+          - **Bidirectional context**: The encoder sees the entire utterance. "Read" is pronounced differently in "I read books" vs. "I read a book yesterday." Bidirectional attention resolves this; streaming models cannot
+          - **Robust to noise**: Whisper was trained on 680K hours of diverse web audio with weak supervision. It handles accented speech, background noise, and domain-specific vocabulary far better than models trained on clean read speech
+          - **Multilingual**: A single model handles 96+ languages. No need for per-language ASR models. Google and Amazon maintain 20+ separate ASR models; Whisper uses one
+
+          **Handling the streaming requirement:**
+          - **Two-pass architecture**:
+            ```
+            Pass 1: Streaming RNN-T (lightweight, ~30M params) → Preliminary transcript (shown to user in real-time)
+            Pass 2: Attention encoder-decoder (full, ~300M params) → Final transcript (replaces preliminary after 500ms)
+            ```
+          - The user sees streaming results immediately (Pass 1), then the text is silently corrected by the more accurate Pass 2 model
+          - Google Assistant uses exactly this two-pass approach: streaming on-device model + cloud-based rescoring
+
+          **Model configuration:**
+          - **Encoder**: 12 Transformer layers, d_model=768, 12 attention heads, ~150M params
+          - **Decoder**: 12 Transformer layers, d_model=768, cross-attention to encoder, ~150M params
+          - **Total**: ~300M params (Whisper-medium scale)
+          - **Vocabulary**: 50K BPE tokens (handles rare words, code-switching, entity names)
+
+          **Inference optimization:**
+          - **Speculative decoding**: Use a small 2-layer decoder to draft tokens, verified by the full decoder in batches. 2-3x speedup
+          - **KV-cache**: Cache encoder key-value pairs across decoder steps. Reduces encoder computation from O(T*N) to O(T)
+          - **FP16 inference**: Half-precision on GPU with negligible quality loss
+
+          **Trade-off**: Not natively streaming. The two-pass approach adds complexity and the final correction can be jarring if Pass 1 and Pass 2 disagree significantly (the "text jump" problem). Also, requires cloud GPU for the attention model -- cannot run on-device for the full model. ~$0.002 per utterance in GPU cost.
+        next: mod_nlu
+
+  - id: mod_nlu
+    stage: model
+    type: question
+    label: "NLU Approach"
+    speaker: interviewer
+    content: |
+      After ASR produces a transcript, we need NLU to extract the user's intent and slots. How would you design the NLU component? For example, "Set a timer for 10 minutes" should produce intent=SetTimer, slot:duration=10 minutes.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you design the NLU for a voice assistant?"
+      - speaker: candidate
+        text: "The classic approach is joint intent classification and slot filling. The question is whether to use a dedicated model or leverage LLMs."
+      - speaker: interviewer
+        text: "What are the trade-offs between traditional NLU and LLM-based approaches?"
+    choices:
+      - label: "Joint intent + slot filling (BERT-based)"
+        answer: |
+          I would use a **joint intent classification and slot filling model** based on a fine-tuned BERT:
+
+          **Architecture:**
+          ```
+          Transcript tokens → BERT Encoder (12 layers)
+                                    │
+                              ┌─────┴─────┐
+                              │           │
+                         [CLS] output    Token outputs
+                              │           │
+                    Intent classifier    Slot tagger (BIO)
+                    (FC → softmax       (FC → CRF → slot labels)
+                     over ~500 intents)  per token)
+          ```
+
+          **Joint training objective:**
+          ```
+          L = L_intent (cross-entropy) + alpha * L_slot (CRF loss) + beta * L_consistency
+          ```
+          - **L_consistency**: Penalize slot predictions that are incompatible with the predicted intent (e.g., slots for "PlayMusic" should not appear when intent is "SetTimer")
+
+          **Why joint BERT + CRF?**
+          - **Shared representations**: Intent and slots are deeply coupled. "Play Bohemian Rhapsody" -- knowing the intent is PlayMusic helps the slot tagger identify "Bohemian Rhapsody" as a song title. Joint models improve both intent accuracy (+1.5%) and slot F1 (+2.3%) vs. separate models (ATIS benchmark results)
+          - **CRF output layer**: Enforces valid BIO sequences (B-song must be followed by I-song or O, never B-artist). Pure softmax produces 3-5% invalid tag sequences; CRF produces 0%
+          - **Fast inference**: ~3ms on CPU with ONNX optimization. Well within latency budget
+          - **Production-proven**: Amazon Alexa's core NLU uses a BERT-based joint model. Handles ~500 intent types and ~200 slot types across 20+ domains
+
+          **Domain-specific models:**
+          - **Domain classifier** (first stage): Route to Music NLU, SmartHome NLU, Shopping NLU, etc.
+          - **Per-domain specialist**: Each domain has its own fine-tuned model with domain-specific intents and slots
+          - **Benefit**: Music NLU can focus on song/artist/genre slots; SmartHome NLU on device/room/action slots. Prevents cross-domain confusion
+          - Amazon Alexa uses this hierarchical routing with ~25 domain-specific NLU models
+
+          **Trade-off**: Adding new intents/slots requires retraining. With ~500 intents, training takes ~4 hours on 8 GPUs. For rapidly evolving domains (new smart home devices, new music services), this turnaround time can be a bottleneck. Mitigate with few-shot learning techniques (prototypical networks) for new intents.
+        next: train_training
+      - label: "LLM-based NLU (instruction-tuned)"
+        answer: |
+          I would use an **instruction-tuned LLM** for NLU, leveraging its generalization and flexibility:
+
+          **Architecture:**
+          ```
+          System prompt: "You are a voice assistant NLU. Parse the user utterance into JSON with intent and slots."
+          User: "Play some jazz music on Spotify in the living room"
+          Assistant: {"intent": "PlayMusic", "slots": {"genre": "jazz", "service": "Spotify", "room": "living room"}}
+          ```
+
+          **Model: Fine-tuned LLaMA 3 8B (or similar)**
+          - Instruction-tuned on ~2M (utterance, structured_output) pairs
+          - **Constrained decoding**: Force output to be valid JSON matching a schema. Use grammar-based sampling (outlines/guidance library) to guarantee valid structure
+          - Quantized to INT4 with GPTQ: ~4GB model, ~15ms inference on A10 GPU
+
+          **Why LLM-based NLU?**
+          - **Zero-shot generalization**: A user says "remind me to pick up dry cleaning on the way home from work." A traditional NLU needs explicit training for this compound intent. An LLM parses it correctly without specific training data
+          - **New intent/slot support without retraining**: Adding a new smart home device type (e.g., "robot vacuum") requires only updating the system prompt or adding 5-10 few-shot examples. No retraining needed
+          - **Context understanding**: Multi-turn dialogue handling is natural. "Play Beatles" -> "skip this one" -> "louder." The LLM maintains conversation context across turns
+          - **Error correction**: The LLM can correct ASR errors based on context. If ASR produces "play bohemian rap city," the LLM can infer "Bohemian Rhapsody" from context
+
+          **Performance on benchmarks:**
+
+          | Metric | BERT Joint | LLM (8B) |
+          |--------|-----------|----------|
+          | Intent Accuracy (ATIS) | 97.5% | 98.2% |
+          | Slot F1 (ATIS) | 95.8% | 96.5% |
+          | Zero-shot new intents | 0% (needs training) | ~75% |
+          | Inference latency | ~3ms (CPU) | ~15ms (GPU) |
+          | Cost per query | ~$0.0001 | ~$0.001 |
+
+          **Hybrid approach for production:**
+          - **Fast path**: BERT-based joint model for top 100 intents (covers ~90% of traffic). 3ms, CPU
+          - **LLM fallback**: For low-confidence classifications or unrecognized patterns, route to LLM. 15ms, GPU
+          - Net: 90% of queries served at 3ms, 10% at 15ms. Average latency ~4.2ms
+
+          **Trade-off**: LLM inference is 5x more expensive and 5x slower than BERT. At Amazon Alexa's scale of ~10B monthly requests, the cost difference is significant (~$10M/year for BERT vs. ~$100M/year for full LLM). The hybrid approach captures the best of both worlds. Also, LLM outputs can be unpredictable -- constrained decoding is essential to prevent hallucinated intents or slots.
+        next: train_training
+
+  # ============ TRAINING ============
+  - id: train_training
+    stage: training
+    type: info
+    label: "Training Pipeline"
+    speaker: interviewer
+    content: |
+      Let's design the training pipeline for the voice assistant. Each component has unique training challenges.
+
+      **Wake word model training:**
+      - **Positive/negative ratio**: 1:100 (wake word is extremely rare in ambient audio). Use hard negative mining to create challenging negatives
+      - **Loss function**: Focal loss (gamma=2) to handle extreme class imbalance. Down-weights easy negatives, focuses learning on ambiguous cases
+      - **Data augmentation**: Room impulse responses, noise injection at -5dB to +30dB SNR, speed perturbation +/-10%, SpecAugment on mel features
+      - **Evaluation**: ROC curve at target operating point (0.5 FA/day). Plot TPR vs. FA/hour across diverse test environments
+      - **Training time**: ~2 hours on 4 GPUs. Model is small (50K params) but dataset is large (50M+ negative samples)
+
+      **ASR model training:**
+
+      | Phase | Data | Duration | Objective |
+      |-------|------|----------|-----------|
+      | **Pre-training** | 1M hours unlabeled audio (wav2vec-style) | 2 weeks, 64 TPUs | Self-supervised contrastive loss |
+      | **Supervised fine-tuning** | 100K hours transcribed speech | 1 week, 32 GPUs | RNN-T / attention loss |
+      | **Semi-supervised** | 500K hours pseudo-labeled | 3 days, 32 GPUs | Knowledge distillation from teacher |
+      | **Domain adaptation** | 10K hours domain-specific | 1 day, 8 GPUs | Fine-tune on voice assistant utterances |
+
+      **NLU model training:**
+      - **Multi-task learning**: Train intent classification and slot filling jointly with shared encoder
+      - **Curriculum**: Easy single-intent utterances first, then multi-intent, then noisy ASR transcripts
+      - **Robustness to ASR errors**: Train NLU on both ground-truth text and simulated ASR outputs (with realistic error patterns)
+      - **Few-shot adaptation**: For new intents, use prototypical networks to learn from 5-10 examples without full retraining
+
+      **End-to-end joint training (advanced):**
+      - **SpeechBrain / ESPnet pipelines**: Train ASR and NLU jointly so ASR learns to prioritize words that matter for NLU
+      - Alternatively, use **Spoken Language Understanding (SLU)** models that go directly from audio to intent+slots, bypassing text
+      - Google reports that joint ASR+NLU training improves task completion by **2-3%** over pipeline training
+
+      **Continuous training cadence:**
+      - Wake word model: Retrained **monthly** (slow-changing acoustics)
+      - ASR model: Retrained **weekly** (new vocabulary, accent adaptation)
+      - NLU model: Retrained **daily** (new intents from skill developers, trending entities)
+    dialogue:
+      - speaker: interviewer
+        text: "How do you train the speech pipeline end-to-end?"
+      - speaker: candidate
+        text: "Each component has a different training cadence. Wake word retrains monthly with extreme class imbalance handling. ASR uses a pre-train then fine-tune pipeline taking weeks. NLU retrains daily to accommodate new skills and entities."
+      - speaker: interviewer
+        text: "What about joint training of ASR and NLU?"
+      - speaker: candidate
+        text: "Joint training helps ASR prioritize intent-relevant words over filler. Google and Amazon both report 2-3% task completion improvements from joint optimization versus pipeline training."
+      - speaker: interviewer
+        text: "Good. Let's discuss deployment."
+    next: deploy_serving
+
+  # ============ DEPLOYMENT ============
+  - id: deploy_serving
+    stage: deployment
+    type: question
+    label: "On-Device vs Cloud Split"
+    speaker: interviewer
+    content: |
+      How would you split the processing between on-device and cloud? This is the defining architectural decision for voice assistants, balancing **privacy and latency** (on-device) against **accuracy and capability** (cloud).
+    dialogue:
+      - speaker: interviewer
+        text: "Where do you draw the line between on-device and cloud processing?"
+      - speaker: candidate
+        text: "The key factors are model size, latency sensitivity, privacy requirements, and network reliability."
+      - speaker: interviewer
+        text: "What's the right split for a 2026 voice assistant?"
+    choices:
+      - label: "Hybrid: wake word + lightweight ASR on-device, full ASR + NLU in cloud"
+        answer: |
+          I would use a **hybrid split** with on-device wake word and streaming ASR, plus cloud-based full re-ranking and NLU:
+
+          **On-device components:**
+          ```
+          Always-on: Wake word detector (50K params, <1mW on DSP)
+                              │ Wake detected
+                              ▼
+          Activated: On-device streaming ASR (30M params, runs on NPU/GPU)
+                     Streams partial transcripts to cloud
+                              │
+                     On-device endpointer (200K params)
+                              │ End of utterance
+                              ▼
+          Deactivate microphone, wait for cloud response
+          ```
+
+          **Cloud components:**
+          ```
+          Streaming transcript from device
+                    │
+                    ▼
+          Cloud ASR rescoring (300M param attention model)
+                    │ Corrected transcript
+                    ▼
+          NLU: Intent + Slot extraction (500 intents, 200 slot types)
+                    │
+                    ▼
+          Dialog Manager + Skill Routing
+                    │
+                    ▼
+          Response generation → TTS → Stream audio back to device
+          ```
+
+          **Why this split?**
+          - **Privacy**: Audio never leaves the device until wake word is confirmed. The on-device ASR transcript (not raw audio) is sent to cloud. Apple's approach with Siri
+          - **Latency**: On-device ASR starts transcribing immediately (no network round-trip). Cloud rescoring adds ~100ms but produces a better final transcript
+          - **Reliability**: If network is down, on-device ASR can handle simple commands (timer, alarm, smart home) locally. ~30% of voice commands can be handled offline
+          - **Cost**: Cloud inference only for confirmed wake words (~10 interactions/device/day). Not the full 16 hours of ambient audio
+
+          **Network optimization:**
+          - **Audio compression**: If raw audio must be sent, use Opus codec at 16kbps (vs. 256kbps uncompressed). 16x bandwidth reduction
+          - **Transcript streaming**: Send partial ASR transcripts via WebSocket as words are recognized. Enables cloud NLU to start processing before utterance ends
+          - **Edge caching**: Cache NLU results for common commands ("what's the weather," "turn on the lights") at the edge. ~20% of commands are cacheable
+
+          **Hardware requirements (on-device):**
+
+          | Component | Model Size | Compute | Hardware |
+          |-----------|-----------|---------|----------|
+          | Wake word | 15KB (INT8) | 2M MAC/s | DSP (always-on) |
+          | Streaming ASR | 60MB (INT8) | 2 GFLOPS | NPU/GPU (activated) |
+          | Endpointer | 400KB (INT8) | 50M MAC/s | NPU (activated) |
+
+          **Trade-off**: On-device ASR (30M params) has ~8% WER vs. cloud ASR's ~3% WER. The cloud rescoring step corrects most errors, but there is a ~200ms window where the user sees the less-accurate on-device transcript before it is corrected (the "text correction jump").
+        next: mon_monitoring
+      - label: "On-device first: full ASR + NLU on-device, cloud as fallback"
+        answer: |
+          I would push **maximum processing on-device**, using cloud only as a fallback for complex queries:
+
+          **On-device pipeline (primary):**
+          ```
+          Wake word (DSP, always-on)
+                    │
+                    ▼
+          On-device ASR (Conformer-S, 30M params, NPU)
+                    │ Transcript
+                    ▼
+          On-device NLU (DistilBERT, 66M params, NPU)
+                    │ Intent + Slots
+                    ▼
+          Local execution (timer, alarm, smart home, music playback)
+          OR
+          Cloud fallback (web search, complex queries, third-party skills)
+          ```
+
+          **On-device NLU:**
+          - **Model**: DistilBERT fine-tuned for 200 common intents and 100 slot types. Covers ~80% of daily interactions
+          - **Size**: 130MB (INT8 quantized). Fits in the NPU memory of modern SoCs (Apple A17, Qualcomm Snapdragon 8 Gen 3)
+          - **Inference**: ~5ms on NPU
+          - **Local skill execution**: Timer, alarm, calculator, smart home control (via local Bluetooth/WiFi), music playback from cached library
+
+          **Cloud fallback criteria:**
+          - On-device NLU confidence < 0.7
+          - Intent requires web access (web search, real-time info, third-party APIs)
+          - Multi-turn dialog that exceeds on-device dialog state capacity
+          - Estimated ~20-30% of queries go to cloud
+
+          **Why on-device first?**
+          - **Privacy**: Apple's marketing advantage. "What happens on your iPhone stays on your iPhone." No audio or transcripts sent to the cloud for 70-80% of interactions
+          - **Latency**: On-device end-to-end: wake word (100ms) + ASR (300ms) + NLU (5ms) + execution (50ms) = **~455ms**. Cloud path adds 150-300ms network round-trip
+          - **Offline capability**: Works on airplane, in areas with poor connectivity, in cars going through tunnels. Amazon reports ~15% of Alexa interactions happen with degraded connectivity
+          - **Cost**: No cloud inference cost for 70-80% of interactions. At 10B monthly requests, saving cloud costs on 7B of them is significant (~$7M/month at $0.001/request)
+
+          **On-device model optimization:**
+          - **Neural Architecture Search (NAS)**: Use NAS to find optimal Conformer architecture for target NPU hardware. Google's EfficientNet-style search
+          - **Quantization-Aware Training (QAT)**: Train with simulated INT8 quantization. Recovers 50% of the accuracy loss from post-training quantization
+          - **Model pruning**: Structured pruning removes 40% of attention heads with <1% WER degradation
+          - **Core ML / TFLite**: Apple Core ML and Android TFLite provide hardware-accelerated inference on NPU/GPU
+
+          **Trade-off**: On-device NLU supports fewer intents (~200 vs. ~500 cloud), lower accuracy (~90% vs. ~95% intent accuracy), and cannot handle open-ended queries. Users may notice quality differences between on-device and cloud responses. Mitigate with confidence-based routing: always route to cloud when on-device confidence is low, so users experience consistent quality.
+        next: mon_monitoring
+
+  # ============ MONITORING ============
+  - id: mon_monitoring
+    stage: monitoring
+    type: info
+    label: "Monitoring & Quality"
+    speaker: interviewer
+    content: |
+      Let's design the monitoring system for the voice assistant. Monitoring speech systems is uniquely challenging because errors are **transient** (audio is gone once played) and **subjective** (accent recognition quality varies by demographic).
+
+      **Wake word monitoring:**
+
+      | Metric | Target | Alert Threshold |
+      |--------|--------|----------------|
+      | False accept rate | <0.5/day/device | >1.0/day (averaged over 1M+ devices) |
+      | Miss rate (TPR complement) | <3% quiet, <10% noisy | >5% quiet or >15% noisy |
+      | Detection latency | <100ms | P99 > 200ms |
+      | Power consumption | <1mW | >1.5mW (hardware regression) |
+
+      - **Demographic fairness**: Track miss rate broken down by speaker gender, age group, accent. Amazon discovered that early Alexa models had **30% higher miss rate** for Southern US accents and children's voices. Regular fairness audits are essential
+      - **False wake analysis**: Collect audio context around false wakes (with user consent) to build hard negative training sets. Common triggers: TV ads saying "Alexa," similar-sounding words in conversation
+
+      **ASR monitoring:**
+      - **Automated WER tracking**: Run daily on a held-out test set of 10K utterances across accents, noise levels, and domains. Alert if WER increases >0.5% day-over-day
+      - **Accent-stratified WER**: Track WER separately for major accent groups (General American, British, Indian English, Southern US, AAVE, etc.). Target: no accent group >2x the overall WER
+      - **Domain-specific WER**: Music queries (artist/song names), smart home (device names), contacts (people names). These proper nouns are the hardest for ASR
+      - **Real-time RTF monitoring**: Ensure streaming ASR keeps up with audio in real-time. RTF > 0.8 triggers scaling alerts
+
+      **NLU monitoring:**
+      - **Intent distribution drift**: If "PlayMusic" intent drops from 25% to 20% of traffic without seasonal explanation, investigate
+      - **Slot extraction coverage**: Track fraction of utterances where expected slots are successfully extracted. Drop indicates vocabulary or entity coverage gap
+      - **Error cascade analysis**: For each failed task, attribute to wake word failure, ASR error, NLU error, or execution error. Helps prioritize improvements
+
+      **End-to-end monitoring:**
+      - **Task success rate dashboard**: Real-time visualization of success rate by intent, device type, and region
+      - **User friction signals**: Track "repeat" commands, volume changes, device muting, and "stop/cancel" as frustration indicators
+      - **A/B testing pipeline**: New models go through 1% -> 10% -> 50% -> 100% rollout with automatic rollback on guardrail metric violations
+
+      **Feedback loops:**
+      ```
+      Failed interactions → Sampling → Human annotation → Retraining data
+                               │
+                         Implicit signals:
+                         - User corrections ("No, I said...")
+                         - Reformulations within 30 seconds
+                         - Task abandonment
+      ```
+      - User corrections are gold-standard training data. "Play songs by the beetles" -> (user corrects) -> "Play songs by The Beatles" teaches both ASR and NLU
+      - Amazon reports that incorporating user corrections improves next-month WER by **0.3-0.5%** per retraining cycle
+    dialogue:
+      - speaker: interviewer
+        text: "How do you monitor a voice assistant in production?"
+      - speaker: candidate
+        text: "Four layers: wake word false-accept monitoring with demographic fairness tracking, ASR WER monitoring stratified by accent and domain, NLU intent drift detection, and end-to-end task success rate as the north star metric."
+      - speaker: interviewer
+        text: "How do you handle the fairness dimension -- ensuring the system works equally well for different accents and demographics?"
+      - speaker: candidate
+        text: "Mandatory stratified evaluation across gender, age, and accent groups with a policy that no subgroup's error rate exceeds 2x the overall rate. Active data collection for underperforming demographics."
+      - speaker: interviewer
+        text: "Excellent. Let's wrap up."
+    next: conclusion
+
+  # ============ TERMINAL ============
+  - id: conclusion
+    stage: monitoring
+    type: terminal
+    label: "Design Complete"
+    speaker: interviewer
+    content: |
+      Outstanding work! You have designed a comprehensive **Voice Assistant & Wake Word Detection** system.
+
+      **Your design covers:**
+      - **Wake word detection**: Depthwise-separable CNN or GRU-based RNN on low-power DSP with two-stage confirmation, targeting <1mW power and <0.5 false accepts per day
+      - **Metrics**: Component-level SLAs (TPR, WER, intent accuracy) or end-to-end task completion metrics (TCR, user satisfaction, frustration rate)
+      - **Data pipeline**: 500K positive wake word samples with 50M negatives, 100K+ hours of transcribed speech for ASR, privacy-preserving collection via federated learning
+      - **Audio features**: Log-mel filterbanks (efficient, proven) or learned features from raw waveforms (wav2vec 2.0 for higher accuracy)
+      - **ASR architecture**: Streaming Conformer-RNN-T (real-time output) or attention-based encoder-decoder (highest accuracy with two-pass approach)
+      - **NLU approach**: Joint BERT-based intent + slot filling (fast, production-proven) or LLM-based NLU (flexible, zero-shot capable)
+      - **Training**: Multi-phase pipeline from self-supervised pre-training through domain adaptation, with component-specific cadences
+      - **Deployment**: Hybrid on-device + cloud split or on-device-first with cloud fallback, balancing privacy, latency, and capability
+      - **Monitoring**: Demographic fairness tracking, accent-stratified WER, task success rate dashboards, user correction feedback loops
+
+      **Key design trade-offs highlighted:**
+      - CNN vs. RNN for wake word (power efficiency vs. temporal modeling)
+      - Streaming vs. attention-based ASR (latency vs. accuracy)
+      - Traditional vs. LLM NLU (cost/speed vs. flexibility/generalization)
+      - On-device vs. cloud (privacy/latency vs. accuracy/capability)
+
+      This demonstrates deep understanding of speech processing, on-device ML constraints, and the operational challenges of serving hundreds of millions of devices with real-time audio processing. Excellent design!
+    dialogue:
+      - speaker: interviewer
+        text: "Great design. You covered the full pipeline from always-on wake word detection through cloud NLU. Any final thoughts?"
+      - speaker: candidate
+        text: "The most underappreciated challenge is demographic fairness. Voice assistants that work poorly for certain accents, age groups, or speech patterns create an accessibility gap. Continuous stratified monitoring and targeted data collection are essential investments."
+      - speaker: interviewer
+        text: "That's a mature and important insight. Well done!"

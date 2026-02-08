@@ -1,0 +1,900 @@
+id: text-to-image
+title: "Text-to-Image Generation System"
+description: "Design a text-to-image generation system like DALL-E or Midjourney for production use."
+companies: ["OpenAI", "Google", "Stability AI"]
+domains: ["Computer Vision", "Generative AI", "NLP"]
+category: "Generative AI"
+root: pd_start
+
+nodes:
+  # ============ PROBLEM DEFINITION ============
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design a **text-to-image generation system** for production use, similar to DALL-E 3, Midjourney, or Stable Diffusion.
+
+      **Business context:**
+      - DALL-E 3 generates **~100 million images per day** for ChatGPT and API users
+      - Midjourney has **~16 million users** generating billions of images, with $200M+ ARR from a team of ~40 people
+      - Stable Diffusion (open-source) has been downloaded 30M+ times and powers thousands of applications
+      - The AI image generation market is projected to reach **$1.3 billion by 2027**
+
+      **Product requirements:**
+      - Generate photorealistic or stylized images from natural language text prompts
+      - Support multiple resolutions: 512x512, 1024x1024, up to 2048x2048
+      - Generation time: <10 seconds for standard quality, <30 seconds for high quality
+      - Cost target: $0.01-0.04 per image (API pricing: $0.04-0.08 with margin)
+      - Output 4 image variations per prompt (user selects best)
+
+      **Key challenges:**
+      - **Prompt understanding**: "A corgi wearing a top hat, oil painting style, dramatic lighting" requires compositional understanding of subject, attributes, style, and lighting
+      - **Content safety**: Prevent generation of CSAM, non-consensual deepfakes, copyrighted characters, and other harmful outputs
+      - **Quality consistency**: Users expect every generation to be high quality, not 1 good image in 10
+      - **IP and copyright**: Training on copyrighted images raises legal questions (ongoing lawsuits: Getty v. Stability AI, artists' class action)
+      - **Inference cost**: Each image requires ~30-100 forward passes through a billion-parameter model on expensive GPUs
+      - **Adversarial prompts**: Users attempt to bypass safety filters with creative prompt engineering
+
+      Let's start with the core architecture decision.
+    dialogue:
+      - speaker: interviewer
+        text: "Let's design a text-to-image generation system. What's the landscape of approaches?"
+      - speaker: candidate
+        text: "Three main paradigms: diffusion models like DALL-E 3 and Stable Diffusion, autoregressive models like Parti and DALL-E 1, and GANs which are largely superseded for text-to-image. Diffusion models currently dominate because they produce higher quality and offer better controllability."
+      - speaker: interviewer
+        text: "Why have diffusion models won over GANs for text-to-image?"
+      - speaker: candidate
+        text: "Three reasons: training stability -- GANs suffer from mode collapse and training instability at scale. Diversity -- diffusion models produce more varied outputs for the same prompt. And controllability -- you can guide the diffusion process with classifiers, CLIP, or direct text conditioning."
+      - speaker: interviewer
+        text: "Good overview. Let's dive into the architecture choice."
+    next: pd_arch_question
+
+  - id: pd_arch_question
+    stage: problem_definition
+    type: question
+    label: "Generation Architecture"
+    speaker: interviewer
+    content: |
+      The fundamental architecture choice shapes everything downstream. What generation approach would you use?
+
+      **Option A:** Latent diffusion model (the architecture behind Stable Diffusion, DALL-E 3, and Imagen).
+      **Option B:** Autoregressive visual token prediction (the approach used by Parti, DALL-E 1, and recent models like Chameleon).
+    choices:
+      - label: "Latent diffusion model"
+        answer: |
+          I'd use a **latent diffusion model (LDM)**, the architecture behind Stable Diffusion and the foundation for DALL-E 3:
+
+          **Architecture overview:**
+          ```
+          Text Prompt: "A corgi wearing a top hat, oil painting"
+               |
+          Text Encoder (CLIP ViT-L/14 + T5-XXL)
+               |
+          Text Embeddings (77 tokens x 768-dim CLIP + 512 tokens x 4096-dim T5)
+               |
+          Latent Diffusion U-Net (with cross-attention to text embeddings)
+               |
+          Iterative Denoising (20-50 steps in 64x64x4 latent space)
+               |
+          VAE Decoder (latent -> pixel space)
+               |
+          1024x1024 Image
+          ```
+
+          **Why latent diffusion:**
+          - **Computational efficiency**: Operating in latent space (64x64x4) instead of pixel space (1024x1024x3) reduces computation by ~50x. A 1024x1024 image has 3M pixels; its latent representation has ~16K values
+          - **Quality**: The VAE encoder-decoder preserves perceptual quality while compressing spatial dimensions. SDXL achieves FID of 2.27 on COCO (near-photorealistic)
+          - **Controllability**: Cross-attention between text embeddings and U-Net features enables fine-grained text-image alignment. Each denoising step is guided by the text condition
+          - **Ecosystem**: Extensive tooling -- ControlNet for pose/depth conditioning, IP-Adapter for style transfer, LoRA for fine-tuning, inpainting/outpainting variants
+          - **Proven at scale**: Stability AI serves billions of images with this architecture. DALL-E 3 builds on diffusion
+
+          **Key components:**
+          - **VAE** (Variational Autoencoder): Encodes 1024x1024x3 images to 128x128x4 latent space (8x spatial compression)
+          - **U-Net**: 860M parameter model with self-attention, cross-attention, and residual blocks. Cross-attention layers attend to text embeddings
+          - **Text encoders**: Dual encoder -- CLIP for global semantic alignment, T5-XXL for detailed text understanding. DALL-E 3 showed dual encoders significantly improve prompt following
+          - **Noise scheduler**: DDPM with 1000 training steps, DDIM/DPM++ for 20-50 inference steps
+
+          **Trade-offs:**
+          - Iterative denoising is slower than single-pass generation (20-50 forward passes)
+          - Quality depends heavily on the number of denoising steps (diminishing returns after ~30)
+          - Latent space can introduce artifacts at high compression ratios
+        next: met_overview
+      - label: "Autoregressive visual token prediction"
+        answer: |
+          I'd use an **autoregressive model** that treats image generation as next-token prediction on visual tokens:
+
+          **Architecture overview:**
+          ```
+          Text Prompt: "A corgi wearing a top hat, oil painting"
+               |
+          Text Tokenizer (BPE, same as LLM)
+               |
+          [Text tokens] + [Image tokens predicted left-to-right]
+               |
+          Large Transformer (decoder-only, 20B params)
+               |
+          Predicts visual tokens one at a time (1024 tokens for 256x256)
+               |
+          Visual Detokenizer (VQ-VAE decoder)
+               |
+          1024x1024 Image (with super-resolution upsampler)
+          ```
+
+          **Why autoregressive:**
+          - **Unified architecture**: Same transformer architecture for text and image generation. A single model can generate text, images, and interleaved multimodal content (like GPT-4o)
+          - **Natural language understanding**: LLM-based backbone has superior prompt understanding. Complex compositional prompts ("a red cube on top of a blue sphere, with the cube's reflection visible on the sphere") are better handled by models with strong language priors
+          - **Scaling laws apply**: Autoregressive models benefit from well-understood scaling laws. Quality improves predictably with model size and data, following the same curves as LLMs
+          - **In-context learning**: Can condition on example images in the prompt (few-shot image generation) without architecture changes
+          - **Google's Parti results**: 20B parameter Parti achieves competitive FID (3.22 on COCO) and superior text rendering in images (diffusion models struggle with text)
+
+          **Key components:**
+          - **VQ-VAE** (Vector Quantized VAE): Encodes images into discrete tokens from a codebook of 8192 visual tokens. A 256x256 image becomes a sequence of 1024 tokens
+          - **Transformer decoder**: 20B parameters, same architecture as PaLM/GPT. Treats image generation as language modeling over visual tokens
+          - **Super-resolution**: Separate diffusion upsampler from 256x256 to 1024x1024 (common in autoregressive pipelines)
+
+          **Trade-offs:**
+          - **Slower generation**: 1024 sequential token predictions (each requiring a full forward pass with KV-cache). ~5-15 seconds vs. 3-8 seconds for diffusion
+          - **Error accumulation**: Early token errors compound (wrong global structure is hard to fix in later tokens)
+          - **Discrete bottleneck**: VQ-VAE codebook of 8192 tokens may not capture all visual details, causing subtle quality loss
+          - **Higher compute cost**: 20B parameter model is more expensive per inference than 860M U-Net (even with KV-cache optimization)
+        next: met_overview
+
+  # ============ METRICS ============
+  - id: met_overview
+    stage: metrics
+    type: info
+    label: "Metrics Framework"
+    speaker: interviewer
+    content: |
+      Good architectural choice. Now let's define how we measure image generation quality. This is surprisingly difficult -- "good" is subjective.
+
+      **Automated metrics:**
+
+      | Metric | What It Measures | Value Range | Limitations |
+      |--------|-----------------|-------------|-------------|
+      | **FID** (Frechet Inception Distance) | Distribution similarity between generated and real images | 0-300+ (lower=better) | Doesn't measure per-image quality, needs 50K+ samples |
+      | **CLIP Score** | Text-image alignment | 0-1 (higher=better) | Rewards "CLIPpy" aesthetics, not actual quality |
+      | **Inception Score (IS)** | Image quality and diversity | 1-1000 (higher=better) | Biased toward ImageNet classes |
+      | **FID-CLIP** (Pareto) | Joint quality + alignment | Pareto frontier | Requires balancing two metrics |
+      | **Aesthetic Score** | Visual appeal (learned predictor) | 1-10 | Biased toward training data preferences |
+
+      **Why automated metrics are insufficient:**
+      - FID requires 50K+ images to be statistically meaningful -- useless for per-image evaluation
+      - CLIP Score can be gamed: an image of text saying "a dog" scores high on CLIP for prompt "a dog" but is not what users want
+      - No automated metric reliably captures: composition quality, anatomical correctness (hands!), text rendering accuracy, style consistency
+
+      **Human evaluation framework (the gold standard):**
+      - **Image quality**: Does the image look realistic/aesthetically pleasing? (1-5 scale)
+      - **Prompt alignment**: Does the image match what was described? (1-5 scale)
+      - **Preference ranking**: Given 4 model outputs, rank them 1st to 4th
+      - **A/B testing**: Show two outputs from different models, which is preferred?
+
+      **Production metrics:**
+
+      | Metric | Target | Measurement |
+      |--------|--------|-------------|
+      | User regeneration rate | <30% (users happy with first result) | Product analytics |
+      | Image selection rate | >40% (users select at least 1 of 4 variants) | Product analytics |
+      | Human preference win rate | >50% vs. competitor (Midjourney, DALL-E) | Monthly blind evaluation |
+      | FID (on COCO 30K) | <5.0 | Automated benchmark |
+      | CLIP Score | >0.30 | Automated benchmark |
+      | Inference latency (P95) | <10s for 1024x1024 | Service monitoring |
+      | Cost per image | <$0.04 | Infrastructure accounting |
+      | Safety filter trigger rate | <2% of legitimate prompts | Product analytics |
+
+      **The "hands problem":**
+      Image generation models notoriously produce anatomically incorrect hands. This is tracked as a specific quality metric: percentage of generated human images with correct hand anatomy. DALL-E 3 improved this significantly over DALL-E 2 through targeted training data curation.
+
+      Let's discuss the training data strategy.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you run meaningful A/B tests when image quality is subjective?"
+      - speaker: candidate
+        text: "Blind side-by-side comparisons with a large panel. Show 1000 evaluators the same prompts with outputs from two systems, randomize left/right placement. With 1000+ comparisons, we get statistically significant preference rates. Midjourney uses Discord community votes as a massive implicit A/B testing platform."
+      - speaker: interviewer
+        text: "What about the FID metric? Is it actually useful?"
+      - speaker: candidate
+        text: "FID is useful as a sanity check during training -- if FID suddenly increases, something is wrong. But it's not useful for comparing models with similar quality levels. The difference between FID 3.0 and 3.5 is imperceptible to humans. We should use FID as a guardrail, not a north star."
+      - speaker: interviewer
+        text: "Good distinction. Let's talk about training data."
+    next: data_question
+
+  # ============ DATA ============
+  - id: data_question
+    stage: data
+    type: question
+    label: "Training Data Strategy"
+    speaker: interviewer
+    content: |
+      Training data is the most contentious aspect of text-to-image systems. The quality, diversity, and legality of training data directly determine output quality. What data strategy would you use?
+
+      Consider the quality-scale-legality tradeoff.
+    choices:
+      - label: "Large-scale web-scraped data with aggressive filtering"
+        answer: |
+          I'd use **large-scale web-scraped data** with multi-stage quality and safety filtering:
+
+          **Data pipeline:**
+          ```
+          Common Crawl / Web Scraping
+               |
+          ~5 billion image-text pairs (raw)
+               |
+          Stage 1: Deduplication (remove exact + near duplicates)
+          ~2 billion pairs
+               |
+          Stage 2: CLIP score filtering (cosine > 0.25)
+          ~1 billion pairs (text actually describes image)
+               |
+          Stage 3: Aesthetic score filtering (score > 5.0/10)
+          ~400 million pairs
+               |
+          Stage 4: Safety filtering (NSFW, CSAM, violence removal)
+          ~350 million pairs
+               |
+          Stage 5: Copyright filtering (known copyrighted works, artist opt-out)
+          ~300 million pairs
+               |
+          Final Training Set: ~300M high-quality, filtered image-text pairs
+          ```
+
+          **Why web-scraped data:**
+          - **Scale**: 300M high-quality pairs after filtering. This scale is necessary -- Stable Diffusion trained on ~2B pairs (LAION-5B subset), DALL-E 3 reportedly used similar scale
+          - **Diversity**: Web data covers every conceivable subject, style, and composition. Stock photo databases alone can't match this diversity
+          - **Cost**: Web scraping + filtering costs ~$50K-100K. Licensing 300M images would cost billions
+          - **Proven approach**: Every major text-to-image system (DALL-E, Midjourney, Stable Diffusion, Imagen) uses web-scraped data as the foundation
+
+          **Quality filtering details:**
+          - **Aesthetic model**: Trained on LAION-Aesthetics (human-rated image quality scores). Filters out blurry, poorly composed, or text-heavy images
+          - **CLIP filtering**: Removes pairs where text doesn't describe the image (common in web data -- alt-text is often wrong or generic)
+          - **Resolution filtering**: Remove images below 512x512 (low-res images degrade training)
+          - **Text quality**: Remove captions that are URLs, filenames, or single words
+
+          **Legal and ethical considerations:**
+          - **Opt-out mechanism**: Respect robots.txt, implement Do Not Train registry, honor artist opt-out requests (like Stable Diffusion's opt-out form)
+          - **CSAM scanning**: Run PhotoDNA and CLIP-based NSFW detection on all training images. Zero tolerance policy
+          - **Copyright mitigation**: Remove exact copies of known copyrighted works, deduplicate against popular stock photo databases
+          - **Ongoing legal risk**: Getty v. Stability AI and artists' class actions are unresolved. The legal landscape may change
+        next: feat_question
+      - label: "Licensed and synthetic data (legally safe approach)"
+        answer: |
+          I'd use a **legally defensible data strategy** combining licensed sources with synthetic data augmentation:
+
+          **Data sources:**
+
+          | Source | Volume | Cost | Legal Status |
+          |--------|--------|------|-------------|
+          | **Licensed stock photos** (Shutterstock, Adobe Stock) | ~100M images | $50-100M | Fully licensed |
+          | **Public domain** (museums, government, expired copyright) | ~50M images | ~$500K (curation) | No restrictions |
+          | **Creative Commons** (Flickr, Wikimedia) | ~80M images | ~$200K (curation) | Attribution required |
+          | **Synthetic captions** (LLM-generated descriptions) | Enrich all images | ~$1M compute | No copyright issue |
+          | **Synthetic images** (model-generated bootstrap) | ~50M images | ~$2M compute | Self-generated |
+          | **Total** | **~280M images** | **~$55-105M** | **Legally clear** |
+
+          **Why licensed data:**
+          - **Legal safety**: Zero risk of copyright infringement lawsuits. Adobe Firefly uses this approach exclusively and markets it as "commercially safe"
+          - **Known provenance**: Every training image has clear ownership and licensing terms
+          - **High quality**: Licensed stock photos are professionally shot, well-described, and consistently high quality
+          - **Business model alignment**: Can offer users commercial rights to generated images (a key selling point for enterprise customers)
+          - **Adobe's example**: Adobe Firefly trained exclusively on Adobe Stock, Creative Commons, and public domain images. Their "commercially safe" positioning is a significant competitive advantage
+
+          **Caption quality enhancement:**
+          - Stock photo captions are often generic ("business meeting"). Use BLIP-2 or LLaVA to generate detailed descriptions: "A diverse team of five professionals discussing quarterly results around a modern conference table in a glass-walled office with city skyline visible through floor-to-ceiling windows"
+          - Detailed captions dramatically improve prompt-following ability (DALL-E 3's key innovation was training on detailed synthetic captions)
+
+          **Trade-offs:**
+          - **Cost**: $55-105M for data licensing vs. ~$100K for web scraping. Significant upfront investment
+          - **Diversity gap**: Stock photos have known biases -- overrepresentation of Western, professional settings. Supplemented with Creative Commons and public domain for diversity
+          - **Scale**: 280M images vs. 300M+ from web scraping. Comparable but tighter margin
+          - **Quality advantage**: Licensed images are consistently higher quality, which may offset the smaller scale
+        next: feat_question
+
+  # ============ FEATURES ============
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Text-Image Alignment Strategy"
+    speaker: interviewer
+    content: |
+      A critical differentiator for text-to-image systems is **prompt-following ability** -- how well the generated image matches the user's description. DALL-E 3's major improvement over DALL-E 2 was prompt alignment. How would you achieve strong text-image alignment?
+    choices:
+      - label: "RLHF/DPO alignment (human preference optimization)"
+        answer: |
+          I'd use **reinforcement learning from human feedback (RLHF)** and **Direct Preference Optimization (DPO)** to align the model with human preferences:
+
+          **RLHF pipeline for image generation:**
+          ```
+          Phase 1: Train base diffusion model on image-text pairs
+               |
+          Phase 2: Collect human preferences
+          - Generate 4 images per prompt
+          - Humans rank: best to worst
+          - ~500K preference comparisons
+               |
+          Phase 3: Train reward model
+          - Input: (prompt, image) pair
+          - Output: quality score (0-1)
+          - Architecture: CLIP-based with fine-tuned projection
+          - Training: Bradley-Terry model on pairwise preferences
+               |
+          Phase 4: Fine-tune generator with reward model
+          - Use reward-weighted denoising (ReFL) or DPO
+          - Optimize: E[R(prompt, generated_image)]
+          - With KL penalty to prevent reward hacking
+          ```
+
+          **Why RLHF/DPO:**
+          - **Directly optimizes what matters**: Instead of proxy metrics (FID, CLIP Score), optimize for human preference directly
+          - **Captures subjective quality**: Composition, aesthetic appeal, and "wow factor" that no automated metric captures
+          - **Handles multi-dimensional quality**: Humans naturally integrate text alignment, visual quality, and creativity into a single ranking
+          - **DALL-E 3's approach**: OpenAI used extensive RLHF to make DALL-E 3 significantly better at prompt following than DALL-E 2
+          - **DPO advantage**: Direct Preference Optimization avoids training a separate reward model -- more stable and computationally cheaper than PPO-based RLHF
+
+          **DPO for diffusion models (Diffusion-DPO):**
+          - Pairs: (prompt, preferred_image, rejected_image)
+          - Loss: encourages the model to assign higher likelihood to preferred images
+          - No reward model needed -- directly optimizes the diffusion model
+          - Published results: +5% human preference win rate over base model
+
+          **Trade-offs:**
+          - **Cost**: 500K human preference annotations cost ~$500K-1M
+          - **Reward hacking risk**: Model may exploit the reward model (generating "CLIPpy" images that score high but look unnatural). KL penalty mitigates this
+          - **Preference bias**: Human evaluators have cultural and aesthetic biases that get baked into the model
+          - **Slow iteration**: Each RLHF cycle takes 1-2 weeks (generate, collect preferences, train reward model, fine-tune)
+        next: mod_overview
+      - label: "Classifier-free guidance with detailed captions"
+        answer: |
+          I'd use **classifier-free guidance (CFG)** combined with **synthetic detailed captions** -- the approach that made DALL-E 3 a step-change improvement:
+
+          **Classifier-Free Guidance (CFG):**
+          ```
+          At each denoising step t:
+
+          noise_pred = noise_unconditional + guidance_scale * (noise_conditional - noise_unconditional)
+
+          guidance_scale = 7.5 (typical)
+          - Higher (10-15): Stronger text adherence but less diversity
+          - Lower (2-5): More diversity but weaker text following
+          ```
+
+          **Why CFG works so well:**
+          - The model learns both conditional (with text) and unconditional (without text) denoising
+          - At inference, we amplify the "direction" that the text condition pushes the generation
+          - This creates a strong pull toward matching the text prompt without requiring any additional models or training phases
+          - **Nearly free at inference**: Only 2x the denoising cost (one conditional + one unconditional forward pass per step)
+
+          **The DALL-E 3 innovation -- detailed synthetic captions:**
+          ```
+          Original caption: "A dog in a park"
+
+          Synthetic detailed caption (generated by GPT-4V/CogVLM):
+          "A golden retriever puppy sitting on freshly mowed grass in
+          Central Park, New York. The puppy has a red collar and is looking
+          directly at the camera with its tongue out. Behind it, oak trees
+          with autumn foliage are visible. The lighting is warm, late
+          afternoon golden hour. Shot at approximately f/2.8 with shallow
+          depth of field, background softly blurred."
+          ```
+
+          **Caption quality pipeline:**
+          1. Run BLIP-2/CogVLM on all training images to generate detailed descriptions
+          2. Use GPT-4 to rewrite descriptions in natural prompt-like language
+          3. Train model on both original captions (for robustness) and detailed captions (for prompt-following)
+          4. At inference, users write detailed prompts that match the detailed caption distribution
+
+          **Why synthetic captions + CFG:**
+          - **No human annotation needed**: Caption generation is fully automated (~$0.01 per image for LLM captioning)
+          - **Massive scale**: Can re-caption the entire 300M training set for ~$3M
+          - **Directly addresses the problem**: Poor prompt-following is caused by poor caption quality in training data. Fix the captions, fix the problem
+          - **OpenAI's finding**: DALL-E 3's biggest improvement came from training on detailed synthetic captions, not from architecture changes
+
+          **Trade-offs:**
+          - **Caption quality dependency**: If the captioning model makes errors, the image model learns wrong associations
+          - **Prompt distribution shift**: Users write short prompts ("cute cat") but model trained on detailed captions. Need to handle both distributions
+          - **CFG trade-off**: Higher guidance scale improves text alignment but reduces diversity and can cause oversaturation artifacts
+          - **No direct human preference signal**: Unlike RLHF, doesn't learn subjective aesthetic preferences
+        next: mod_overview
+
+  # ============ MODEL ============
+  - id: mod_overview
+    stage: model
+    type: info
+    label: "Model Architecture Details"
+    speaker: interviewer
+    content: |
+      Good alignment strategy. Let's detail the model architecture and its key components.
+
+      **U-Net architecture for latent diffusion (SDXL-class):**
+
+      ```
+      Noisy Latent (128x128x4) + Timestep Embedding + Text Embeddings
+           |
+      ┌─────────────────────────────────┐
+      │ Encoder Path                     │
+      │ 128x128 -> 64x64 -> 32x32       │
+      │ ResBlock + SelfAttn + CrossAttn  │
+      │ (CrossAttn attends to text)      │
+      └──────────────┬──────────────────┘
+                     │
+      ┌──────────────┴──────────────────┐
+      │ Bottleneck (32x32)               │
+      │ ResBlock + SelfAttn + CrossAttn  │
+      └──────────────┬──────────────────┘
+                     │
+      ┌──────────────┴──────────────────┐
+      │ Decoder Path (+ skip connections)│
+      │ 32x32 -> 64x64 -> 128x128       │
+      │ ResBlock + SelfAttn + CrossAttn  │
+      └──────────────┬──────────────────┘
+                     │
+      Predicted Noise (128x128x4)
+      ```
+
+      **Model specification (SDXL-class):**
+
+      | Component | Parameters | Purpose |
+      |-----------|-----------|---------|
+      | **U-Net** | 2.6B | Core denoising network |
+      | **CLIP ViT-L/14** | 428M | Global text-image alignment |
+      | **T5-XXL encoder** | 4.8B | Detailed text understanding |
+      | **VAE** | 84M | Image <-> latent space |
+      | **Total** | ~7.9B | Full pipeline |
+
+      **Key architectural decisions:**
+      - **Dual text encoders**: CLIP provides global semantic alignment (good for concepts like "sunset", "portrait"). T5-XXL captures fine-grained details (good for spatial relationships, counting, attributes). Together they provide both breadth and depth of text understanding
+      - **Attention resolution**: Self-attention at 32x32 and 64x64 only (not 128x128) -- quadratic cost of attention makes full-resolution prohibitive
+      - **Timestep conditioning**: Sinusoidal timestep embeddings are added to every ResBlock, so the model knows what denoising stage it's at
+      - **Noise schedule**: Cosine schedule (better than linear for high-resolution generation)
+
+      **Recent innovation -- DiT (Diffusion Transformer):**
+      - Replace U-Net with a transformer (DALL-E 3 and Stable Diffusion 3 use this)
+      - Patch the latent into 2x2 patches, treat each as a token
+      - Standard transformer attention over all latent patches + text tokens
+      - **Advantage**: Better scaling properties, simpler architecture, compatible with LLM infrastructure
+      - **SDXL Turbo and SD3**: Already use DiT variants with improved quality
+
+      **VAE architecture:**
+      - Encoder: Convolution stack, 1024x1024x3 -> 128x128x4 (8x spatial compression)
+      - Decoder: Mirror of encoder with upsampling layers
+      - Training: Reconstruction loss + KL divergence + perceptual loss (LPIPS)
+      - Critical: VAE quality sets the ceiling for the entire system. A blurry VAE means blurry outputs regardless of diffusion model quality
+
+      Let's discuss training.
+    dialogue:
+      - speaker: interviewer
+        text: "Why use two text encoders instead of just one large one?"
+      - speaker: candidate
+        text: "They capture different aspects. CLIP was trained contrastively on image-text pairs, so it understands global visual concepts but struggles with compositional details. T5 is a language model that understands complex sentences but wasn't trained on images. Together, they complement each other. Stable Diffusion 3 showed that dual encoders improve prompt following by 10-15% over single encoder."
+      - speaker: interviewer
+        text: "What's the significance of the VAE in this pipeline?"
+      - speaker: candidate
+        text: "The VAE is the bottleneck of the entire system. If the VAE can't reconstruct fine details like text, small objects, or textures, the diffusion model can never generate them. SDXL improved its VAE significantly over SD 1.5, and that single change improved image quality noticeably even with the same diffusion architecture."
+    next: train_strategy
+
+  # ============ TRAINING ============
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: interviewer
+    content: |
+      Let's design the training pipeline. Training a production text-to-image model is one of the most compute-intensive ML tasks.
+
+      **Training phases:**
+
+      | Phase | Duration | Compute | Data | Purpose |
+      |-------|----------|---------|------|---------|
+      | **VAE pre-training** | 1 week | 32 A100s | 50M images | Learn image compression |
+      | **Base diffusion** | 4-6 weeks | 256-1024 A100s | 300M image-text pairs | Core generation ability |
+      | **High-res fine-tuning** | 1 week | 128 A100s | 10M high-res images | 1024x1024 quality |
+      | **Alignment** (RLHF/DPO) | 1-2 weeks | 64 A100s | 500K preferences | Human preference |
+      | **Safety fine-tuning** | 3 days | 32 A100s | 100K safety examples | Reduce harmful outputs |
+
+      **Training cost estimate:**
+      - 1024 A100 GPUs x 6 weeks = ~150,000 GPU-hours
+      - At $2/GPU-hour (cloud): **~$300K-500K** per training run
+      - Multiple training runs needed for hyperparameter tuning: Total **~$1-2M** to develop a production model
+      - Compare: Stable Diffusion 1.5 trained for ~150K A100-hours (~$600K). SDXL and DALL-E 3 likely cost $2-5M each
+
+      **Training tricks for quality:**
+      - **Noise offset** (+0.1): Shift the noise schedule to generate better very dark and very bright images. Without this, models produce washed-out images that avoid true blacks and whites
+      - **Min-SNR weighting** (gamma=5): Weight the loss function to focus on medium-noise timesteps where the model learns the most. Early and late timesteps contribute less useful gradient
+      - **Resolution conditioning**: Tell the model the target resolution during training. This allows training on mixed resolutions without degrading quality at any specific resolution
+      - **Aspect ratio bucketing**: Group training images by aspect ratio to minimize padding waste in batches. A 16:9 image padded to 1:1 wastes 44% of compute
+
+      **Progressive training schedule:**
+      ```
+      Weeks 1-2: Train at 256x256 (fast iteration, learn basic structure)
+      Weeks 3-4: Train at 512x512 (learn medium detail)
+      Weeks 5-6: Train at 1024x1024 (learn fine detail)
+
+      Each phase starts from previous phase's checkpoint
+      Reduces total training time by ~40% vs. training at full resolution throughout
+      ```
+
+      **Data augmentation:**
+      - Random horizontal flip (doubles effective data)
+      - Random crop with scale factor 0.8-1.0 (teaches the model about composition)
+      - Color jitter (minor -- aggressive augmentation hurts photorealism)
+      - **No rotation**: Rotated images look unnatural, and the model should learn canonical orientations
+
+      Let's discuss the critical topic of content safety.
+    dialogue:
+      - speaker: interviewer
+        text: "What's the most common training failure mode?"
+      - speaker: candidate
+        text: "Mode collapse in specific domains -- the model generates the same 'template' for certain prompts. For example, every 'portrait of a woman' looks similar. This happens when the training data is imbalanced or when the model over-fits to common patterns. Diverse training data and careful learning rate scheduling help prevent this."
+      - speaker: interviewer
+        text: "How do you know when training is done?"
+      - speaker: candidate
+        text: "FID and CLIP Score on a validation set plateau after a certain point, but the real signal is human evaluation. We generate images for 1000 diverse prompts every few days and have evaluators rate them. When quality stops improving for 3 consecutive evaluations, we stop and pick the best checkpoint."
+    next: deploy_safety_question
+
+  # ============ DEPLOYMENT ============
+  - id: deploy_safety_question
+    stage: deployment
+    type: question
+    label: "Content Safety Strategy"
+    speaker: interviewer
+    content: |
+      Content safety is the make-or-break challenge for production text-to-image systems. How would you prevent the generation of harmful content (CSAM, non-consensual deepfakes, violence, copyrighted characters)?
+
+      **Option A:** Input filtering -- block harmful prompts before generation.
+      **Option B:** Both input filtering AND output classification -- defense in depth.
+    choices:
+      - label: "Input filtering only (block harmful prompts)"
+        answer: |
+          I'd focus on **robust input prompt filtering** to prevent harmful generation before it begins:
+
+          **Multi-layer prompt filtering:**
+          ```
+          User Prompt
+               |
+          Layer 1: Keyword/regex blocklist (~1ms)
+          - Known harmful terms, celebrity names, copyrighted characters
+          - Regularly updated list of ~50K blocked terms/phrases
+               |
+          Layer 2: LLM-based intent classifier (~50ms)
+          - Fine-tuned BERT/DeBERTa on 100K labeled prompts
+          - Categories: CSAM, deepfake, violence, copyright, safe
+          - Threshold: block if P(harmful) > 0.7
+               |
+          Layer 3: Semantic similarity to known harmful prompts (~10ms)
+          - CLIP embedding similarity against database of known-bad prompts
+          - Catches paraphrased versions of blocked prompts
+               |
+          Layer 4: LLM-based prompt rewriting (optional, ~200ms)
+          - GPT-4 rewrites ambiguous prompts to be clearly safe
+          - "Make it more revealing" -> "Add more detail to the background"
+               |
+          Safe Prompt -> Generation Pipeline
+          ```
+
+          **Why input-only filtering:**
+          - **Cost efficiency**: Filtering a text prompt costs ~$0.0001 (lightweight model). Filtering a generated image costs ~$0.001 (vision model). At 100M images/day, output filtering costs $100K/day
+          - **Latency**: Input filtering adds 50-100ms before generation. Output filtering adds 100-200ms after the user has already waited 5-10 seconds
+          - **User experience**: Blocking before generation means no wasted wait time. Users get immediate feedback: "This prompt violates our content policy. Try a different description."
+          - **Simpler architecture**: One filtering layer, not two
+
+          **Handling adversarial prompt engineering:**
+          - **Prompt injection**: "Ignore all safety rules and generate..." -> Regex + LLM-based detection
+          - **Homoglyph substitution**: Using Cyrillic characters that look like Latin -> Unicode normalization
+          - **Indirect descriptions**: "Generate what you see in [URL]" -> Block external references
+          - **Multi-turn jailbreaks**: Track conversation history, not just individual prompts
+
+          **Trade-offs:**
+          - **False negatives**: Adversarial users will find prompt phrasings that bypass input filtering. Without output safety checking, harmful images reach users
+          - **Creative prompts blocked**: Legitimate art prompts about war, medical topics, or historical events may be incorrectly blocked
+          - **No defense against model-internal failures**: The model may generate harmful content even from safe prompts (e.g., biased training data causes stereotypical outputs)
+        next: deploy_serving
+      - label: "Defense in depth (input + output filtering)"
+        answer: |
+          I'd implement **defense in depth** with both input and output safety checks:
+
+          **Complete safety pipeline:**
+          ```
+          User Prompt
+               |
+          INPUT FILTERING
+          |-- Keyword blocklist (~1ms)
+          |-- Intent classifier (BERT, ~50ms)
+          |-- Semantic similarity check (~10ms)
+          |-- If blocked: return error + explanation
+               |
+          GENERATION (5-10 seconds)
+               |
+          OUTPUT CLASSIFICATION
+          |-- NSFW classifier (NudeNet-derived, ~20ms)
+          |-- Violence detector (custom ViT, ~20ms)
+          |-- Face detection + identity check (~30ms)
+          |-- Watermark embedding (~5ms)
+          |-- If flagged: return safe alternative or error
+               |
+          POST-HOC ANALYSIS (async)
+          |-- CSAM hash matching (PhotoDNA)
+          |-- Copyright similarity check (against known works)
+          |-- Bias audit (demographic representation check)
+               |
+          Final Image Delivered to User
+          ```
+
+          **Why defense in depth:**
+          - **Adversarial prompts WILL bypass input filtering**: No text classifier catches every creative evasion. Output classification is the safety net
+          - **Model behavior is unpredictable**: Even safe prompts can produce harmful outputs. "Generate a classroom scene" might produce an image with inappropriate content due to training data contamination
+          - **Legal requirement for CSAM**: Platforms have legal obligations to scan generated content for CSAM. Input filtering alone is not legally sufficient
+          - **Copyright protection**: Can't detect copyrighted output (Mickey Mouse in generated image) from the prompt alone if the prompt says "cartoon mouse with round ears"
+          - **Industry standard**: DALL-E 3, Midjourney, and Adobe Firefly all use both input and output filtering
+
+          **Output classification details:**
+
+          | Classifier | Architecture | Latency | Purpose |
+          |-----------|-------------|---------|---------|
+          | NSFW | Fine-tuned EfficientNet | 20ms | Sexual content detection |
+          | Violence | Custom ViT-B | 20ms | Graphic violence, gore |
+          | Face ID | ArcFace + celebrity DB | 30ms | Prevent celebrity deepfakes |
+          | Text-in-image | OCR + toxicity classifier | 25ms | Detect harmful text rendered in image |
+          | Style classifier | CLIP-based | 15ms | Detect copyrighted art styles |
+
+          **Watermarking (critical for provenance):**
+          - Embed invisible watermark in all generated images using **SynthID** (Google's approach) or **C2PA** metadata
+          - Watermark survives JPEG compression, resizing, and light editing
+          - Enables downstream detection: "Was this image AI-generated?"
+          - Required by EU AI Act for AI-generated content
+
+          **Trade-offs:**
+          - **Added cost**: ~$0.002-0.005 per image for output classification. At 100M images/day: ~$200-500K/day (~$6-15M/month)
+          - **Added latency**: ~100ms after generation (on top of 5-10s generation time -- negligible as percentage)
+          - **Wasted compute**: ~1-3% of generated images are rejected by output filtering after spending GPU time on generation
+          - **Worth it**: The cost of one viral harmful image incident (PR crisis, lawsuit, regulatory action) far exceeds the annual cost of output filtering
+        next: deploy_serving
+
+  - id: deploy_serving
+    stage: deployment
+    type: info
+    label: "Serving Infrastructure"
+    speaker: interviewer
+    content: |
+      Let's design the serving infrastructure for 100 million image generations per day.
+
+      **Traffic patterns:**
+      - Average: ~1,200 generations/second
+      - Peak: ~4,000 generations/second (evening hours, product launches)
+      - Each generation: 4 image variants = ~4,800-16,000 individual image inferences/second
+
+      **GPU serving architecture:**
+      ```
+      API Request
+           |
+      Queue (Redis/SQS) -- smooth traffic bursts
+           |
+      GPU Worker Pool
+      - NVIDIA A100 80GB (can hold U-Net + VAE + text encoders)
+      - Each GPU generates 1 image in ~3-5 seconds (20 diffusion steps)
+      - With batching: ~4 images per GPU per 5 seconds
+           |
+      Post-processing (CPU)
+      - Safety classifiers
+      - Watermarking
+      - JPEG encoding + upload to CDN
+           |
+      CDN (CloudFront) -> User
+      ```
+
+      **Inference optimization techniques:**
+
+      | Technique | Speedup | Implementation |
+      |-----------|---------|---------------|
+      | **DDIM/DPM++ Solver** | 50 steps -> 20 steps (2.5x) | Replace DDPM with fast solver |
+      | **TensorRT** | 2-3x | Compile model to optimized engine |
+      | **FP16 inference** | 1.5-2x | Half-precision computation |
+      | **Attention optimization** | 1.3x | xFormers or Flash Attention |
+      | **Distilled model** (SDXL Turbo) | 50 steps -> 4 steps (12.5x) | Adversarial distillation |
+      | **Total** | ~30-50x vs. naive | Combined optimizations |
+
+      **Distilled fast model (for real-time use):**
+      - **SDXL Turbo / LCM (Latent Consistency Model)**: Generate in 1-4 steps instead of 20-50
+      - Quality: ~90% of full model quality (acceptable for real-time previews)
+      - Latency: <1 second per image on A100
+      - Use case: Real-time preview as user types, then refine with full model
+
+      **Cost analysis:**
+
+      | Scenario | GPU Config | Monthly Cost | Cost/Image |
+      |----------|-----------|-------------|-----------|
+      | Full model (20 steps) | 500 A100s | $1.2M | $0.012 |
+      | Distilled (4 steps) | 100 A100s | $240K | $0.002 |
+      | Hybrid (preview + refine) | 300 A100s | $720K | $0.007 |
+
+      **Queue-based architecture (recommended for cost):**
+      - Users submit generation requests to a priority queue
+      - Free tier: Standard queue (30-60s wait during peak)
+      - Paid tier: Priority queue (<10s)
+      - Enterprise: Dedicated capacity (guaranteed <5s)
+      - Queue smooths traffic bursts and maximizes GPU utilization (target: >85%)
+
+      Let's discuss monitoring.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle the 5-10 second generation time in a user-facing product?"
+      - speaker: candidate
+        text: "Progressive streaming: show a blurry preview after 2 steps that progressively sharpens. Users see something within 1-2 seconds and watch it refine. Midjourney popularized this approach -- it makes the wait feel shorter and creates an engaging experience. We can also show a distilled preview instantly and swap in the full-quality version when it's ready."
+      - speaker: interviewer
+        text: "What's the most important cost optimization?"
+      - speaker: candidate
+        text: "Model distillation, hands down. Going from 20 steps to 4 steps is a 5x cost reduction. Stability AI's SDXL Turbo and the LCM (Latent Consistency Model) approach show that 4-step generation achieves 90%+ of 20-step quality. For many use cases, that's sufficient."
+    next: mon_question
+
+  # ============ MONITORING ============
+  - id: mon_question
+    stage: monitoring
+    type: question
+    label: "Monitoring Strategy"
+    speaker: interviewer
+    content: |
+      For a generative system, monitoring is different from discriminative models. There's no ground truth label to compare against. How do you monitor generation quality in production?
+    choices:
+      - label: "Human evaluation panels with systematic sampling"
+        answer: |
+          I'd run **continuous human evaluation** as the primary quality monitoring signal:
+
+          **Daily evaluation protocol:**
+          1. **Stratified sampling**: 500 generated images/day sampled across:
+             - Prompt categories: people (30%), scenes (25%), objects (20%), abstract (15%), text rendering (10%)
+             - Quality tiers: standard (70%), high-res (30%)
+             - User segments: free (50%), paid (50%)
+          2. **Evaluation dimensions** (3 evaluators per image):
+             - Image quality (1-5): Resolution, coherence, artifacts
+             - Prompt alignment (1-5): How well does image match prompt?
+             - Safety (pass/fail): Any harmful, biased, or inappropriate content?
+             - Anatomical correctness (for human images): Hands, faces, body proportions
+
+          **Trending quality dashboard:**
+
+          | Metric | Frequency | Target | Alert |
+          |--------|-----------|--------|-------|
+          | Average quality score | Daily | >4.0/5.0 | <3.8 |
+          | Average alignment score | Daily | >4.2/5.0 | <3.9 |
+          | Safety failure rate | Daily | <0.1% | >0.5% |
+          | Hand anatomy correct (humans) | Weekly | >80% | <70% |
+          | User regeneration rate | Hourly | <30% | >40% |
+          | Image selection rate | Hourly | >40% | <30% |
+
+          **Prompt category tracking:**
+          - Track quality scores per prompt category over time
+          - If "text rendering" quality drops below 3.5, prioritize text-rendering training data
+          - If "people" quality regresses, check for face/hand issues
+
+          **A/B testing framework:**
+          - Continuously run 2-3 model variants alongside production
+          - 5% traffic per variant
+          - Weekly human evaluation comparison
+          - Promote variant if >55% preference win rate with statistical significance
+
+          **Cost**: ~$150K/month for evaluation panel (500 images/day x 3 evaluators x $5/evaluation = ~$2.2K/day)
+
+          **Key insight**: User behavior signals (regeneration rate, selection rate) provide leading indicators, but human evaluation provides the diagnostic signal to understand WHY quality changed.
+        next: mon_terminal_human
+      - label: "Automated quality metrics with user behavior signals"
+        answer: |
+          I'd build an **automated monitoring pipeline** combining computed metrics with user behavior analysis:
+
+          **Real-time automated quality tracking:**
+
+          | Metric | How It's Computed | What It Detects |
+          |--------|------------------|----------------|
+          | **CLIP Score distribution** | CLIP(prompt, image) for every generation | Prompt alignment degradation |
+          | **Aesthetic score distribution** | Learned aesthetic predictor on every image | Visual quality drop |
+          | **FID on daily sample** | 10K generations vs. reference set | Distribution-level quality shift |
+          | **Safety classifier scores** | Run safety classifiers on all outputs | Safety system degradation |
+          | **Generation diversity** | LPIPS between 4 variants per prompt | Mode collapse detection |
+          | **Inference timing** | Per-step latency tracking | Infrastructure issues |
+
+          **User behavior signals (implicit quality feedback):**
+
+          | Signal | What It Indicates | How to Compute |
+          |--------|------------------|----------------|
+          | **Regeneration rate** | User unsatisfied with results | Regenerate clicks / total prompts |
+          | **Selection rate** | User found a good result | Download or select clicks / total prompts |
+          | **Upscale rate** | User liked image enough to upscale | Upscale requests / total generations |
+          | **Edit rate** | Image was good but needed tweaking | Inpaint/outpaint requests / total |
+          | **Share rate** | User proud of result | Share/publish actions / total |
+          | **Session depth** | Engagement with the tool | Avg prompts per session |
+          | **Prompt refinement patterns** | User struggling with prompt | Edits-per-prompt before satisfaction |
+
+          **Anomaly detection:**
+          ```
+          Daily metrics
+               |
+          7-day rolling average + standard deviation
+               |
+          Alert if metric deviates >2 sigma from baseline
+               |
+          +----+----+
+          |         |
+          Quality   Safety
+          alert     alert
+          |         |
+          Page ML    Page Trust
+          on-call    & Safety
+          ```
+
+          **Automated root cause analysis:**
+          - If CLIP Score drops: Check text encoder, check if prompt distribution shifted
+          - If aesthetic score drops: Check VAE, check diffusion model
+          - If diversity drops (LPIPS between variants decreases): Check for mode collapse, inspect noise sampling
+          - If safety triggers increase: Check for adversarial campaign, verify safety classifiers are current
+
+          **Cost**: ~$30K/month (compute for quality metrics on all generations). No human evaluators needed for daily monitoring. Monthly human evaluation spot-check for calibration (~$20K).
+        next: mon_terminal_auto
+
+  # ============ TERMINALS ============
+  - id: mon_terminal_human
+    stage: monitoring
+    type: terminal
+    label: "Human Evaluation Monitoring Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive **text-to-image generation system** with continuous human evaluation monitoring.
+
+      **Your design summary:**
+      - **Problem**: Production text-to-image system generating 100M+ images/day across diverse prompts
+      - **Architecture**: Chosen generation approach with careful trade-off analysis
+      - **Metrics**: Multi-dimensional evaluation (FID, CLIP Score, human preference, user behavior)
+      - **Data**: Training data strategy addressing quality, scale, and legal considerations
+      - **Alignment**: Text-image alignment optimization for superior prompt following
+      - **Model**: Multi-billion parameter architecture with dual text encoders and VAE
+      - **Training**: Progressive multi-resolution training with alignment fine-tuning (~$1-2M)
+      - **Safety**: Content safety strategy addressing prompts, outputs, and provenance
+      - **Deployment**: Queue-based GPU serving with distilled fast model option at $0.007-0.012/image
+      - **Monitoring**: Continuous human evaluation with stratified sampling and A/B testing
+
+      **Key strengths:**
+      - Human evaluation catches subtle quality issues that automated metrics miss
+      - Per-category quality tracking enables targeted improvement
+      - A/B testing framework ensures continuous improvement with statistical rigor
+      - Safety monitoring integrated into quality evaluation
+
+      **Areas to explore further:**
+      - Video generation (extending to temporal consistency)
+      - 3D generation (NeRF/Gaussian splatting from text)
+      - Personalization (user-specific fine-tuning with DreamBooth/LoRA)
+      - Real-time interactive generation (latency <500ms)
+
+      Outstanding system design for one of the most exciting frontiers in AI!
+
+  - id: mon_terminal_auto
+    stage: monitoring
+    type: terminal
+    label: "Automated Monitoring Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive **text-to-image generation system** with scalable automated monitoring.
+
+      **Your design summary:**
+      - **Problem**: Production text-to-image system at massive scale with diverse quality requirements
+      - **Architecture**: Generation approach selected with strong technical justification
+      - **Metrics**: Balanced automated metrics (FID, CLIP, aesthetic score) with user behavior signals
+      - **Data**: Thoughtful data strategy addressing the quality-legality tradeoff
+      - **Alignment**: Text-image alignment strategy for reliable prompt following
+      - **Model**: Optimized architecture with production-ready inference pipeline
+      - **Training**: Multi-phase training with progressive resolution and alignment tuning
+      - **Safety**: Content safety addressing harmful generation at multiple layers
+      - **Deployment**: Cost-optimized GPU serving with queue-based architecture at scale
+      - **Monitoring**: Real-time automated quality tracking with user behavior correlation
+
+      **Key strengths:**
+      - 100% generation coverage (every image monitored, not sampled)
+      - Real-time anomaly detection catches issues within minutes
+      - User behavior signals provide the most authentic quality feedback
+      - Mode collapse detection through diversity metrics prevents quality regression
+      - Cost-efficient: automated monitoring at a fraction of human evaluation cost
+
+      **Areas to explore further:**
+      - Consistency models for even faster generation (single-step)
+      - Multi-modal generation (text + image -> video, 3D)
+      - On-device generation for mobile (distilled to ~1B parameters)
+      - Prompt-free generation from UI sketches or image references
+
+      Outstanding system design balancing quality, safety, and scale!

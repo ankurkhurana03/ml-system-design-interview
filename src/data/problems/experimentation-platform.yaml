@@ -1,0 +1,802 @@
+id: experimentation-platform
+title: "A/B Testing & Experimentation Platform"
+description: "Design an ML-powered experimentation platform for running and analyzing A/B tests at scale."
+companies: ["Netflix", "Meta", "Uber"]
+domains: ["Tabular/Structured", "Time Series"]
+root: pd_start
+
+nodes:
+  # ======================================================================
+  # STAGE 1: PROBLEM DEFINITION (2 nodes)
+  # pd_start -> pd_formulation (question) -> ...
+  # ======================================================================
+
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we will design an ML-powered experimentation platform — the system that enables product teams to run, analyze, and learn from A/B tests at scale.
+
+      **Company context:**
+      - A large consumer internet company with 500 million monthly active users
+      - Running 3,000+ concurrent experiments at any given time across web, mobile, and backend systems
+      - Each experiment tests a product change (UI redesign, ranking algorithm update, pricing change, new feature rollout)
+      - Current process is manual: data scientists write custom analysis notebooks for each experiment, taking 2-5 days per analysis
+
+      **Current pain points:**
+      - **Speed**: Experiment analysis takes too long. Product teams wait days for results, slowing iteration velocity.
+      - **Quality**: Manual analyses are error-prone. A 2023 internal audit found that 12% of experiment decisions were based on flawed statistical analysis (p-hacking, peeking, wrong metric definitions).
+      - **Interference**: With 3,000 concurrent experiments, many users are in multiple experiments simultaneously. Interactions between experiments can invalidate results.
+      - **Sensitivity**: Many experiments produce small but important effects (0.1-0.5% improvement in engagement). Current analysis methods often lack the statistical power to detect these effects reliably.
+
+      **Platform requirements:**
+      - Automated experiment analysis with correct statistical methodology
+      - Metric computation pipeline handling 50+ billion events per day
+      - Variance reduction to detect smaller effects with less data
+      - Interaction detection between concurrent experiments
+      - Guardrail metrics that automatically flag regressions in key metrics (latency, crash rate, revenue)
+      - Self-serve dashboard for product teams (no data scientist needed for standard analyses)
+
+      Let us start with a fundamental design decision about the randomization unit.
+    dialogue:
+      - speaker: interviewer
+        text: "Welcome! We are designing an experimentation platform for a company with 500 million MAU running 3,000+ concurrent experiments. What is the most fundamental design decision?"
+      - speaker: candidate
+        text: "The randomization unit — what entity do we assign to treatment vs control. This choice affects everything: the statistical analysis, metric computation, and how we handle network effects and interference."
+      - speaker: interviewer
+        text: "Exactly. And with 3,000 concurrent experiments, we need to worry about how randomization units interact across experiments."
+      - speaker: candidate
+        text: "Right. The randomization unit also determines our sample size and statistical power. User-level randomization gives us 500M units but users have high variance. Event-level gives more samples but violates independence assumptions."
+      - speaker: interviewer
+        text: "Good thinking. Let us explore the options."
+    next: pd_formulation
+
+  - id: pd_formulation
+    stage: problem_definition
+    type: question
+    label: "Randomization Unit"
+    speaker: interviewer
+    content: |
+      What should be the primary randomization unit for the experimentation platform? This decision affects statistical power, metric computation complexity, and how we handle network effects.
+    dialogue:
+      - speaker: interviewer
+        text: "What randomization unit would you choose? User-level, session-level, or something else?"
+      - speaker: candidate
+        text: "Each has trade-offs. User-level is the most common and cleanest statistically, but session-level gives faster results. There is also the question of whether we need different units for different experiment types."
+      - speaker: interviewer
+        text: "Walk me through your recommendation."
+    choices:
+      - label: "User-level with consistent hashing"
+        answer: |
+          I would use **user-level randomization** with consistent hashing as the primary randomization mechanism.
+
+          **How it works:**
+          - Each experiment gets a unique salt (experiment ID)
+          - Assignment: `bucket = hash(user_id + experiment_salt) % 1000`
+          - Buckets 0-499 = control, 500-999 = treatment (for a 50/50 split)
+          - The hash is deterministic: the same user always gets the same assignment for a given experiment, regardless of when or how they access the product
+
+          **Why user-level?**
+          - **Statistical validity**: Users are independent units. Session-level randomization violates independence — the same user in different sessions could be in treatment and control, contaminating both groups.
+          - **Consistent experience**: A user sees the same variant across all sessions and devices. This prevents confusion (seeing the new UI on mobile but old UI on web) and enables measurement of long-term behavioral effects.
+          - **Network effect handling**: For social features, user-level assignment enables cluster-based randomization extensions (assign friend groups together) when needed.
+
+          **Consistent hashing benefits:**
+          - No centralized assignment service needed — any system can independently compute a user's assignment given the experiment salt. This eliminates a single point of failure and reduces latency.
+          - Assignments survive system restarts — no state to persist or recover.
+          - Orthogonal assignments: with different salts, experiment assignments are independent. User in treatment for Experiment A has a 50/50 chance of being in treatment for Experiment B.
+
+          **Multi-experiment layering (Netflix/Google approach):**
+          - Divide the user space into **layers** (e.g., UI layer, ranking layer, infrastructure layer)
+          - Within each layer, experiments are mutually exclusive (a user is in at most one experiment per layer)
+          - Across layers, experiments are orthogonal (independent random assignment)
+          - This prevents conflicting experiments (two UI changes on the same page) while allowing independent experiments to coexist
+
+          **Limitation:** For experiments affecting non-logged-in users or for very short experiments where we need results within hours, user-level randomization requires a large user base. With 500M MAU, this is rarely a problem, but niche features with small eligible populations may need alternative approaches.
+        next: met_analysis
+      - label: "Cluster-based randomization"
+        answer: |
+          I would use **cluster-based randomization** — assigning groups of related users (clusters) to treatment or control rather than individual users.
+
+          **How it works:**
+          - Partition users into clusters based on social connections, geographic proximity, or marketplace interactions
+          - For a social network: clusters are friend groups or connected components of the social graph
+          - For a marketplace: clusters are geographic regions or user segments that interact (buyers and sellers in the same market)
+          - Entire clusters are assigned to treatment or control: `assignment = hash(cluster_id + experiment_salt) % 1000`
+
+          **Why cluster-based?**
+          - **Handles network effects**: When treatment affects not just the treated user but their connections (e.g., a new sharing feature, a feed algorithm change, a marketplace pricing change), individual randomization is biased because control users are "contaminated" by treated friends. Meta's research showed that individual-level randomization can underestimate social feature effects by 20-50%.
+          - **Interference mitigation**: With 3,000 concurrent experiments, user interactions create interference. If Experiment A changes how User 1 shares content, it affects User 2 (in control for Experiment A) who sees that shared content. Cluster randomization contains interference within clusters.
+
+          **Cluster construction strategies:**
+          - **Social graph clusters**: Use community detection algorithms (Louvain, Label Propagation) to partition the social graph into groups of 50-500 users. Users within a cluster interact frequently; cross-cluster interactions are rare.
+          - **Geographic clusters**: For marketplace experiments (Uber pricing, Airbnb search), use geographic regions (cities, zip codes) as clusters. A pricing change in San Francisco should not leak into Oakland's control group.
+          - **Time-based clusters**: For content experiments, use time slots — all users during hour X see treatment, hour Y see control. Simple but introduces temporal confounders (morning vs evening behavior differs).
+
+          **Statistical implications:**
+          - Fewer independent units (N_clusters << N_users), which reduces statistical power. If we have 500M users in 100,000 clusters, our effective sample size is ~100,000, not 500M.
+          - Variance of the treatment effect estimator depends on the intra-cluster correlation (ICC). If ICC is high (users within a cluster behave similarly), power is much lower.
+          - To compensate, experiments need to run longer or use variance reduction techniques.
+
+          **Trade-off:** More complex infrastructure (need a cluster assignment service, cluster graph updates as users join/leave), lower statistical power, and cluster definitions can become stale as social connections evolve. But for social/marketplace products where network effects are the core mechanism, cluster randomization is essential for unbiased estimates.
+        next: met_analysis
+
+  # ======================================================================
+  # STAGE 2: METRICS (1 question node)
+  # met_analysis (question) -> (met_frequentist | met_bayesian) -> data_pipeline (CONVERGE)
+  # ======================================================================
+
+  - id: met_analysis
+    stage: metrics
+    type: question
+    label: "Statistical Framework"
+    speaker: interviewer
+    content: |
+      Now let us decide on the statistical framework for analyzing experiments. This determines how we compute p-values, confidence intervals, and make ship/no-ship decisions. The choice between frequentist and Bayesian approaches has significant implications for how product teams interact with the platform.
+    dialogue:
+      - speaker: interviewer
+        text: "What statistical framework should the platform use? Frequentist hypothesis testing or Bayesian inference? This affects how product teams interpret results and make decisions."
+      - speaker: candidate
+        text: "Both are valid but serve different organizational cultures. Frequentist methods have well-established error rate guarantees. Bayesian methods give more intuitive outputs — direct probability statements about the treatment effect."
+      - speaker: interviewer
+        text: "Which would you recommend for this platform?"
+    choices:
+      - label: "Frequentist with sequential testing"
+        answer: |
+          I would use **frequentist hypothesis testing with sequential testing** (always-valid p-values) to allow continuous monitoring without inflating false positive rates.
+
+          **The peeking problem:**
+          Traditional fixed-horizon tests require a predetermined sample size. But product teams peek at results daily — and they should, because detecting a severe regression (crash rate spike) early is critical. However, repeated peeking inflates false positive rates from the nominal 5% to as high as 30%.
+
+          **Solution — always-valid sequential testing:**
+          - Use **mixture sequential probability ratio test (mSPRT)** or **anytime-valid confidence sequences**
+          - These methods maintain valid Type I error control regardless of when you look at the data. You can check results every hour and stop the experiment as soon as significance is reached, without alpha inflation.
+          - Uber and Netflix use variants of this approach. Netflix's blog reported that sequential testing reduced experiment duration by 20-30% on average while maintaining statistical rigor.
+
+          **Implementation:**
+          - At each time point t, compute the e-value (a measure of evidence against the null hypothesis) using the wealth process formulation
+          - Reject H0 when e-value > 1/alpha (typically > 20 for alpha=0.05)
+          - This is equivalent to a confidence sequence: a sequence of confidence intervals that are simultaneously valid at all time points
+
+          **Variance reduction (CUPED):**
+          - **CUPED (Controlled-experiment Using Pre-Experiment Data)**: Reduce metric variance by regressing out pre-experiment behavior. If a user had high engagement last month, they are likely to have high engagement this month regardless of treatment.
+          - Formula: `Y_adjusted = Y - theta * (X_pre - mean(X_pre))` where theta is the regression coefficient of Y on X_pre
+          - Typical variance reduction: 20-50%, which translates to 20-50% shorter experiment duration or ability to detect 20-50% smaller effects
+          - Microsoft and Netflix report that CUPED is their single most impactful infrastructure investment for experimentation
+
+          **Guardrail metrics with Bonferroni correction:**
+          - Track 10-20 guardrail metrics (latency, crash rate, revenue, error rate) alongside primary metrics
+          - Apply Bonferroni correction for multiple testing: if checking 20 guardrails at alpha=0.05, use alpha=0.0025 per metric
+          - Alert product teams immediately if any guardrail shows statistically significant degradation, even if primary metrics look positive
+
+          **Trade-off:** Sequential testing is more conservative (wider confidence intervals at any given time point) and requires more complex infrastructure than a simple t-test. But the benefits — valid peeking, faster decisions, and no p-hacking — are essential at scale.
+        next: data_pipeline
+      - label: "Bayesian inference with decision rules"
+        answer: |
+          I would use **Bayesian inference** with practical decision rules based on posterior probabilities.
+
+          **Why Bayesian for experimentation?**
+          The output is directly what product teams want to know: "What is the probability that the treatment is better?" Instead of a p-value (which is commonly misinterpreted), the platform reports: "There is an 94% probability that the new ranking algorithm improves engagement by 0.5-2.1%."
+
+          **Implementation:**
+          - Model the metric difference as a Normal distribution: `delta ~ N(mu, sigma^2)`
+          - Prior: weakly informative `N(0, sigma_prior^2)` where sigma_prior reflects reasonable effect sizes for this metric category (e.g., engagement changes rarely exceed 5%)
+          - Update the posterior as data accumulates. No need for a fixed sample size — the posterior continuously reflects current evidence.
+          - Report: posterior mean, 95% credible interval, and the key decision probability: `P(delta > 0)` and `P(delta > MDE)` where MDE is the minimum detectable effect that is practically significant
+
+          **Decision rules (replacing p-value thresholds):**
+          - **Ship**: P(treatment is better by at least MDE) > 95%. This means we are 95% confident the effect is not just positive but practically meaningful.
+          - **Do not ship**: P(treatment is worse by more than -MDE) > 80%. High confidence the change is actively harmful.
+          - **Continue**: Neither threshold met. Collect more data.
+          - **Inconclusive**: After maximum experiment duration (e.g., 4 weeks), if neither threshold is met, the effect is likely too small to matter. Ship based on non-statistical criteria (code simplicity, maintenance burden).
+
+          **Metric-specific priors (a Bayesian superpower):**
+          - Use historical experiment results to inform priors. If we have run 500 experiments on the ranking algorithm, we know the empirical distribution of effect sizes: most changes have < 0.5% impact, a few have 1-3% impact.
+          - This **empirical Bayes** approach dramatically improves power for detecting small effects and reduces false positives from noisy experiments.
+          - Netflix published that empirical Bayes priors reduced their false discovery rate by 40% compared to uninformative priors.
+
+          **Guardrail metrics:**
+          - Compute posterior probability of regression for each guardrail metric
+          - Alert if P(guardrail regression > threshold) > 80%
+          - The threshold is metric-specific: for latency, regression = +50ms; for crash rate, regression = +0.1%; for revenue, regression = -0.5%
+
+          **Trade-off:** Bayesian computation is more expensive (MCMC or variational inference vs a simple t-test). Prior selection requires careful thought and can influence results, especially for small experiments. Some stakeholders (data scientists with frequentist training) may resist the paradigm shift. But for product teams, Bayesian outputs are far more intuitive and actionable.
+        next: data_pipeline
+
+  # ======================================================================
+  # STAGE 3: DATA (2 nodes)
+  # data_pipeline (CONVERGENCE) -> data_quality (question) -> ...
+  # ======================================================================
+
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Metric Computation Pipeline"
+    speaker: interviewer
+    content: |
+      The metric computation pipeline is the backbone of the experimentation platform. It must process 50+ billion events per day, compute hundreds of metrics per experiment, and deliver results with low latency.
+
+      **Data architecture:**
+
+      | Layer | Technology | Purpose | Latency |
+      |-------|-----------|---------|---------|
+      | Event ingestion | Kafka (partitioned by user_id) | Raw event stream | Real-time |
+      | Event storage | S3 + Delta Lake / Iceberg | Immutable event log | Minutes |
+      | Assignment service | Redis + consistent hashing | Which user is in which experiment | <5ms |
+      | Metric definitions | YAML config in Git | Declarative metric specs | N/A |
+      | Batch computation | Spark/Flink on Delta Lake | Daily metric aggregation | 4-6 hours |
+      | Streaming computation | Flink on Kafka | Real-time guardrail monitoring | <1 minute |
+      | Results storage | PostgreSQL/ClickHouse | Experiment statistics, p-values | N/A |
+      | Dashboard | React + D3 | Self-serve experiment monitoring | Real-time |
+
+      **Metric computation approach — two paths:**
+
+      **Batch path (primary, for final analysis):**
+      1. Every 24 hours, Spark jobs join the event log with the assignment table
+      2. For each experiment, compute per-user metric values (e.g., daily active minutes, revenue, click-through rate)
+      3. Aggregate to treatment vs control groups
+      4. Run statistical tests (sequential or Bayesian depending on framework choice)
+      5. Update the dashboard with latest results
+
+      **Streaming path (guardrails, near real-time):**
+      1. Flink jobs continuously process the Kafka event stream
+      2. For guardrail metrics (latency, error rate, crash rate), compute running statistics per experiment group
+      3. If any guardrail crosses the alert threshold, trigger immediate notification to experiment owner and on-call
+      4. This path is approximate (5-10% variance from batch due to late-arriving events) but fast
+
+      **Scale considerations:**
+      - 50B events/day across 3,000 experiments = ~167M events per experiment per day on average
+      - But distribution is highly skewed: some experiments have 500M+ events (full traffic), others have 100K (niche feature tests)
+      - Metric computation is embarrassingly parallel by experiment — but join with assignment table is the bottleneck
+
+      Let us discuss the most critical data quality challenge.
+    dialogue:
+      - speaker: interviewer
+        text: "The metric computation pipeline processes 50 billion events per day. How would you balance batch accuracy with streaming speed?"
+      - speaker: candidate
+        text: "Two parallel paths. Batch computation on Delta Lake for accurate final analysis — joins events with assignments, computes per-user metrics, runs statistical tests daily. Streaming via Flink for real-time guardrail monitoring — approximate but fast enough to catch regressions within minutes."
+      - speaker: interviewer
+        text: "What happens when the two paths disagree?"
+      - speaker: candidate
+        text: "The batch path is the source of truth. Streaming can have 5-10% variance due to late-arriving events and approximations. If the streaming path triggers a guardrail alert, we verify with the batch path before making ship decisions. Streaming is an early warning system, not a decision-making system."
+      - speaker: interviewer
+        text: "Good distinction. What is the biggest data quality challenge?"
+    next: data_quality
+
+  - id: data_quality
+    stage: data
+    type: question
+    label: "Data Quality Challenge"
+    speaker: interviewer
+    content: |
+      With 3,000 concurrent experiments and 50B daily events, data quality is a massive challenge. What is the most critical data quality issue for the experimentation platform?
+    dialogue:
+      - speaker: interviewer
+        text: "With 3,000 concurrent experiments, what data quality issue worries you most?"
+      - speaker: candidate
+        text: "Two big concerns: sample ratio mismatch — when treatment and control group sizes are not what we expected — and metric definition inconsistency — when the same metric means different things to different teams."
+      - speaker: interviewer
+        text: "Pick the one you think is more impactful and explain your approach."
+    choices:
+      - label: "Sample Ratio Mismatch (SRM) detection"
+        answer: |
+          **Sample Ratio Mismatch (SRM)** is the most critical data quality check for an experimentation platform. An SRM means the actual ratio of users in treatment vs control differs from the intended ratio — and it invalidates the entire experiment.
+
+          **Why SRM is so dangerous:**
+          If we intended 50/50 but observe 51/49, something is wrong with the randomization, data pipeline, or triggering logic. The groups are no longer comparable, so any observed treatment effect could be an artifact of the imbalance rather than the actual treatment. Microsoft's experimentation team found that ~6% of experiments had statistically significant SRMs, and decisions based on SRM-affected experiments were wrong 50% of the time.
+
+          **SRM detection system:**
+          - Run a chi-squared test on the observed vs expected group sizes for every experiment, every day
+          - Chi-squared test: `chi2 = sum((observed_i - expected_i)^2 / expected_i)` with df = num_groups - 1
+          - Alert threshold: p < 0.001 (more stringent than usual because SRM is a data quality issue, not a treatment effect)
+          - At 3,000 experiments with alpha=0.001, we expect ~3 false alarms per day. Acceptable.
+
+          **Common SRM causes (ranked by frequency):**
+          1. **Bot filtering**: Treatment might attract different bot traffic patterns. If bot filters remove more bots from one group, the counts diverge.
+          2. **Triggering conditions**: The experiment trigger (e.g., "user loads the feed") may fire differently in treatment vs control due to latency differences.
+          3. **Redirects and page loads**: In web experiments, treatment pages might load slower, causing more users to leave before being counted.
+          4. **Client caching**: Mobile app experiments where the old version is cached — users in treatment might not see the new version until app restart.
+
+          **Automated SRM investigation:**
+          When SRM is detected, automatically compute:
+          - SRM by platform (web/iOS/Android) — if SRM exists only on one platform, it is likely a client-side bug
+          - SRM by user segment (new vs returning, country) — localized SRM points to a specific triggering issue
+          - SRM over time — did it start on a specific date (suggests a deployment broke something)?
+
+          **SRM response protocol:**
+          - SRM detected → experiment automatically flagged as "unhealthy" in dashboard
+          - Experiment owner notified with investigation report
+          - Results are hidden until SRM is resolved (prevent decisions based on invalid data)
+          - If SRM cannot be resolved, experiment must be restarted with root cause fixed
+        next: feat_question
+      - label: "Metric definition consistency"
+        answer: |
+          **Metric definition inconsistency** is the most critical data quality issue because it silently corrupts decision-making across the organization without triggering any alarms.
+
+          **The problem:**
+          At a company running 3,000 experiments, different teams define "the same" metric differently:
+          - Team A defines "daily active users" as users who logged in. Team B defines it as users who performed any action (including background syncs). Team C defines it as users who performed a "meaningful" action. All three report "DAU" but measure different things.
+          - "Revenue" might include or exclude refunds, taxes, subscription renewals, or promotional credits depending on who computed it.
+          - "Click-through rate" denominator might be "impressions served" or "impressions viewed" or "impressions above the fold" — the numerator might be "clicks" or "unique clicks."
+
+          **Impact:** Microsoft's analysis found that metric definition inconsistency caused more erroneous experiment decisions than statistical errors. Teams celebrating a "2% improvement in engagement" might actually be measuring a different engagement definition than the one the VP is tracking.
+
+          **Solution — centralized metric registry:**
+          - Every metric is defined ONCE in a central YAML-based metric registry stored in Git
+          - Each definition includes: metric name, SQL/code for computation, unit of analysis, denominator definition, numerator definition, known caveats, and owner
+          - Example metric definition:
+            ```yaml
+            metric: daily_active_users
+            description: "Count of unique users who performed at least one intentional action"
+            sql: "SELECT COUNT(DISTINCT user_id) FROM events WHERE event_type IN ('click', 'scroll', 'search', 'purchase') AND date = :date"
+            exclude: "bot traffic, background syncs, automated actions"
+            denominator: "all enrolled users"
+            owner: "data-platform-team"
+            last_reviewed: "2025-01-15"
+            ```
+
+          **Governance process:**
+          - New metrics must be reviewed by the data platform team before registration
+          - Changes to existing metrics require approval and trigger re-analysis of all active experiments using that metric
+          - Dashboard shows the exact metric definition on hover — no ambiguity about what is being measured
+          - Quarterly metric audit: review top 50 metrics for consistency, remove duplicates, update documentation
+
+          **Metric taxonomy:**
+          - **Primary metrics**: The main metric each experiment optimizes (1-2 per experiment). Must be pre-registered before experiment launch.
+          - **Guardrail metrics**: 15-20 company-wide metrics that every experiment monitors (latency, crash rate, revenue, etc.). Defined centrally, not customizable per experiment.
+          - **Exploratory metrics**: Team-specific metrics for post-hoc analysis. Clearly labeled as exploratory to prevent p-hacking.
+
+          This approach eliminates "metric shopping" (choosing whichever metric definition makes results look best) and ensures all teams speak the same quantitative language.
+        next: feat_question
+
+  # ======================================================================
+  # STAGE 4: FEATURES (1 question node)
+  # feat_question (CONVERGENCE) -> (feat_cuped | feat_stratification) -> mod_question (CONVERGE)
+  # ======================================================================
+
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Variance Reduction Strategy"
+    speaker: interviewer
+    content: |
+      Variance reduction is the "feature engineering" of experimentation — it uses pre-experiment data to reduce noise and increase statistical power. Which variance reduction technique would you prioritize implementing first?
+    dialogue:
+      - speaker: interviewer
+        text: "Variance reduction is arguably the most impactful investment for an experimentation platform. Which technique would you prioritize?"
+      - speaker: candidate
+        text: "The two main approaches are CUPED — using pre-experiment covariates to reduce variance — and stratified sampling to ensure balanced groups. Both are well-proven but have different implementation complexity."
+      - speaker: interviewer
+        text: "Which would you implement first and why?"
+    choices:
+      - label: "CUPED (pre-experiment covariate adjustment)"
+        answer: |
+          I would prioritize **CUPED (Controlled-experiment Using Pre-Experiment Data)** — it typically delivers the largest variance reduction with minimal implementation complexity.
+
+          **How CUPED works:**
+          The key insight is that most of the variance in experiment metrics comes from pre-existing user differences, not the treatment. If we can subtract out this pre-existing variance, we get a much cleaner signal.
+
+          **Formula:**
+          ```
+          Y_adjusted = Y - theta * (X_pre - mean(X_pre))
+          ```
+          Where:
+          - Y = the experiment metric (e.g., engagement during the experiment)
+          - X_pre = the same metric measured pre-experiment (e.g., engagement in the 2 weeks before the experiment)
+          - theta = Cov(Y, X_pre) / Var(X_pre) — the optimal regression coefficient
+
+          The adjusted metric Y_adjusted has the same expected value as Y (unbiased) but lower variance.
+
+          **Practical implementation:**
+          - For each experiment, automatically compute the pre-experiment value of the primary metric for every user (typically 7-28 day lookback)
+          - Compute theta on the combined dataset (treatment + control)
+          - Apply the adjustment before running statistical tests
+          - Report both raw and CUPED-adjusted results (transparency)
+
+          **Variance reduction in practice:**
+          - Microsoft: 50%+ variance reduction for engagement metrics (meaning experiments need ~50% fewer users to detect the same effect)
+          - Netflix: 20-40% variance reduction across most metrics
+          - Uber: 30-60% variance reduction for marketplace metrics
+          - The reduction is highest for metrics with strong temporal autocorrelation (engagement, revenue) and lowest for binary metrics (conversion, crash rate)
+
+          **Extension — CUPAC (Controlled-experiment Using Predictions As Covariates):**
+          - Instead of using the raw pre-experiment metric as X_pre, train an ML model to predict the experiment metric from multiple pre-experiment features
+          - The ML prediction is a better covariate than any single feature because it captures more of the pre-existing variance
+          - DoorDash reported that CUPAC achieved 60-70% variance reduction vs 40% for basic CUPED
+          - Implementation: train a LightGBM model on pre-experiment features (prior 28 days of activity, device type, account age, etc.) to predict the metric. Use the model's prediction as the covariate.
+
+          **Trade-off:** CUPED requires pre-experiment data, so it does not work for new users who join during the experiment. For these users, fall back to unadjusted metrics. Also, if the pre-experiment period had unusual events (site outage, holiday), the covariate can introduce bias. Mitigation: exclude anomalous pre-experiment days.
+        next: mod_question
+      - label: "Stratified sampling with post-stratification"
+        answer: |
+          I would prioritize **stratified sampling with post-stratification** — ensuring balanced treatment/control groups across key dimensions and adjusting estimates accordingly.
+
+          **Why stratification?**
+          User populations are heterogeneous. Power users (top 5%) generate 50%+ of total engagement. Country-level differences in behavior are enormous. Device type (iOS vs Android) affects metric distributions. If, by chance, treatment gets more power users than control, it will look better regardless of the actual treatment effect. Stratification prevents this.
+
+          **Pre-stratification (at assignment time):**
+          - Define 5-10 strata based on: user activity level (quintiles), country/region, platform (web/iOS/Android), account age (new vs established)
+          - Within each stratum, randomly assign 50/50 to treatment and control
+          - This guarantees balanced groups across these dimensions — no accidental imbalances
+          - Implementation: `bucket = hash(user_id + experiment_salt + stratum_id) % 1000`
+
+          **Post-stratification (at analysis time):**
+          - Even without pre-stratification, we can improve precision by adjusting for known covariates post-hoc
+          - Compute the treatment effect within each stratum, then take a weighted average
+          - Formula: `ATE_stratified = sum(w_s * ATE_s)` where w_s is the stratum weight (proportion of population in stratum s) and ATE_s is the within-stratum average treatment effect
+          - This reduces variance because within-stratum variance is lower than total variance
+
+          **Variance reduction estimates:**
+          - Post-stratification by activity level alone: 10-25% variance reduction
+          - Post-stratification by activity + country + platform: 20-40% variance reduction
+          - Less than CUPED for most metrics, but has an advantage: it works for any metric without needing a pre-experiment covariate
+
+          **Stratification for guardrails:**
+          - Critical for guardrail metrics where small subgroups might be disproportionately affected
+          - Example: a new feature might crash only on older Android devices. If we do not stratify by device type, the overall crash rate might look fine while a subset of users is having a terrible experience.
+          - Stratified analysis automatically surfaces: "crash rate increased by 5x for Android users on version < 10, who are 3% of the population"
+
+          **Combining with CUPED:**
+          - Stratification and CUPED are complementary, not competing
+          - Best practice: apply CUPED within each stratum for maximum variance reduction
+          - The combined approach typically achieves 40-60% variance reduction
+
+          **Trade-off:** Pre-stratification requires defining strata before the experiment, which limits flexibility. Too many strata (more than 100) create small subgroups with high variance. Post-stratification avoids these issues but provides less variance reduction than pre-stratification.
+        next: mod_question
+
+  # ======================================================================
+  # STAGE 5: MODEL (1 question node)
+  # mod_question (CONVERGENCE) -> (mod_interference | mod_bandits) -> train_strategy (CONVERGE)
+  # ======================================================================
+
+  - id: mod_question
+    stage: model
+    type: question
+    label: "ML-Powered Analysis"
+    speaker: interviewer
+    content: |
+      Beyond basic statistical testing, where should we apply ML to make the experimentation platform smarter? There are several opportunities — interference detection, automated metric sensitivity analysis, multi-armed bandits for optimization, and heterogeneous treatment effect estimation.
+
+      Which ML capability would you prioritize building?
+    dialogue:
+      - speaker: interviewer
+        text: "Where should we apply ML to make the platform smarter? Interference detection, bandits, heterogeneous effects — there are many opportunities."
+      - speaker: candidate
+        text: "Each addresses a different pain point. Interference detection prevents invalid conclusions. Bandits reduce the cost of experimentation. Heterogeneous effects reveal who benefits most. I need to choose based on impact."
+      - speaker: interviewer
+        text: "Which would you build first and why?"
+    choices:
+      - label: "Experiment interference detection"
+        answer: |
+          I would prioritize **automated experiment interference detection** — identifying when concurrent experiments interact with each other and invalidate results.
+
+          **Why this matters most:**
+          With 3,000 concurrent experiments, the probability of interference is not theoretical — it is guaranteed. Meta's research team found that 5-10% of experiments had statistically significant interactions with other concurrent experiments. An experiment that "works" in isolation might fail when combined with another change, or two experiments might amplify each other's effects.
+
+          **Types of interference:**
+          1. **Feature collision**: Two experiments change the same UI element or code path. Example: Experiment A changes the "Buy" button color, Experiment B changes the button text. Users in both experiments see a confusing hybrid.
+          2. **Metric contamination**: Experiment A increases overall site traffic. Experiment B measures click-through rate. B's control group now has different baseline traffic, contaminating the measurement.
+          3. **Resource competition**: Experiment A increases server load. Experiment B measures latency. B's treatment and control both get slower, masking B's actual latency impact.
+          4. **Behavioral interference**: Experiment A changes the recommendation algorithm. Users discover different content, which changes their behavior in Experiment B's feed ranking test.
+
+          **Detection model:**
+          - **Interaction regression**: For each pair of concurrent experiments (A, B) sharing users, fit: `Y = beta_A * A + beta_B * B + beta_AB * A*B + covariates + error`
+          - If the interaction term beta_AB is statistically significant (p < 0.01), experiments A and B interact.
+          - With 3,000 experiments, there are ~4.5 million pairs — infeasible to test all. **Prioritize pairs** based on: (a) overlapping user populations > 10%, (b) modifying related features (same service, same page), (c) affecting correlated metrics.
+          - Use a ML classifier to predict which experiment pairs are likely to interact, trained on historical interaction data. Features: code overlap (do they modify the same files?), metric overlap, user overlap, and semantic similarity of experiment descriptions.
+
+          **Automated response:**
+          - When interaction detected: alert both experiment owners with the estimated interaction magnitude
+          - Recommend: run one experiment at a time in the conflicting population segment, or use a factorial design to explicitly measure the interaction
+          - Dashboard flag: "This experiment's results may be affected by interaction with Experiment X. Estimated bias: +/- Y%."
+
+          **Interaction-aware analysis (advanced):**
+          - For experiments with known interactions, adjust the treatment effect estimate by subtracting the estimated interaction effect
+          - Use a Bayesian hierarchical model that jointly estimates treatment effects for interacting experiments
+          - This is computationally expensive but necessary for high-stakes experiments (revenue-impacting changes)
+        next: train_strategy
+      - label: "Multi-armed bandits for adaptive experiments"
+        answer: |
+          I would prioritize **multi-armed bandits (MAB)** for adaptive experimentation — dynamically allocating traffic to better-performing variants during the experiment.
+
+          **Why bandits matter most:**
+          Traditional A/B tests waste traffic on clearly inferior variants. If variant B is obviously worse than A after the first day, a fixed-horizon test continues sending 50% of traffic to B for the remaining 2 weeks. Bandits solve this by shifting traffic toward winning variants as evidence accumulates, reducing the "regret" (opportunity cost of suboptimal assignments).
+
+          **Where bandits are most valuable:**
+          - **UI optimization**: Testing 5+ button colors, copy variations, or layout options. With 5 variants, a fixed test allocates only 20% to each — bandits can allocate 60%+ to the leader within days.
+          - **Pricing experiments**: Testing price points where suboptimal prices directly cost revenue. Every hour spent at a bad price is lost money.
+          - **Content recommendations**: Testing ranking algorithms where user engagement directly translates to retention.
+
+          **Algorithm choice — Thompson Sampling:**
+          - Maintain a Beta posterior for each variant's success probability: `Beta(alpha=successes+1, beta=failures+1)`
+          - At each allocation decision, sample from each variant's posterior and assign traffic to the variant with the highest sample
+          - Naturally balances exploration (uncertain variants get traffic) and exploitation (proven winners get more traffic)
+          - Theoretical regret bound: O(sqrt(K * T * log(T))) where K = number of variants, T = number of users
+
+          **Implementation architecture:**
+          ```
+          User Request
+               |
+               v
+          Bandit Service (gRPC, <5ms)
+           |- Pull current posterior parameters from Redis
+           |- Sample from each variant's posterior
+           |- Assign user to highest-sample variant
+           |- Log assignment
+               |
+               v (async, every 5 minutes)
+          Reward Aggregator (Flink)
+           |- Compute per-variant reward from event stream
+           |- Update posterior parameters in Redis
+          ```
+
+          **Statistical validity with bandits:**
+          - Traditional p-values are invalid for bandit experiments (non-uniform allocation violates standard assumptions)
+          - Use **inverse propensity weighted (IPW) estimators**: weight each observation by 1/p(assignment) to correct for non-uniform allocation
+          - Or use the **doubly robust estimator** which combines IPW with a direct model for even lower variance
+          - Netflix published that IPW-corrected bandit experiments produced unbiased treatment effect estimates while reducing regret by 30-50% vs fixed allocation
+
+          **Contextual bandits (extension):**
+          - Personalize variant assignment based on user features: `P(variant | user_features)`
+          - Example: the best button color might differ by age group. Contextual bandits learn this automatically.
+          - Use LinUCB or neural contextual bandits for high-dimensional feature spaces
+
+          **Trade-off:** Bandits add significant infrastructure complexity (real-time assignment service, reward pipeline, IPW correction). They are only beneficial when (a) there are 3+ variants, (b) the reward signal is fast (within hours, not weeks), and (c) the opportunity cost of suboptimal assignment is high. For simple 2-variant experiments with long-term metrics, fixed allocation is simpler and more powerful.
+        next: train_strategy
+
+  # ======================================================================
+  # STAGE 6: TRAINING (1 node)
+  # train_strategy (CONVERGENCE) -> deploy_question
+  # ======================================================================
+
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training and Calibration"
+    speaker: candidate
+    content: |
+      "Training" for an experimentation platform is about calibrating and validating the platform's statistical methods, not training a traditional ML model. The platform itself must be rigorously tested.
+
+      **A/A testing (platform validation):**
+      - Run continuous A/A tests: experiments where treatment and control get the identical experience
+      - For a correctly functioning platform, A/A tests should show significant results at exactly the alpha rate (5% at alpha=0.05)
+      - If >7% of A/A tests show significance, there is a systematic bias in the platform (data pipeline, assignment, or statistical method)
+      - Netflix runs 100+ continuous A/A tests and treats them as integration tests for the entire experimentation stack
+
+      **Empirical false positive rate calibration:**
+      - For each metric, compute the empirical false positive rate from historical A/A tests
+      - If metric X shows 8% false positives instead of 5%, the variance estimate for that metric is too low
+      - Adjust: use bootstrap or jackknife variance estimates instead of analytical formulas
+      - Common cause: user-level metrics are not truly independent (users in the same household, shared devices, bot rings)
+
+      **Variance model training (for sample size calculators):**
+      - Product teams need to know "how long should my experiment run?" before launching
+      - This requires estimating the metric variance for their target population
+      - Train a variance prediction model: given (metric, population segment, time period), predict the per-user variance
+      - Use historical experiment data: for each past experiment, compute the realized variance and the pre-experiment predicted variance
+      - Calibrate the variance model so that predicted confidence intervals achieve their nominal coverage rate (95% CIs should contain the true effect 95% of the time)
+
+      **CUPED/CUPAC model training:**
+      - For CUPAC (ML-based variance reduction), train prediction models for each major metric category
+      - Features: 28-day pre-experiment user behavior, device type, country, account age, activity quintile
+      - Model: LightGBM predicting the experiment-period metric value
+      - Retrain monthly on the latest data to capture population shifts
+      - Validate: CUPAC predictions should be uncorrelated with treatment assignment (verify for each new experiment)
+
+      **Metric sensitivity analysis:**
+      - For each metric, compute the "practical sensitivity": what is the minimum effect size detectable with 80% power given 1 week of data and our variance reduction?
+      - Present this to experiment owners pre-launch: "With your target population of 10M users and CUPED, you can detect a 0.3% change in engagement within 7 days."
+      - If the MDE (minimum detectable effect) is larger than the expected effect, recommend running longer or using a more sensitive proxy metric
+    dialogue:
+      - speaker: interviewer
+        text: "How do you validate that the experimentation platform itself is working correctly? The platform is the foundation — if it is biased, every experiment decision is suspect."
+      - speaker: candidate
+        text: "A/A testing is the gold standard. Run continuous experiments where treatment and control are identical. The platform should detect significance at exactly the nominal rate — 5% at alpha 0.05. If it is higher, there is systematic bias."
+      - speaker: interviewer
+        text: "How many A/A tests do you need to validate the platform?"
+      - speaker: candidate
+        text: "Netflix runs over 100 continuously. I would start with at least 50 covering different metrics, platforms, and user segments. They serve as integration tests for the entire stack — assignment, data pipeline, metric computation, and statistical analysis."
+      - speaker: interviewer
+        text: "Good. What about the sample size calculator? Product teams need to plan experiment duration."
+      - speaker: candidate
+        text: "Train a variance prediction model on historical experiments. Given a metric and population, predict per-user variance, then compute the required sample size for the desired MDE and power. Validate by checking that predicted confidence intervals achieve nominal coverage on historical experiments."
+    next: deploy_question
+
+  # ======================================================================
+  # STAGE 7: DEPLOYMENT (1 question node)
+  # deploy_question -> (deploy_realtime | deploy_batch) -> mon_strategy (CONVERGE)
+  # ======================================================================
+
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Platform Architecture"
+    speaker: interviewer
+    content: |
+      How would you deploy the experimentation platform to serve 3,000+ concurrent experiments reliably? Think about the assignment service, metric computation, and the self-serve dashboard.
+    dialogue:
+      - speaker: interviewer
+        text: "Deployment for an experimentation platform must handle 3,000+ concurrent experiments. What is the biggest architectural challenge?"
+      - speaker: candidate
+        text: "The assignment service must handle every user request — billions per day — with near-zero latency. And the metric computation pipeline must process 50B events daily without falling behind."
+      - speaker: interviewer
+        text: "How would you architect this?"
+    choices:
+      - label: "Embedded SDK with centralized analysis"
+        answer: |
+          I would deploy an **embedded client SDK** that handles experiment assignment locally, with centralized backend services for metric computation and analysis.
+
+          **Assignment — embedded SDK approach:**
+          - Lightweight SDK (< 50KB) embedded in web, iOS, and Android clients
+          - SDK receives experiment configuration (experiment ID, salt, traffic percentage, targeting rules) via a CDN-cached config file, updated every 5 minutes
+          - Assignment computed locally: `hash(user_id + salt) % 1000 < traffic_pct * 10`
+          - No network call needed for assignment — zero added latency, zero dependency on a backend service
+
+          **Why embedded SDK?**
+          - **Zero latency**: Assignment is computed locally in < 1ms. No network round-trip needed.
+          - **Zero availability dependency**: Even if the backend is down, experiments continue running correctly. The SDK has the assignment logic built in.
+          - **Massive scale**: With 500M MAU making billions of requests daily, a centralized assignment service would need to handle 100K+ requests per second. The SDK eliminates this entirely.
+          - **Consistent cross-surface assignment**: The same SDK logic on web, iOS, and Android guarantees consistent assignment across surfaces.
+
+          **SDK features:**
+          - **Experiment targeting**: SDK evaluates targeting rules locally (country, platform version, user segment). Only eligible users are enrolled.
+          - **Event logging**: SDK logs exposure events (user saw the treatment) to Kafka via the existing event pipeline. Exposure logging enables intent-to-treat analysis.
+          - **Feature flags integration**: Experiments are a special case of feature flags. The SDK supports both, enabling gradual rollouts that transition into measured experiments.
+          - **Override support**: For debugging, developers can force-assign themselves to specific variants via URL parameters or debug menus.
+
+          **Centralized analysis backend:**
+          - Spark/Flink cluster processes event logs daily, computes metrics, runs statistical tests
+          - Results written to PostgreSQL, served via REST API to the dashboard
+          - Dashboard is a React SPA with D3 visualizations: experiment timelines, metric trends, confidence intervals, SRM checks
+
+          **Config management:**
+          - Experiment configurations stored in a database with a REST API for CRUD operations
+          - Changes propagate to CDN within 5 minutes (acceptable for experiment launches, but instant for emergency kill-switches via push mechanism)
+          - Config includes: experiment metadata, targeting rules, variant definitions, metric mappings, guardrail overrides
+
+          **Trade-off:** SDK updates require app releases (for mobile). Breaking changes to the assignment logic require coordinated rollouts. Mitigation: keep the SDK extremely simple (assignment + logging only) and put all complexity in the backend.
+        next: mon_strategy
+      - label: "Server-side assignment service"
+        answer: |
+          I would deploy a **centralized server-side assignment service** that handles all experiment assignments via a high-availability API.
+
+          **Architecture:**
+          ```
+          Client App (web/mobile/backend service)
+               |
+               v
+          Assignment Service (gRPC, <5ms P99)
+           |- Experiment Config Cache (local in-process, refreshed every 30s)
+           |- Assignment Logic (consistent hashing per experiment)
+           |- Exposure Logger (async to Kafka)
+               |
+               v
+          Returns: { experiment_id: variant_id, ... } for all active experiments
+          ```
+
+          **Why server-side?**
+          - **Instant configuration changes**: New experiments, traffic ramp-ups, and emergency shutdowns take effect immediately — no waiting for CDN propagation or app updates. For a platform running 3,000 experiments, the ability to instantly kill a problematic experiment is critical.
+          - **Complex targeting**: Server-side can evaluate targeting rules using data not available on the client — user segmentation models, historical behavior, account-level features. Example: "only enroll users who have completed 5+ purchases" requires backend data.
+          - **Backend experiments**: Many experiments are server-side only (algorithm changes, ranking models, API behavior). These cannot use a client SDK because there is no client.
+          - **Audit trail**: Every assignment decision passes through a single service, enabling comprehensive logging and debugging.
+
+          **High-availability design:**
+          - 3 regional deployments with independent data
+          - Each region: 50-100 pods on K8s, auto-scaling based on requests per second
+          - P99 latency target: < 5ms (achieved by keeping experiment configs in local memory, not hitting a database per request)
+          - Fallback: if the assignment service is unreachable, clients use a cached assignment from the last successful call (staleness limited to the cache TTL, typically 5 minutes)
+
+          **Batch pre-computation for offline experiments:**
+          - For experiments that do not need real-time assignment (email campaigns, weekly digest content), pre-compute all assignments in a daily batch job
+          - Assignments stored in a lookup table: `(user_id, experiment_id) -> variant_id`
+          - Avoids real-time service dependency for offline use cases
+
+          **Scale considerations:**
+          - 500M MAU x ~10 requests per user per day = 5 billion assignment lookups per day
+          - Peak: ~200K requests per second
+          - But each request resolves all active experiments for that user (batch lookup), so the per-experiment cost is amortized
+          - With in-memory config and consistent hashing (pure compute, no I/O), each assignment takes < 100 microseconds
+
+          **Trade-off:** Added network latency (1-5ms per request) compared to client-side SDK. Single point of failure risk (mitigated by multi-region deployment and client-side caching). Higher infrastructure cost. But the operational flexibility — instant changes, complex targeting, backend experiments — justifies the trade-off for a platform at this scale.
+        next: mon_strategy
+
+  # ======================================================================
+  # STAGE 8: MONITORING (2 nodes)
+  # mon_strategy (CONVERGENCE) -> mon_terminal
+  # ======================================================================
+
+  - id: mon_strategy
+    stage: monitoring
+    type: info
+    label: "Platform Monitoring"
+    speaker: candidate
+    content: |
+      Monitoring for an experimentation platform operates at two levels: **platform health** (is the system itself working correctly?) and **experiment health** (are individual experiments producing valid results?).
+
+      **Platform health monitoring:**
+
+      **Assignment system:**
+      - Assignment throughput and latency (P50/P99). Alert if P99 > 10ms or throughput drops > 20%.
+      - Assignment determinism: re-assign a random sample of 10,000 users every hour and verify assignments match the previous hour. Any mismatch indicates a bug in the hashing logic or config propagation.
+      - Experiment config propagation lag: measure time from config change to client/server adoption. Alert if lag > 10 minutes (experiments are running on stale configs).
+
+      **Metric computation pipeline:**
+      - Pipeline latency: daily metric computation should complete within 6 hours of midnight UTC. Alert if it is not done by 8am UTC.
+      - Event drop rate: compare events received in Kafka vs events processed by Spark. Drop rate > 0.1% indicates data loss.
+      - Join completeness: percentage of events that successfully join with the assignment table. Should be > 99.5%. Lower rates indicate assignment logging issues.
+
+      **Statistical validity (continuous A/A testing):**
+      - Maintain 50+ A/A tests continuously
+      - Dashboard showing: for each metric, the empirical false positive rate across A/A tests. Expected: 5% at alpha=0.05. Alert if >8% for any metric.
+      - Check P-value uniformity: under the null hypothesis, p-values should be uniformly distributed. A QQ-plot of A/A p-values should follow the diagonal. Deviation indicates systematic bias.
+
+      **Experiment health monitoring (per-experiment):**
+
+      **Automated health checks (run daily for every active experiment):**
+      1. **SRM check**: Chi-squared test on treatment vs control group sizes. Flag if p < 0.001.
+      2. **Pre-experiment balance check**: Compare treatment and control on 10 pre-experiment covariates. If >2 show significant differences (at Bonferroni-corrected alpha), the randomization may have failed.
+      3. **Time trend check**: Plot the treatment effect estimate over time. If it trends monotonically (steadily increasing or decreasing), there may be a novelty/primacy effect that will not persist.
+      4. **Metric correlation check**: If the primary metric improves but correlated metrics show no change, the result may be an artifact. Example: "engagement increased 5%" but "time spent" and "sessions" are flat — suspicious.
+
+      **Experiment lifecycle automation:**
+      - Auto-start analysis when experiment reaches minimum sample size
+      - Auto-alert when experiment reaches statistical significance (or when it is clear significance will not be reached within the planned duration)
+      - Auto-summarize: generate a plain-language summary of results for the experiment review meeting
+      - Auto-archive: after the ship decision, archive the experiment with results, decision, and decision-maker for future reference
+
+      **Meta-analysis (quarterly):**
+      - Across all experiments in the past quarter, what is the distribution of effect sizes? Are most changes having no impact? (Common — Netflix reports that ~80% of experiments show no statistically significant effect.)
+      - Win rate by team and product area: which teams are shipping the most impactful changes? This informs resource allocation.
+      - Metric reliability: which metrics are most sensitive to real changes? Prioritize these as primary metrics for future experiments.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you monitor the experimentation platform itself? The platform is the judge — if it is biased, all verdicts are wrong."
+      - speaker: candidate
+        text: "Two levels of monitoring. Platform health — assignment determinism, pipeline latency, event drop rates. And experiment health — SRM detection, pre-experiment balance checks, time trend analysis. Continuous A/A testing is the integration test for the entire stack."
+      - speaker: interviewer
+        text: "What about the meta-level — are experiments actually helping the company make better decisions?"
+      - speaker: candidate
+        text: "Quarterly meta-analysis. What percentage of experiments show significant results? What is the average effect size? Which teams have the highest win rates? This data informs experiment prioritization and resource allocation. Netflix reports that roughly 80% of experiments show no significant effect — understanding this base rate is critical for calibrating expectations."
+      - speaker: interviewer
+        text: "Excellent systems thinking. Let us wrap up."
+    next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Interview Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You have designed a comprehensive experimentation platform that addresses the key challenges of running A/B tests at scale.
+
+      **Summary of your design:**
+      1. **Problem definition**: Made a principled choice on randomization unit, considering statistical validity, network effects, and practical implementation
+      2. **Metrics/Statistical framework**: Chose a statistical methodology that handles the peeking problem and provides actionable outputs for product teams
+      3. **Data pipeline**: Designed a dual-path architecture (batch for accuracy, streaming for guardrails) processing 50B events per day
+      4. **Data quality**: Addressed the most critical data quality challenge — whether SRM detection or metric definition consistency — with concrete detection and remediation strategies
+      5. **Variance reduction**: Implemented techniques to detect smaller effects with less data, dramatically improving experiment velocity
+      6. **ML capabilities**: Applied ML to make the platform smarter — whether through interference detection, bandits, or other advanced capabilities
+      7. **Deployment**: Architected the assignment and analysis infrastructure for 3,000+ concurrent experiments with high availability
+      8. **Monitoring**: Built multi-layered monitoring covering platform validity (A/A tests), experiment health (SRM, balance checks), and organizational impact (meta-analysis)
+
+      **Areas for further exploration:**
+      - How would you handle long-term effects? Some changes look good in a 2-week experiment but cause user fatigue over 6 months.
+      - How do you handle experiments in two-sided marketplaces (Uber, Airbnb) where treating one side affects the other?
+      - How would you build a culture of experimentation? Many experiment decisions are overridden by HiPPOs (Highest Paid Person's Opinion).
+      - How would you handle experiments with rare but critical outcomes (crashes, security incidents) where standard statistical tests lack power?
+      - How would you extend to causal inference beyond A/B tests (quasi-experiments, difference-in-differences, regression discontinuity)?
+
+      This is a platform problem as much as an ML problem — the hardest part is not the statistics, it is building a system that thousands of product teams can use correctly, at scale, without making methodological errors. You demonstrated strong understanding of both the statistical foundations and the engineering challenges. Great interview!
+    dialogue:
+      - speaker: interviewer
+        text: "Excellent work! You have designed a thorough experimentation platform covering randomization, statistical analysis, variance reduction, and platform monitoring."
+      - speaker: candidate
+        text: "Thank you. I think the most underappreciated aspect of experimentation platforms is the meta-level monitoring — ensuring the platform itself is valid. Continuous A/A testing is cheap to run but catches fundamental issues that would silently corrupt thousands of experiment decisions."
+      - speaker: interviewer
+        text: "Agreed. What would you prioritize for the first version of the platform?"
+      - speaker: candidate
+        text: "Three things: correct assignment with SRM detection, CUPED for variance reduction, and automated guardrail monitoring. These cover the most common failure modes: invalid randomization, underpowered experiments, and undetected regressions. Everything else can be added incrementally."
+      - speaker: interviewer
+        text: "That is exactly the right prioritization — correctness first, power second, automation third. Great interview!"

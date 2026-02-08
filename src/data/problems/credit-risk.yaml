@@ -1,0 +1,697 @@
+id: credit-risk
+title: "Credit Risk Assessment & Loan Approval"
+description: "Design an ML system for automated credit risk assessment and loan decisioning."
+companies: ["Stripe", "Square", "Goldman Sachs"]
+domains: ["Tabular/Structured", "Time Series"]
+root: pd_start
+
+nodes:
+  # ======================================================================
+  # STAGE 1: PROBLEM DEFINITION (2 nodes)
+  # pd_start -> pd_formulation (question) -> ...
+  # ======================================================================
+
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we will design an ML system for automated credit risk assessment and loan decisioning at a fintech lender.
+
+      **Business context:**
+      - The company offers unsecured personal loans from $1,000 to $50,000 with terms of 12-60 months
+      - Current volume: 500,000 loan applications per month, approving roughly 35%
+      - Average loan size: $12,000. Total portfolio: $8.2 billion outstanding
+      - Current loss rate: 4.8% of approved loans default (miss 3+ consecutive payments)
+      - Manual underwriting takes 2-3 business days and costs $45 per application in analyst time
+
+      **What they want:**
+      - Automated decisioning for 80%+ of applications (instant approve/decline), with manual review only for edge cases
+      - Reduce default rate from 4.8% to under 3.5% without reducing approval rate
+      - Comply with ECOA (Equal Credit Opportunity Act) and Fair Lending regulations — the model must not discriminate on protected characteristics
+      - Provide adverse action reasons to declined applicants (legally required)
+      - Target decision latency: under 2 seconds for automated decisions
+
+      **Regulatory landscape:**
+      - ECOA prohibits discrimination based on race, color, religion, national origin, sex, marital status, age, or public assistance status
+      - Fair Lending Act requires lenders to provide specific reasons when denying credit
+      - OCC/CFPB Model Risk Management guidance (SR 11-7) requires documented model governance, validation, and ongoing monitoring
+      - Some jurisdictions are considering AI-specific lending regulations requiring algorithmic audits
+
+      Let us start with a critical framing decision.
+    dialogue:
+      - speaker: interviewer
+        text: "Welcome! We are designing a credit risk ML system for a fintech lender processing 500,000 applications per month. What strikes you as the key challenge here?"
+      - speaker: candidate
+        text: "The intersection of prediction accuracy and regulatory compliance. Unlike most ML problems, credit lending has legal constraints on what the model can do — we must provide explanations for denials, and we cannot discriminate on protected characteristics even indirectly."
+      - speaker: interviewer
+        text: "Exactly. The ECOA and Fair Lending requirements are not optional — violations carry severe penalties. How does this shape your approach?"
+      - speaker: candidate
+        text: "It means interpretability is not a nice-to-have, it is a hard requirement. And fairness is not just a metric to report — it is a constraint that must be enforced. This fundamentally limits our model architecture choices."
+      - speaker: interviewer
+        text: "Well said. Let us start with the model interpretability trade-off."
+    next: pd_formulation
+
+  - id: pd_formulation
+    stage: problem_definition
+    type: question
+    label: "Interpretability vs Performance"
+    speaker: interviewer
+    content: |
+      The most fundamental tension in credit risk modeling is between predictive performance and interpretability. Regulators and legal teams require that you can explain every credit decision. How would you approach this?
+    dialogue:
+      - speaker: interviewer
+        text: "Here is the central trade-off: a complex black-box model might predict defaults better, but regulators require you to explain every decision. How would you navigate this?"
+      - speaker: candidate
+        text: "There are two schools of thought. Use an inherently interpretable model where explanations are built in, or use a powerful black-box model with post-hoc explanation methods like SHAP."
+      - speaker: interviewer
+        text: "Which approach would you advocate for and why?"
+    choices:
+      - label: "Glass-box model (logistic regression / GAM)"
+        answer: |
+          I would use a **glass-box model** — specifically a **Generalized Additive Model (GAM)** using Microsoft's InterpretML EBM (Explainable Boosting Machine).
+
+          **Why glass-box in credit?**
+          Regulatory scrutiny in lending is intense. When the OCC or CFPB audits your model, they do not just want to see SHAP plots — they want to understand the actual decision function. A glass-box model's decision logic is fully transparent: each feature contributes a specific, auditable risk score, and the total is a simple sum.
+
+          **EBM architecture:**
+          - Learns a smooth shape function for each feature: `f(credit_score)`, `f(debt_to_income)`, `f(employment_length)`, etc.
+          - Final score = `f1(x1) + f2(x2) + ... + fn(xn) + interaction_terms`
+          - Each shape function is a boosted tree constrained to a single feature, so it captures non-linearities (e.g., credit score below 620 has exponentially higher risk) while remaining interpretable
+          - Pairwise interaction terms capture key relationships (e.g., high DTI + short employment history = much higher risk than either alone)
+
+          **Adverse action reasons are trivial:**
+          - Sort features by their contribution to the denial decision: "You were declined because: (1) debt-to-income ratio of 45% exceeds threshold, contributing +0.8 to risk score, (2) credit history length of 14 months is below preferred minimum, contributing +0.4, (3) recent hard inquiries (6 in last 12 months) contributing +0.3."
+          - These reasons are legally defensible because they directly reflect the model's actual logic, not approximations.
+
+          **Performance trade-off:**
+          Research from Microsoft and Duke shows EBMs achieve within 1-2% AUC of gradient boosting on tabular credit data (AUC 0.78-0.82 vs 0.80-0.84 for GBMs). For a domain where a 1% AUC improvement saves millions but a regulatory violation costs tens of millions in fines, the trade-off strongly favors interpretability.
+        next: met_glassbox
+      - label: "Black-box model with SHAP explanations"
+        answer: |
+          I would use a **black-box gradient boosting model (XGBoost/LightGBM)** with rigorous post-hoc SHAP explanations.
+
+          **Why black-box?**
+          The 1-2% AUC improvement of GBMs over glass-box models translates to real money in credit. On a $8.2B portfolio, a 1% improvement in default prediction accuracy saves roughly $40-80M annually in avoided losses. This is too significant to leave on the table.
+
+          **SHAP-based explanation framework:**
+          - Compute TreeSHAP values for every application (exact, polynomial-time for tree models)
+          - **Adverse action reasons**: Rank features by SHAP contribution to the denial decision. The top 4-5 features with highest positive SHAP values (pushing toward "deny") become the adverse action reasons.
+          - **Consistency guarantee**: SHAP values sum to the model's output, so the explanations are mathematically complete — they fully account for the decision.
+
+          **Regulatory defensibility:**
+          - SHAP explanations have gained acceptance among regulators. The Federal Reserve published guidance in 2023 acknowledging that post-hoc explanation methods can satisfy adverse action requirements if properly validated.
+          - Validation protocol: for a sample of 10,000 decisions, verify that (a) the top SHAP reasons align with domain expert judgment, (b) the SHAP ranking is stable (small input perturbations do not completely change the explanation), and (c) the explanations are actionable (the applicant can improve on the cited factors).
+
+          **Guardrails against SHAP failure modes:**
+          - SHAP can produce unstable explanations for correlated features (DTI and payment-to-income ratio are highly correlated). Mitigation: group correlated features and report group-level SHAP.
+          - For edge cases where SHAP explanations seem counterintuitive, route to human underwriter review rather than auto-deciding.
+
+          **Hybrid approach:**
+          - Use the GBM for scoring (best accuracy)
+          - Maintain a parallel logistic regression model for explanation validation — if GBM and LR disagree strongly on the top reasons, flag for human review
+          - This catches cases where SHAP explanations might not reflect true feature importance
+        next: met_blackbox
+
+  # ======================================================================
+  # STAGE 2: METRICS (2 nodes, diverge then converge)
+  # met_glassbox -> data_pipeline (CONVERGE)
+  # met_blackbox -> data_pipeline (CONVERGE)
+  # ======================================================================
+
+  - id: met_glassbox
+    stage: metrics
+    type: info
+    label: "Metrics for Glass-Box Model"
+    speaker: candidate
+    content: |
+      For a glass-box credit risk model, our metrics must cover three dimensions: discrimination power, calibration quality, and fairness compliance.
+
+      **Discrimination metrics (can the model separate good from bad loans?):**
+      - **Gini coefficient / AUC**: Primary ranking metric. Target AUC > 0.78. The Gini coefficient (= 2*AUC - 1) is the industry standard in credit risk. A Gini of 0.56 means the model captures 56% of the discrimination between defaulters and non-defaulters. Industry benchmarks for unsecured personal loans range from Gini 0.50-0.65.
+      - **KS statistic (Kolmogorov-Smirnov)**: Maximum separation between cumulative distributions of good and bad loans. Target KS > 0.35. Measures discriminatory power at the optimal cut point.
+      - **Precision at 35% approval rate**: Of the top 35% of applicants by score, what percentage actually repay? Target > 97% (i.e., default rate < 3% among approved loans).
+
+      **Calibration metrics (are predicted probabilities accurate?):**
+      - **Hosmer-Lemeshow test**: Group applicants into 10 deciles by predicted probability, compare predicted vs actual default rates per decile. Non-significant p-value (>0.05) means the model is well-calibrated.
+      - **Brier score**: Mean squared difference between predicted probability and actual outcome. Target < 0.04. For credit risk, calibration matters because the predicted probability directly maps to pricing (interest rate = risk-free rate + expected loss + margin).
+      - **Calibration stability**: Repeat calibration check monthly. Drift in calibration means either the population is changing or the model is degrading — both require action.
+
+      **Fairness metrics (legally mandated):**
+      - **Adverse Impact Ratio (AIR)** for each protected group: Approval rate for protected group / approval rate for non-protected group. EEOC guidelines suggest AIR > 0.80 (the "four-fifths rule"). Below 0.80 triggers disparate impact investigation.
+      - **Equalized odds**: True positive rate and false positive rate should be similar across demographic groups. Difference > 5 percentage points is a red flag.
+      - **Marginal effect analysis**: For the glass-box model, examine each feature's shape function for proxies of protected characteristics. If ZIP code contributes differently for majority vs minority areas, the feature may be a proxy for race.
+    dialogue:
+      - speaker: interviewer
+        text: "What metrics would you use for the glass-box model? Remember, in credit risk the metrics serve both model development and regulatory compliance."
+      - speaker: candidate
+        text: "Three dimensions: discrimination, calibration, and fairness. For discrimination, the Gini coefficient is the industry standard — our target should be above 0.56. For calibration, the Hosmer-Lemeshow test ensures predicted probabilities match actual default rates."
+      - speaker: interviewer
+        text: "And fairness metrics? These are not optional in lending."
+      - speaker: candidate
+        text: "The Adverse Impact Ratio is the primary fairness metric — approval rates for protected groups must be at least 80% of the rate for non-protected groups. I would also check equalized odds and specifically audit each feature's shape function for proxy discrimination."
+      - speaker: interviewer
+        text: "Good. The shape function audit is a major advantage of glass-box models. Let us move to data."
+    next: data_pipeline
+
+  - id: met_blackbox
+    stage: metrics
+    type: info
+    label: "Metrics for Black-Box Model"
+    speaker: candidate
+    content: |
+      For a black-box credit risk model, the metrics framework must be even more rigorous because we need additional layers of validation to compensate for reduced inherent interpretability.
+
+      **Discrimination metrics (same core metrics, higher targets):**
+      - **Gini coefficient / AUC**: Target AUC > 0.82 (must justify the interpretability trade-off by outperforming glass-box by at least 2-3 points). If AUC improvement is < 1%, the regulatory risk of black-box is not worth it.
+      - **KS statistic**: Target > 0.40.
+      - **Lift analysis**: In the top risk decile, the model should capture > 4x the base default rate. In the bottom risk decile, default rate should be < 0.5%. This decile analysis is standard in credit risk model validation.
+
+      **Calibration metrics (critical for pricing):**
+      - **Expected vs observed default rate by score band**: Divide the score range into 20 equal bands. In each band, predicted default probability must be within 10% relative error of observed rate. Example: if model predicts 5% default for a score band, actual rate must be between 4.5% and 5.5%.
+      - **Probability of default (PD) accuracy**: Since interest rates are directly tied to PD, miscalibration means mispricing. A 0.5% PD overestimate on $8.2B portfolio means $41M in unnecessarily charged interest — driving borrowers to competitors.
+
+      **Explanation quality metrics (unique to black-box):**
+      - **SHAP stability**: For 95% of applications, adding Gaussian noise (sigma = 0.01 * feature range) should not change the top-3 SHAP reasons. Unstable explanations are legally indefensible.
+      - **SHAP faithfulness**: Mask the top SHAP feature and re-score. The score change should be proportional to the SHAP value (within 20%). If masking a feature with SHAP=+0.3 only changes the score by 0.05, the explanation is misleading.
+      - **Explanation agreement rate**: Compare SHAP reasons with logistic regression reasons (from parallel model). Agreement on top-3 reasons should be > 70%. Lower agreement means one model is wrong or the explanation method is unreliable.
+
+      **Fairness metrics (same legal requirements, harder to audit):**
+      - Same AIR and equalized odds thresholds as glass-box
+      - Additional: **counterfactual fairness test** — for a sample of denied applicants, flip the protected attribute and re-score. If score changes by > 5%, the model has learned protected characteristic proxies. For black-box models, this test is essential since you cannot inspect the decision function directly.
+      - **Intersectional fairness**: Check AIR not just for individual protected groups but for intersections (e.g., Black women, Hispanic men). Black-box models are more likely to exploit intersectional correlations.
+    dialogue:
+      - speaker: interviewer
+        text: "For a black-box model, the metrics burden is higher because you need to validate the explanation layer too. How do you ensure SHAP explanations are trustworthy?"
+      - speaker: candidate
+        text: "Three checks: stability — small input perturbations should not change the top reasons. Faithfulness — masking the top SHAP feature should change the score proportionally. And agreement with a parallel logistic regression model — if the two disagree on reasons, something is wrong."
+      - speaker: interviewer
+        text: "The counterfactual fairness test is interesting. How practical is it?"
+      - speaker: candidate
+        text: "You cannot literally flip someone's race and re-score — race is not a model input. But you can use synthetic data generation to create matched pairs that differ only in proxy features correlated with race. If the scores diverge systematically, the model has learned proxy discrimination."
+      - speaker: interviewer
+        text: "That is a sophisticated approach. Let us discuss the data pipeline."
+    next: data_pipeline
+
+  # ======================================================================
+  # STAGE 3: DATA (2 nodes)
+  # data_pipeline (CONVERGENCE) -> data_strategy (question) -> ...
+  # ======================================================================
+
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Sources and Pipeline"
+    speaker: interviewer
+    content: |
+      Let us discuss the data available for credit risk modeling. The data landscape in lending is unique because of the **reject inference problem** — we only observe outcomes for applicants we approved.
+
+      **Available data sources:**
+
+      | Source | Coverage | Features | Update Frequency |
+      |--------|----------|----------|-----------------|
+      | Credit bureau (Experian/TransUnion/Equifax) | 95% of US adults | Credit score, tradelines, inquiries, public records | Real-time pull per application |
+      | Application data | All applicants | Income, employment, housing, loan purpose, requested amount | At application time |
+      | Bank account data (Plaid) | 60% of applicants (opt-in) | Cash flow, income verification, spending patterns, NSF history | Snapshot at application |
+      | Historical loan performance | Approved loans only (35% of applications) | Payment history, default status, prepayment, collections | Monthly update |
+      | Alternative data | Varies | Utility payments, rent payments, education verification | Third-party APIs |
+
+      **The reject inference problem:**
+      We have 500,000 applications per month but only observe outcomes for the ~175,000 we approve. The 325,000 declined applicants are a biased missing sample — they were declined because they appeared risky, but we never know if they would have actually defaulted. This creates **selection bias**: our model is trained only on the "approved" population, which is systematically different from the full applicant population.
+
+      **Data volume:**
+      - 5 years of historical data: ~10.5M approved loans with outcomes
+      - ~30M total applications (including declines) with feature data
+      - Per-applicant feature vector: ~200-400 raw features before engineering
+      - Label: binary (default within 24 months / no default). Default defined as 90+ days past due.
+
+      What is your strategy for handling the reject inference problem and feature selection?
+    dialogue:
+      - speaker: interviewer
+        text: "The reject inference problem is the elephant in the room for credit risk. We only see outcomes for loans we approved. How does this bias affect model training?"
+      - speaker: candidate
+        text: "It is a severe form of selection bias. Our training data only contains applicants who passed the existing underwriting criteria. If the model just learns to replicate the existing approval logic, it cannot identify good borrowers who were incorrectly declined — a real business opportunity."
+      - speaker: interviewer
+        text: "Exactly. The missed good borrowers represent both lost revenue and potentially a fairness issue — if the old model was biased, the new model inherits that bias."
+      - speaker: candidate
+        text: "Right. There are several approaches to handle this, ranging from simple to sophisticated."
+    next: data_strategy
+
+  - id: data_strategy
+    stage: data
+    type: question
+    label: "Feature Data Strategy"
+    speaker: interviewer
+    content: |
+      Beyond traditional credit bureau data, there is a growing movement toward "alternative data" — bank transaction history, utility payments, rent payments, education records, and even social/behavioral data. Should we incorporate alternative data sources, or stick with traditional credit features?
+
+      Consider both the predictive value and the fairness implications.
+    dialogue:
+      - speaker: interviewer
+        text: "Alternative data — bank transactions, utility payments, rent history — could improve predictions, especially for thin-file applicants with limited credit history. But it raises fairness concerns. What is your approach?"
+      - speaker: candidate
+        text: "This is a trade-off between inclusion and risk. Alternative data can help approve people traditional models reject — especially young adults and immigrants with thin credit files. But some alternative data sources correlate with protected characteristics."
+      - speaker: interviewer
+        text: "Walk me through your recommendation."
+    choices:
+      - label: "Traditional credit data only"
+        answer: |
+          I would stick with **traditional credit bureau data plus application data**, at least for the initial model deployment.
+
+          **Why traditional data?**
+          - **Regulatory precedent**: Credit bureau data has decades of legal precedent. Regulators understand it, fair lending auditors know how to evaluate it, and courts have established case law around its use. Using novel data sources invites regulatory scrutiny with uncertain outcomes.
+          - **Feature stability**: Credit scores, tradeline histories, and debt-to-income ratios are standardized and well-understood. They do not change definition or coverage unexpectedly. Alternative data sources (e.g., a fintech's bank account access API) could change terms, lose coverage, or shut down.
+          - **Fairness is easier to audit**: Traditional credit features have known correlations with protected characteristics (e.g., credit score correlates with race due to historical discrimination). These correlations are well-documented, and established techniques exist to mitigate them. Novel data sources have unknown correlation structures.
+
+          **Key traditional features (ranked by typical Gini contribution):**
+          1. Credit score (FICO/VantageScore) — 25-30% of model's discriminatory power
+          2. Debt-to-income ratio — 10-15%
+          3. Number of tradelines and credit utilization — 10-12%
+          4. Derogatory marks (collections, bankruptcies, charge-offs) — 8-10%
+          5. Length of credit history — 5-8%
+          6. Recent hard inquiries (last 6 months) — 5-7%
+          7. Employment length and income stability — 5-7%
+          8. Loan purpose and requested amount relative to income — 3-5%
+
+          **The trade-off:** We miss thin-file applicants. About 26 million US adults are "credit invisible" (no credit bureau record) and another 19 million have unscorable files. With traditional data only, we must decline these applicants — a significant lost market and a potential fair lending concern since credit invisibility disproportionately affects minority communities.
+
+          **Mitigation for thin-file:** Route thin-file applicants to a separate manual review path rather than auto-declining. This preserves compliance for the automated system while keeping the door open for underserved borrowers.
+        next: feat_question
+      - label: "Alternative data with fairness guardrails"
+        answer: |
+          I would incorporate **alternative data** — specifically bank transaction data (via Plaid) and verified rent/utility payment history — with rigorous fairness testing.
+
+          **Why alternative data?**
+          - **Inclusion**: 45 million US adults lack sufficient credit bureau data for traditional scoring. Bank transaction data provides a rich behavioral signal for these "thin-file" applicants. Studies by FinRegLab (2019) found that cash flow data improved approval rates for thin-file applicants by 15-20% without increasing default rates.
+          - **Incremental predictive power**: Even for thick-file applicants, bank transaction features add 2-4% Gini improvement on top of credit bureau data. Cash flow volatility, savings buffer, and income consistency are independently predictive of default risk beyond what credit scores capture.
+
+          **Alternative data features:**
+          - **Income verification**: Compare stated income against actual bank deposits. Discrepancy > 20% is a strong risk signal (inflated applications).
+          - **Cash flow stability**: Coefficient of variation of monthly net income over 6-12 months. High volatility predicts difficulty making fixed loan payments.
+          - **Savings buffer**: Average minimum balance / monthly loan payment. Borrowers with < 1 month buffer default at 3x the rate of those with > 3 months buffer.
+          - **NSF/overdraft frequency**: Number of non-sufficient funds events in last 12 months. Strong default predictor.
+          - **Recurring payment reliability**: On-time rate for rent, utilities, subscriptions. Demonstrates payment discipline outside the credit system.
+
+          **Fairness guardrails (non-negotiable):**
+          1. **Disparate impact testing**: Before adding any alternative feature, compute AIR with and without it. If adding the feature reduces AIR for any protected group below 0.80, do not use it — even if it improves AUC.
+          2. **Proxy variable analysis**: Test each alternative feature for correlation with protected characteristics. Bank account type, ZIP code of bank branch, and transaction merchant categories can all be proxies for race or ethnicity. Remove or decorrelate features with correlation > 0.3.
+          3. **Opt-in only**: Bank data access must be applicant-initiated. Applicants who do not connect their bank account are scored on traditional data only — no penalty for declining to share.
+          4. **Third-party audit**: Engage an independent fair lending auditor (e.g., from the Brookings Institution or a specialized consultancy) to review alternative data features before production deployment.
+        next: feat_question
+
+  # ======================================================================
+  # STAGE 4: FEATURES (1 question node)
+  # feat_question (CONVERGENCE) -> (feat_reject | feat_temporal) -> mod_question (CONVERGE)
+  # ======================================================================
+
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Critical Feature Engineering"
+    speaker: interviewer
+    content: |
+      Beyond raw feature selection, what feature engineering technique is most critical for this problem? Think about the unique structural challenges of credit risk data.
+    dialogue:
+      - speaker: interviewer
+        text: "Raw features are just the starting point. What feature engineering approach is most critical for credit risk specifically?"
+      - speaker: candidate
+        text: "Credit risk has two unique structural challenges that standard feature engineering does not address: the reject inference problem and the temporal dynamics of credit behavior."
+      - speaker: interviewer
+        text: "Pick the one you think is more impactful and walk me through your approach."
+    choices:
+      - label: "Reject inference augmentation"
+        answer: |
+          I would focus on **reject inference** — the technique of estimating outcomes for declined applicants so our model can learn from the full applicant population, not just the approved subset.
+
+          **Why this matters most:**
+          Our model trains on 175,000 approved loans/month but ignores 325,000 declined applications. This creates two problems: (1) the model cannot learn that some declined applicants would have been good borrowers, and (2) the decision boundary is biased toward the historical approval policy, perpetuating any biases.
+
+          **My approach — augmented data with uncertainty:**
+
+          **Step 1: Parceling method (industry standard):**
+          - Score all historical declined applicants with the current model
+          - The best-scoring 20% of declines are labeled as "likely would not have defaulted" (based on their similarity to approved good loans)
+          - The worst-scoring 30% are labeled as "likely would have defaulted"
+          - The middle 50% are excluded (too uncertain)
+          - Add the labeled declines to the training set with lower sample weight (0.3-0.5) to reflect the label uncertainty
+
+          **Step 2: Semi-supervised learning refinement:**
+          - Train a self-labeling model: use approved loans as labeled data and declined loans as unlabeled
+          - The model iteratively predicts labels for declines, retrains, and converges
+          - Use entropy-based confidence: only accept self-labeled examples where model confidence > 85%
+
+          **Step 3: Validation via "champion/challenger" experiment:**
+          - The gold standard for reject inference is to actually approve a small random sample of borderline declines (2-5% of applicants in the "near-miss" score range)
+          - Observe their outcomes over 12-24 months
+          - This provides unbiased ground truth for the declined population, enabling true model calibration
+          - At Square, this "learn-and-earn" strategy identified a segment of declined applicants with only 2.1% default rate — well within the acceptable range
+
+          **Impact on features:**
+          With reject inference, the model can learn feature interactions it could never see before. For example: "self-employed applicants with strong cash flow but thin credit files" were consistently declined but rarely default. Without reject inference, this pattern is invisible.
+        next: mod_question
+      - label: "Temporal credit behavior features"
+        answer: |
+          I would focus on **temporal credit behavior features** — engineered features that capture the trajectory and velocity of an applicant's credit behavior, not just their point-in-time snapshot.
+
+          **Why temporal features matter most:**
+          A credit score is a single number at a point in time. But two applicants with the same 680 score have very different risk profiles if one has improved from 580 over the past 18 months (positive trajectory, low risk) and the other has declined from 780 (negative trajectory, high risk). Temporal features capture this dynamic.
+
+          **Key temporal features:**
+
+          **Credit score trajectory:**
+          - Score delta over 3, 6, 12, 24 months: `current_score - score_N_months_ago`
+          - Score velocity: rate of change per month, computed via linear regression on monthly score snapshots
+          - Score volatility: standard deviation of monthly scores over 12 months. High volatility predicts instability.
+          - Score recovery: if there was a score drop > 50 points, how quickly did they recover? Fast recovery indicates resilience.
+
+          **Utilization dynamics:**
+          - Credit utilization trend: is utilization climbing (accumulating debt) or declining (paying down)?
+          - Utilization spike detection: sudden utilization increase > 30 percentage points in a single month signals financial stress
+          - Payment-to-balance ratio trend: increasing ratio means the borrower is paying more than minimum — a strong positive signal
+
+          **Behavioral velocity features:**
+          - New account opening rate: > 3 new accounts in 6 months signals credit-seeking behavior (higher risk)
+          - Hard inquiry clustering: 5 inquiries in 2 weeks (rate shopping for one loan) is very different from 5 inquiries spread across 6 months (serial credit seeking)
+          - Balance growth rate across all tradelines: aggregate balance increasing faster than income growth is unsustainable
+
+          **Delinquency patterns:**
+          - Days-past-due recency: 30-day late 3 years ago vs 30-day late 3 months ago have vastly different default probabilities
+          - Delinquency frequency: one late payment ever vs three in the last year
+          - Recovery behavior: did the borrower cure delinquencies quickly or let them persist?
+
+          **Impact:** In production credit models, temporal features typically add 3-5 Gini points over static snapshots. Goldman Sachs's Marcus lending platform reported that velocity features were among their top 5 most predictive feature groups.
+        next: mod_question
+
+  # ======================================================================
+  # STAGE 5: MODEL (1 question node)
+  # mod_question (CONVERGENCE) -> (mod_constrained | mod_ensemble) -> train_strategy (CONVERGE)
+  # ======================================================================
+
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Model Architecture"
+    speaker: interviewer
+    content: |
+      Given the interpretability requirements, fairness constraints, and calibration needs, what model architecture would you use? Remember the approval threshold directly translates to pricing and business decisions — the model must be both accurate and trustworthy.
+    dialogue:
+      - speaker: interviewer
+        text: "Now for the model architecture. Whatever we choose must be accurate, well-calibrated, fair, and explainable. What is your approach?"
+      - speaker: candidate
+        text: "The constraints narrow the field significantly. I see two viable architectures — a constrained optimization approach that bakes fairness in, or a staged ensemble with separate fairness enforcement."
+      - speaker: interviewer
+        text: "Walk me through your recommendation."
+    choices:
+      - label: "Fairness-constrained single model"
+        answer: |
+          I would build a **single model with fairness constraints directly embedded in the training objective**, using adversarial debiasing or constrained optimization.
+
+          **Architecture — Constrained EBM/GBM:**
+          - Base model: EBM (if glass-box chosen) or LightGBM (if black-box chosen)
+          - **Fairness constraints** added to the loss function: penalize the model during training whenever predictions create disparate impact across protected groups
+          - Specifically: `loss = binary_cross_entropy + lambda * max(0, 0.80 - AIR_min)` where AIR_min is the minimum Adverse Impact Ratio across all protected groups, evaluated on the training batch
+          - Lambda starts at 0.1 and is increased until AIR > 0.80 is achieved without catastrophic accuracy loss
+
+          **Constrained optimization approach (alternative):**
+          - Use fairlearn library's `ExponentiatedGradient` or `ThresholdOptimizer`
+          - Define constraint: equalized odds (TPR difference < 5%, FPR difference < 5% across groups)
+          - The optimizer finds the model that maximizes AUC subject to the fairness constraint
+          - This is mathematically rigorous: it finds the Pareto-optimal trade-off between accuracy and fairness
+
+          **Why single model with embedded constraints?**
+          - Fairness is enforced during training, not as a post-hoc patch. The model learns feature representations that are inherently less discriminatory.
+          - Simpler model governance: one model to validate, document, and monitor (vs a pipeline of models)
+          - More stable: separate fairness corrections applied after scoring can interact with changing score distributions in unpredictable ways
+
+          **Calibration layer:**
+          - After training, apply isotonic regression calibration on a held-out set
+          - Calibrate separately per risk tier (low/medium/high) to ensure accurate PD estimates across the score range
+          - Re-calibrate monthly to account for population drift
+
+          **Trade-off:** Embedding fairness in the loss function can reduce AUC by 1-3% compared to an unconstrained model. But this is a legal requirement, not an optimization choice. The question is not whether to enforce fairness, but how to do it with minimal accuracy loss.
+        next: train_strategy
+      - label: "Two-stage model with separate fairness layer"
+        answer: |
+          I would build a **two-stage pipeline**: a high-accuracy scoring model followed by a separate fairness calibration layer.
+
+          **Stage 1 — Risk scoring model:**
+          - LightGBM trained to maximize AUC on default prediction, without any fairness constraints
+          - This model achieves maximum discriminatory power: AUC ~0.82-0.84
+          - Output: raw default probability for each applicant
+
+          **Stage 2 — Fairness-aware threshold optimizer:**
+          - Instead of a single approval threshold (e.g., "approve if PD < 5%"), use group-specific thresholds calibrated to achieve equalized odds
+          - For example: if the base model systematically over-predicts risk for Hispanic applicants (due to credit score bias), lower the approval threshold for that group until approval rates equalize
+          - Implementation: `fairlearn.ThresholdOptimizer` with `equalized_odds` constraint
+          - Thresholds are derived analytically from the ROC curves per group — no iterative training needed
+
+          **Why two-stage?**
+          - **Maximum accuracy**: Stage 1 is unconstrained, so it captures every predictive signal without worrying about fairness. This is the best possible risk model.
+          - **Transparent fairness enforcement**: The fairness adjustment is an explicit, auditable layer. Regulators can see exactly what adjustments are made and why. "We lower the threshold by X points for group Y because the base model has Z% higher FPR for that group."
+          - **Independent tuning**: If fairness requirements change (e.g., new regulation requires demographic parity instead of equalized odds), only Stage 2 changes. The risk model is untouched.
+          - **Easier monitoring**: If fairness metrics degrade, you know the issue is in the threshold layer, not the scoring model. Clear separation of concerns.
+
+          **Reject region for uncertainty:**
+          - Between "clear approve" and "clear decline," define a "manual review" zone (typically 15-25% of applications)
+          - In this zone, human underwriters make the final decision with the model score as input
+          - This catches edge cases where the model or fairness adjustments might produce questionable decisions
+
+          **Trade-off:** Group-specific thresholds face philosophical and legal debate. Some argue that treating groups differently (even to equalize outcomes) is itself discriminatory. The legal landscape is evolving, but current CFPB guidance supports outcome-equalizing adjustments as a legitimate fair lending practice.
+        next: train_strategy
+
+  # ======================================================================
+  # STAGE 6: TRAINING (1 node)
+  # train_strategy (CONVERGENCE) -> deploy_question
+  # ======================================================================
+
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: candidate
+    content: |
+      Credit risk model training requires special attention to temporal validation, label maturity, and regulatory documentation.
+
+      **Temporal splitting (non-negotiable):**
+      - Training: Applications from 2020-2023 with fully matured outcomes (loans that have either completed their term or defaulted)
+      - Validation: Applications from Jan-Jun 2024
+      - Test: Applications from Jul-Dec 2024
+      - **Critical**: A loan takes 12-24 months to reveal default. "Immature" loans (too recent to know the outcome) must be excluded from training or labeled with survival analysis techniques.
+
+      **Label definition — subtle but critical:**
+      - Default = 90+ days past due (DPD) at any point during loan term. This is the industry standard (Basel II/III definition).
+      - **Exclusions**: Loans in their first 3 months (performance seasoning not yet meaningful), loans with fraud (different model), and loans modified due to hardship programs (special population).
+      - **Label maturity window**: For 36-month loans, wait at least 18 months before using as training data. Models trained on immature labels underpredict long-term default risk.
+
+      **Handling class imbalance:**
+      - At 4.8% default rate, the dataset is moderately imbalanced (roughly 20:1 good-to-bad ratio)
+      - Preferred approach: use `scale_pos_weight` in XGBoost/LightGBM rather than oversampling (SMOTE creates synthetic credit profiles that may not reflect reality)
+      - Alternatively: undersample non-defaults to 5:1 ratio, maintaining temporal structure within the undersampled set
+
+      **Model governance documentation (SR 11-7 compliance):**
+      - **Model development document**: Problem statement, data sources, feature selection rationale, modeling methodology, validation results
+      - **Model validation report**: Independent team replicates results, tests edge cases, evaluates fairness
+      - **Ongoing monitoring plan**: Metrics tracked, alert thresholds, retraining triggers, responsible parties
+      - This documentation typically takes 4-8 weeks to prepare and must be completed before production deployment
+      - Model Risk Management (MRM) team must sign off before any model goes live
+
+      **Retraining cadence:**
+      - Quarterly full retrain (credit conditions change slowly)
+      - Monthly calibration check (recalibrate if drift detected)
+      - Annual comprehensive model review (regulatory requirement)
+      - Any material model change requires re-validation by MRM team — this takes 2-4 weeks
+    dialogue:
+      - speaker: interviewer
+        text: "Training a credit risk model has some unique requirements. How would you handle the label maturity issue?"
+      - speaker: candidate
+        text: "Label maturity is critical. A 36-month loan that is only 6 months old has not had enough time to reveal whether it will default. I would wait at least 18 months before including a loan in training data. For newer loans, survival analysis can provide partial labels."
+      - speaker: interviewer
+        text: "And model governance? SR 11-7 is a major regulatory requirement."
+      - speaker: candidate
+        text: "Every model needs three documents before production deployment: a development document, an independent validation report, and an ongoing monitoring plan. The MRM team must sign off. This process typically adds 4-8 weeks to the deployment timeline, but it is non-negotiable."
+      - speaker: interviewer
+        text: "Good understanding of regulatory requirements. Let us move to deployment."
+    next: deploy_question
+
+  # ======================================================================
+  # STAGE 7: DEPLOYMENT (1 question node)
+  # deploy_question -> (deploy_api | deploy_hybrid) -> mon_strategy (CONVERGE)
+  # ======================================================================
+
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Deployment Architecture"
+    speaker: interviewer
+    content: |
+      How would you deploy the credit decisioning system? Remember, we need sub-2-second automated decisions for 80%+ of applications, with manual review routing for edge cases. Also consider audit trail requirements — every decision must be fully reproducible for 7 years.
+    dialogue:
+      - speaker: interviewer
+        text: "Deployment in regulated lending has unique requirements — full audit trails, reproducibility, and strict access controls. How would you architect this?"
+      - speaker: candidate
+        text: "The key challenge is combining real-time decisioning speed with the comprehensive logging and reproducibility that regulators demand."
+      - speaker: interviewer
+        text: "What is your approach?"
+    choices:
+      - label: "Real-time API with decision logging"
+        answer: |
+          I would deploy a **real-time decisioning API** with comprehensive immutable audit logging.
+
+          **Architecture:**
+          ```
+          Loan Application (web/mobile/API partner)
+               |
+               v
+          Credit Decision Service (K8s)
+           |- Credit Bureau Pull (Experian API, ~800ms)
+           |- Feature Computation (application + bureau data, <100ms)
+           |- Model Scoring (ONNX runtime, <50ms)
+           |- Fairness Check (threshold adjustment, <10ms)
+           |- Decision Logic (approve/decline/manual review, <10ms)
+           |- Adverse Action Reason Generation (SHAP, <100ms)
+               |
+               v
+          Decision Record -> Immutable Audit Log (S3 + DynamoDB)
+          ```
+
+          **Audit trail (legally mandated):**
+          Every decision record includes:
+          - Application ID, timestamp, model version, feature vector (all 200+ features at decision time)
+          - Raw model score, calibrated probability, fairness-adjusted threshold applied
+          - Final decision (approve/decline/manual review) and reasons
+          - If declined: top 4 adverse action reasons with SHAP values
+          - All stored in immutable storage (S3 with Object Lock, 7-year retention)
+
+          **Reproducibility guarantee:**
+          - Model artifacts (weights, feature transformers, threshold parameters) are versioned and stored in a model registry (MLflow)
+          - Given an application ID, we can retrieve the exact model version, feature values, and scoring logic used — and reproduce the exact same decision years later
+          - This is tested quarterly: pull 100 random historical decisions, replay them, verify identical outputs
+
+          **Decision routing:**
+          - Score > 0.85 confidence: auto-approve (estimated 45% of applications)
+          - Score < 0.15 confidence: auto-decline with adverse action reasons (estimated 35% of applications)
+          - 0.15-0.85: route to human underwriter queue with model recommendation and explanation (estimated 20%)
+
+          **Latency budget:** Total < 1.5 seconds. Credit bureau pull dominates (800ms). Everything else fits in 700ms. We pre-warm ONNX model and cache feature transformers to minimize cold-start latency.
+        next: mon_strategy
+      - label: "Hybrid batch + real-time with human-in-the-loop"
+        answer: |
+          I would deploy a **hybrid system** with real-time pre-screening, asynchronous enrichment, and mandatory human review for a substantial portion of decisions.
+
+          **Three-tier architecture:**
+
+          **Tier 1 — Instant pre-screen (real-time, <2 seconds):**
+          - Runs on application submission with just application data + credit bureau pull
+          - Uses a lightweight model (logistic regression, 30 features) for instant triage
+          - Clear auto-declines (score < 10th percentile, obvious policy violations like DTI > 60%) are declined immediately with adverse action reasons
+          - Everyone else moves to Tier 2
+          - ~25% of applications resolved here (all declines)
+
+          **Tier 2 — Deep scoring (async, 2-30 minutes):**
+          - Full feature engineering including bank account analysis (if available), employment verification, fraud checks
+          - Primary ML model (EBM or GBM) scores with complete feature set
+          - Fairness constraint check
+          - If model confidence is high (probability < 0.02 or > 0.15) and all automated checks pass, auto-decide
+          - ~55% of applications resolved here (mix of approvals and declines)
+
+          **Tier 3 — Human review (1-4 hours):**
+          - ~20% of applications: model-uncertain, fairness-borderline, high-dollar, or policy exceptions
+          - Underwriter sees: model score, confidence interval, top risk factors, similar historical loans and their outcomes, fairness analysis
+          - Underwriter can override model (both directions) with documented reason
+          - Override rates are tracked and audited — consistent overrides in one direction trigger model investigation
+
+          **Why hybrid?**
+          - **Risk management**: Fully automated decisioning for a $50,000 unsecured loan carries significant risk. The hybrid approach auto-decides the easy cases and puts humans on the hard ones.
+          - **Regulatory comfort**: Regulators are more comfortable with human-in-the-loop systems, especially for large loans. The CFPB has signaled increasing scrutiny of fully automated lending.
+          - **Learning opportunity**: Human overrides generate the most valuable training data. They reveal where the model disagrees with expert judgment — exactly the cases where the model might be wrong.
+          - **Gradual automation**: Start with 60% auto-decision rate, increase to 80%+ as the model proves itself over 6-12 months. This builds organizational trust.
+
+          **Audit trail:** Same as real-time approach — every decision (automated or human) is logged with complete reproducibility. Human decisions additionally log the underwriter's rationale.
+        next: mon_strategy
+
+  # ======================================================================
+  # STAGE 8: MONITORING (2 nodes)
+  # mon_strategy (CONVERGENCE) -> mon_terminal
+  # ======================================================================
+
+  - id: mon_strategy
+    stage: monitoring
+    type: info
+    label: "Monitoring and Governance"
+    speaker: candidate
+    content: |
+      Credit risk model monitoring is uniquely challenging because of the **label delay** — we do not know if a loan will default until 12-24 months after approval. We cannot wait that long to detect model degradation.
+
+      **Leading indicators (available within weeks):**
+      - **Early payment behavior**: First payment delinquency (FPD) rate — percentage of new loans that miss their first payment. Industry benchmark: < 1%. FPD rate rising is the earliest signal of model degradation or population shift. Available within 30-45 days of origination.
+      - **Application score distribution drift**: Monitor the distribution of model scores for new applications. If the median score shifts by > 0.5 standard deviations from the training population, the applicant mix has changed materially.
+      - **Feature distribution monitoring**: PSI (Population Stability Index) for each input feature, computed weekly. PSI > 0.1 triggers investigation, PSI > 0.25 triggers model review. Key features to watch: DTI (shifts with economic conditions), credit utilization (shifts with interest rate changes), employment length (shifts during recessions).
+
+      **Lagging indicators (available after 12-24 months, but definitive):**
+      - **Vintage analysis**: For each month of origination (vintage), track cumulative default rate over time. Plot vintage curves — if recent vintages have steeper early default trajectories than historical vintages, the model is approving riskier borrowers.
+      - **Actual vs predicted default rate by score decile**: The core model validation metric. If the model predicts 3% default for a score band but actual defaults are 5%, the model is miscalibrated and underpricing risk.
+      - **Gini degradation**: Recompute Gini coefficient on mature vintages. If Gini drops below training Gini by > 3 points, trigger full model retrain.
+
+      **Fairness monitoring (monthly, legally required):**
+      - Adverse Impact Ratio computed monthly across all protected groups
+      - HMDA (Home Mortgage Disclosure Act) style reporting: approval rates, average interest rates, and denial reasons broken down by demographic group
+      - Regression analysis: regress approval/denial on protected characteristics controlling for creditworthiness. Any statistically significant coefficient (p < 0.05) on a protected characteristic triggers legal review.
+
+      **Regulatory examination readiness:**
+      - Maintain a "model inventory" listing all models, their validation status, last review date, and responsible owner
+      - Generate quarterly model performance reports automatically
+      - Conduct annual stress testing: how does the model perform if unemployment doubles or housing prices drop 20%? Use historical recession data (2008, 2020) to simulate stressed portfolios.
+      - Keep all model documentation current — regulators can request an examination with 2 weeks notice
+    dialogue:
+      - speaker: interviewer
+        text: "Monitoring in credit risk has a unique challenge — you do not know if a loan defaults until 12-24 months later. How do you detect problems early?"
+      - speaker: candidate
+        text: "Leading indicators are the key. First payment delinquency rate is available within 30-45 days and is the earliest signal of model degradation. If FPD rate rises from 0.8% to 1.5%, something is wrong — either the model is letting through riskier applicants or economic conditions have shifted."
+      - speaker: interviewer
+        text: "What about fairness monitoring? How often do you check?"
+      - speaker: candidate
+        text: "Monthly fairness audits are the minimum — compute AIR for all protected groups, run regression analysis for disparate treatment, and compare denial reason distributions across groups. Any anomaly triggers immediate legal review."
+      - speaker: interviewer
+        text: "And stress testing?"
+      - speaker: candidate
+        text: "Annual stress tests using historical recession scenarios. How does our portfolio perform if unemployment doubles? We replay 2008 and 2020 economic conditions through the model to estimate losses under stress. This is both good risk management and a regulatory expectation."
+    next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Interview Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You have designed a comprehensive credit risk assessment system that balances predictive accuracy with the rigorous regulatory requirements of consumer lending.
+
+      **Summary of your design:**
+      1. **Problem definition**: Navigated the interpretability-performance trade-off with clear rationale for your choice, recognizing that regulatory compliance is a hard constraint
+      2. **Metrics**: Defined metrics across three dimensions — discrimination (Gini/AUC), calibration (Hosmer-Lemeshow), and fairness (AIR, equalized odds) — with specific numerical targets
+      3. **Data**: Addressed the reject inference problem and made a principled choice on traditional vs alternative data, considering both predictive value and fairness implications
+      4. **Features**: Tackled the most critical structural challenge in credit data, whether reject inference or temporal behavior patterns
+      5. **Model**: Designed an architecture that embeds fairness constraints rather than treating them as an afterthought
+      6. **Training**: Handled label maturity, temporal validation, and SR 11-7 model governance requirements
+      7. **Deployment**: Built for sub-2-second decisions with full audit trail and 7-year reproducibility
+      8. **Monitoring**: Used leading indicators (FPD, score drift) to detect problems months before lagging indicators (actual defaults) confirm them
+
+      **Areas for further exploration:**
+      - How would you handle economic regime changes (recession) where historical correlations break down?
+      - How do you price loans based on the model output? (Expected loss = PD x LGD x EAD)
+      - How would you extend to different loan products (auto loans, mortgages, credit cards)?
+      - How do you handle adversarial applicants who learn to game the model?
+      - What is your strategy for model interpretability when using text features (loan purpose descriptions)?
+
+      This is a domain where getting the ML right is necessary but not sufficient — you also need to navigate complex regulatory requirements, fairness obligations, and business risk management. You demonstrated strong understanding of all three dimensions.
+    dialogue:
+      - speaker: interviewer
+        text: "Excellent work! You have covered all the key aspects of credit risk ML — from the interpretability trade-off through regulatory compliance to production monitoring."
+      - speaker: candidate
+        text: "Thank you. I think the most important takeaway is that credit risk ML is as much a governance and compliance challenge as it is a modeling challenge. The best model in the world is useless if it cannot pass regulatory scrutiny."
+      - speaker: interviewer
+        text: "Absolutely right. What would you prioritize for the first production deployment?"
+      - speaker: candidate
+        text: "Start with a glass-box model on traditional data, even if it leaves AUC on the table. Establish the monitoring and governance infrastructure first. Then iterate toward alternative data and more complex models once the compliance framework is proven."
+      - speaker: interviewer
+        text: "That is the right approach — build trust with regulators and the business first, then optimize. Great interview!"

@@ -1,0 +1,804 @@
+id: harmful-content-visual
+title: "Harmful Image & Video Detection"
+description: "Design a system to detect NSFW, violent, and policy-violating visual content at scale."
+companies: ["Meta", "Google", "TikTok"]
+domains: ["Computer Vision", "Classification"]
+category: "Security, Safety & Fraud"
+root: pd_start
+
+nodes:
+  # ============ PROBLEM DEFINITION ============
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design a **harmful visual content detection system** that identifies NSFW, violent, and policy-violating images and videos at platform scale.
+
+      **Business context:**
+      - Meta processes **~3.2 billion images and 800 million videos daily** across Facebook, Instagram, and WhatsApp
+      - TikTok reviews **~34 million video uploads per day**, each requiring moderation before or shortly after publication
+      - YouTube removes **~6 million videos per quarter** for policy violations, with 94% first flagged by automated systems
+      - Google SafeSearch classifies billions of web images daily for search filtering
+
+      **Content policy taxonomy (multi-label):**
+
+      | Category | Severity | Legal Requirement | Examples |
+      |----------|----------|------------------|---------|
+      | **CSAM** | Critical | Mandatory reporting (18 USC 2258A) | Child exploitation material |
+      | **Terrorism** | Critical | EU TCO Regulation (1-hour removal) | Extremist propaganda, beheadings |
+      | **Violence/Gore** | High | Platform policy | Graphic injuries, animal cruelty |
+      | **NSFW/Adult** | Medium | Age-gating required | Nudity, sexual content |
+      | **Hate Symbols** | Medium | Varies by jurisdiction | Swastikas, supremacist imagery |
+      | **Self-Harm** | High | Platform policy + duty of care | Suicide instructions, cutting |
+
+      **Scale requirements:** Process 50K images/second and 5K video uploads/minute with P99 latency under 500ms for images and under 5 seconds for short videos.
+
+      **Key challenge:** Visual content moderation is harder than text -- adversarial actors use steganography, text-in-image overlays, and subtle modifications to evade detection. Cultural context matters enormously: a Jain religious symbol resembles a swastika, breastfeeding photos vs. NSFW content, and war journalism vs. glorification of violence.
+
+      Let's scope the architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "Let's design a harmful visual content detection system for a major platform. Where would you start?"
+      - speaker: candidate
+        text: "I'd start by understanding the content taxonomy and severity tiers. Not all harmful content is equal -- CSAM requires mandatory reporting to NCMEC within 24 hours, while borderline NSFW might just need age-gating."
+      - speaker: interviewer
+        text: "Good. What makes visual content moderation uniquely challenging compared to text?"
+      - speaker: candidate
+        text: "Three things: the compute cost is much higher per item, adversarial evasion is visual rather than textual, and context is harder to extract -- the same image of a wound could be medical education or gore."
+      - speaker: interviewer
+        text: "Exactly. Let's think about the classifier architecture."
+    next: pd_arch_question
+
+  - id: pd_arch_question
+    stage: problem_definition
+    type: question
+    label: "Classifier Architecture"
+    speaker: interviewer
+    content: |
+      A fundamental architectural decision: how do you structure the classification system across multiple policy categories?
+
+      **Option A:** A single multi-label classifier that outputs probability scores for all categories simultaneously.
+      **Option B:** A hierarchical pipeline of specialized classifiers, each optimized for one category.
+
+      Consider trade-offs in accuracy, latency, maintainability, and the ability to update individual categories independently.
+    choices:
+      - label: "Single multi-label classifier"
+        answer: |
+          I'd use a **single multi-label model** with shared visual backbone and per-category classification heads:
+
+          **Architecture:**
+          ```
+          Input Image (224x224 or 384x384)
+               |
+          Shared Vision Backbone (ViT-L/14 or EfficientNet-V2-L)
+               |
+          Global Feature Vector (1280-dim)
+               |
+          +----+----+----+----+----+----+
+          |    |    |    |    |    |    |
+          v    v    v    v    v    v    v
+          CSAM NSFW Violence Hate Self-Harm Terror
+          head head  head    head  head    head
+          (sigmoid per head -> independent probabilities)
+          ```
+
+          **Why single model:**
+          - **Shared representations**: Violence and gore share visual patterns with NSFW -- joint training learns richer features. Meta's research shows multi-task models outperform single-task by 3-5% F1 on shared visual concepts
+          - **Inference efficiency**: One forward pass (~15ms on A100) instead of 6 separate passes (~90ms total). At 50K images/second, this saves ~$2M/year in GPU costs
+          - **Simpler deployment**: One model artifact to version, deploy, and monitor instead of 6 independent pipelines
+          - **Cross-category learning**: Hard negatives for one category become training signal for others -- medical images teach the model to distinguish clinical from violent content
+
+          **Risks and mitigations:**
+          - **Category coupling**: Updating NSFW training data could regress violence detection. Mitigation: per-category regression tests and frozen backbone fine-tuning
+          - **Different update cadences**: Terrorism imagery evolves faster than NSFW. Mitigation: allow per-head fine-tuning without retraining the backbone
+          - **Single point of failure**: If the model crashes, all categories go down. Mitigation: rule-based fallback with perceptual hashing for known-bad content
+        next: met_overview
+      - label: "Hierarchical specialized classifiers"
+        answer: |
+          I'd build a **hierarchical pipeline** with a fast triage classifier followed by specialized models:
+
+          **Architecture:**
+          ```
+          Input Image
+               |
+          Stage 1: Triage Classifier (EfficientNet-B0, ~3ms)
+               |
+          +--------+---------+
+          |        |         |
+          Safe   Uncertain  Flagged
+          (70%)   (20%)     (10%)
+               |         |
+               v         v
+          Stage 2: Specialized Models (parallel, ~20ms each)
+               |
+          +----+----+----+----+----+
+          |    |    |    |    |    |
+          CSAM NSFW Violence Hate Self-Harm
+          (PhotoDNA + ML) (NudeNet-derived) (Custom) (ADL DB + ML)
+          ```
+
+          **Why hierarchical:**
+          - **Cost efficiency**: 70% of content is clearly safe and skips expensive specialized models. At Meta's scale of 3.2B images/day, this saves processing ~2.2B images through heavy models daily
+          - **Best-in-class per category**: CSAM detection uses Microsoft's PhotoDNA (perceptual hashing) plus ML -- a specialized approach that's the industry standard and legally defensible
+          - **Independent lifecycles**: The hate symbols classifier can be updated when ADL (Anti-Defamation League) adds new symbols without touching the NSFW model. Terrorism model updated during crisis events
+          - **Failure isolation**: If the NSFW classifier has a regression, violence detection keeps working perfectly
+          - **Regulatory compliance**: CSAM detection can use a legally certified pipeline (PhotoDNA + NCMEC hash matching) separate from general ML models
+
+          **Risks and mitigations:**
+          - **Higher total latency**: Mitigated by running Stage 2 models in parallel (latency = max single model, ~20ms, not sum)
+          - **Operational complexity**: 6 models to deploy and monitor. Mitigated by standardized MLOps pipeline with shared monitoring
+          - **Missed cross-category signals**: An image that's borderline for multiple categories might slip through each individual model. Mitigated by ensemble scoring at the decision layer
+        next: met_overview
+
+  # ============ METRICS ============
+  - id: met_overview
+    stage: metrics
+    type: info
+    label: "Metrics Framework"
+    speaker: interviewer
+    content: |
+      Good architectural thinking. Now let's define the metrics framework. Harmful content detection has uniquely asymmetric costs.
+
+      **Cost of errors by category:**
+
+      | Category | False Negative Cost | False Positive Cost |
+      |----------|-------------------|-------------------|
+      | **CSAM** | Criminal liability, child exploitation continues | Image removed, user appeal (low cost) |
+      | **Terrorism** | EU regulatory fine (up to 4% revenue), radicalization | Content removed, user frustrated |
+      | **Violence** | User trauma, platform reputation | War journalism/medical content suppressed |
+      | **NSFW** | Minors exposed to adult content | Art, breastfeeding, medical content removed |
+      | **Hate Symbols** | Normalization of hate | Religious/cultural symbols misclassified |
+
+      **Tiered metric targets:**
+
+      | Tier | Categories | Recall Target | Precision Target | Action |
+      |------|-----------|---------------|-----------------|--------|
+      | **Critical** | CSAM, terrorism | >99.5% | >95% | Auto-remove + report authorities |
+      | **High** | Violence, self-harm | >95% | >90% | Auto-remove + appeal |
+      | **Medium** | NSFW, hate symbols | >90% | >85% | Age-gate / reduce reach |
+
+      **Offline evaluation methodology:**
+      - **Human evaluation panels**: 5 labelers per image, majority vote, separate panels per cultural region
+      - **Adversarial test suites**: 10K curated examples with known evasion techniques (text overlays, color shifts, cropping, steganography)
+      - **Cross-cultural test sets**: Same image evaluated by labelers from US, EU, Middle East, and Asia to measure cultural sensitivity
+      - **Temporal test sets**: Hold out the most recent 2 weeks for unbiased evaluation
+
+      **Online metrics:**
+      - User report rate on auto-approved content (proxy for false negatives)
+      - Appeal success rate on auto-removed content (proxy for false positives)
+      - Time-to-action from upload to moderation decision
+      - Proactive detection rate: % of violations caught before any user report
+
+      Let's discuss the feature engineering approach for visual content.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle the massive asymmetry between false negative and false positive costs for CSAM?"
+      - speaker: candidate
+        text: "For CSAM, we accept much higher false positive rates because the cost of a miss is catastrophic -- continued child exploitation and criminal liability. We set recall at 99.5%+ and route all flagged content to expedited human review with a 4-hour SLA."
+      - speaker: interviewer
+        text: "What about cultural sensitivity in metrics? A Jain swastika vs. a Nazi swastika?"
+      - speaker: candidate
+        text: "We need region-specific evaluation. The same symbol has opposite meanings in South Asia vs. Europe. I'd track per-region precision separately and potentially use region-aware thresholds informed by the user's locale."
+      - speaker: interviewer
+        text: "Good nuance. Let's look at features."
+    next: feat_question
+
+  # ============ FEATURES ============
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Extraction Strategy"
+    speaker: interviewer
+    content: |
+      For video content specifically, feature extraction strategy has major implications for both accuracy and cost. A 60-second TikTok video at 30fps has 1,800 frames. How do you extract features from video?
+
+      Consider the trade-off between computational cost and the risk of missing harmful content that appears in only a few frames.
+    choices:
+      - label: "Frame-level sampling with keyframe detection"
+        answer: |
+          I'd use **intelligent keyframe sampling** rather than processing every frame:
+
+          **Sampling strategy:**
+          1. **Scene change detection**: Use pixel-difference hashing to identify scene boundaries. Sample 1 frame per scene (covers ~80% of unique visual content)
+          2. **Uniform sampling**: Additionally sample every Nth frame (N=30, i.e., 1fps) to catch gradual transitions
+          3. **Audio-triggered sampling**: Increase sampling rate during audio peaks (screaming, gunshots, explicit audio) detected by a lightweight audio classifier
+          4. **OCR-triggered sampling**: When text-in-image is detected in any sampled frame, increase sampling rate in that region to capture text overlays
+
+          **For a typical 60-second video:**
+          - Scene-change frames: ~15-20 frames
+          - Uniform 1fps: 60 frames
+          - After deduplication: ~50-60 unique frames to classify
+          - **Cost**: 50-60 forward passes vs. 1,800 for every frame (97% compute reduction)
+
+          **Per-frame classification:**
+          - Each sampled frame runs through the image classifier independently
+          - Frame-level scores aggregated: `video_score = max(frame_scores)` for each category
+          - If max score exceeds threshold for any category, flag the entire video
+
+          **Pros:**
+          - Massive compute savings (50-60 vs 1,800 frames)
+          - Works with existing image classifiers without video-specific training
+          - Easy to explain and debug (can point to the specific flagged frame)
+
+          **Cons:**
+          - May miss harmful content that's visible for only 1-2 frames (subliminal insertion)
+          - No temporal understanding -- can't detect patterns that emerge over time (escalating violence, grooming progression)
+          - Audio-visual correlation missed (violent audio + innocent visual = concerning context)
+        next: feat_frame_details
+      - label: "Video-level temporal features (3D CNN / Video Transformer)"
+        answer: |
+          I'd use **video-level models** that capture temporal dynamics:
+
+          **Architecture: Video Transformer (TimeSformer or ViViT)**
+          - Input: 16-32 uniformly sampled frames at 224x224 resolution
+          - **Divided space-time attention**: First attend spatially within each frame, then temporally across frames
+          - Output: Video-level feature vector (768-dim) capturing both appearance and motion
+          - Classification heads per policy category on the video-level features
+
+          **Why temporal features matter:**
+          - **Violence detection**: A still frame of a person holding a weapon is ambiguous. The temporal sequence of drawing, aiming, and firing is unambiguous
+          - **Self-harm content**: The progression from showing tools to the act requires temporal understanding
+          - **Grooming patterns**: Conversations in video that escalate from friendly to inappropriate -- temporal context is essential
+          - **Adversarial evasion**: Harmful content interleaved with innocuous frames at sub-second intervals (flash frames) requires temporal analysis
+
+          **Practical implementation:**
+          - **SlowFast network**: Two pathways -- slow (4fps, spatial detail) and fast (16fps, temporal dynamics). Meta's research shows 5-8% accuracy gain on violent video detection vs. frame-level approaches
+          - **Training data**: Kinetics-700 pre-training, then fine-tune on platform-specific labeled videos
+          - **Compute budget**: ~100ms per video clip on A100 (vs. ~50ms for 50 frame-level classifications)
+
+          **Pros:**
+          - Captures temporal patterns invisible to frame-level analysis
+          - Better accuracy on video-specific harms (+5-8% F1 on violence, +3% on self-harm)
+          - More robust to adversarial frame insertion
+
+          **Cons:**
+          - 2x compute cost vs. intelligent frame sampling
+          - Requires video-specific training data (can't reuse image classifiers)
+          - Harder to explain decisions (which temporal pattern triggered the flag?)
+        next: feat_temporal_details
+
+  - id: feat_frame_details
+    stage: features
+    type: info
+    label: "Frame Sampling Pipeline"
+    speaker: interviewer
+    content: |
+      Good choice. Let's detail the frame-level feature pipeline.
+
+      **Complete feature extraction pipeline:**
+
+      ```
+      Video Upload
+           |
+      Decode + Scene Detection (FFmpeg + PySceneDetect, ~200ms)
+           |
+      Keyframe Selection (50-60 frames for 60s video)
+           |
+      Parallel Processing:
+      +------------------+------------------+------------------+
+      |                  |                  |                  |
+      v                  v                  v                  v
+      Image Classifier   OCR Detection      Audio Classifier   Perceptual Hash
+      (ViT-L, ~15ms/frame) (PaddleOCR, ~20ms) (VGGish, ~10ms)  (PhotoDNA, ~1ms)
+      |                  |                  |                  |
+      v                  v                  v                  v
+      Per-category       Text-in-image      Audio flags        Known-bad match
+      scores             content            (screams, speech)  (NCMEC, GIFCT)
+      +------------------+------------------+------------------+
+                              |
+                              v
+                    Score Aggregation Layer
+                    (max-pool per category + audio context weighting)
+                              |
+                              v
+                    Video-level Decision
+      ```
+
+      **Perceptual hashing for known content (critical for CSAM):**
+      - **PhotoDNA**: Microsoft's hash generates a compact fingerprint robust to resizing, cropping, and color changes. Used by all major platforms for CSAM detection
+      - **GIFCT shared hash database**: Industry consortium (Meta, Google, Twitter, Microsoft) shares hashes of terrorism content. Matching against ~500K known-bad hashes takes ~1ms per image
+      - **pDNA matching catches ~40% of CSAM** before ML even runs -- known content that's been previously identified and hashed
+
+      **Handling adversarial evasion techniques:**
+
+      | Evasion Technique | Detection Method |
+      |------------------|------------------|
+      | Text overlays on NSFW | OCR extraction + text-image joint classification |
+      | Border/frame additions | Center-crop + multi-scale classification |
+      | Color inversion | Color normalization preprocessing |
+      | Steganography | Statistical analysis of LSB patterns |
+      | Tiny harmful images in collage | Object detection to identify sub-regions |
+      | Cartoon/AI-generated versions | Style-invariant feature extraction (CLIP embeddings) |
+
+      Now let's choose the model architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle the case where harmful content appears in only 1-2 frames?"
+      - speaker: candidate
+        text: "The max-pooling aggregation handles this -- if even one frame scores high, the video gets flagged. For subliminal insertion specifically, I'd add a dense-sampling pass on flagged videos where any frame scores above 0.3 but below the action threshold."
+      - speaker: interviewer
+        text: "What about the GIFCT hash database? How effective is it?"
+      - speaker: candidate
+        text: "Very effective for known content. The GIFCT database catches about 90% of re-shared terrorism content because terrorists tend to recirculate the same propaganda. Combined with PhotoDNA for CSAM, hash matching handles the known-content problem efficiently."
+    next: mod_question
+
+  - id: feat_temporal_details
+    stage: features
+    type: info
+    label: "Temporal Feature Pipeline"
+    speaker: interviewer
+    content: |
+      Good choice. Let's detail the temporal video feature pipeline.
+
+      **Video feature extraction architecture:**
+
+      ```
+      Video Upload
+           |
+      Decode + Uniform Sampling (32 frames at target fps)
+           |
+      +------------------+------------------+
+      |                  |                  |
+      v                  v                  v
+      SlowFast Network   Audio Encoder      Perceptual Hash
+      (Slow: 4fps spatial) (AST, ~10ms)    (PhotoDNA per keyframe)
+      (Fast: 16fps motion)                  |
+      |                  |                  v
+      v                  v              Known-bad match
+      Video Feature      Audio Feature
+      (2048-dim)         (768-dim)
+      +------------------+------------------+
+                    |
+                    v
+              Multimodal Fusion (cross-attention or concat+MLP)
+                    |
+                    v
+              Per-category Classification Heads
+                    |
+                    v
+              Video-level Decision
+      ```
+
+      **SlowFast Network details (Meta Research):**
+      - **Slow pathway**: Operates at 4fps, processes 8 frames, captures spatial details (what objects are in the scene). Uses full ResNet-50 backbone with high channel capacity
+      - **Fast pathway**: Operates at 16fps, processes 32 frames, captures motion patterns (how objects move). Uses lightweight pathway with 1/8th the channels
+      - **Lateral connections**: Fast pathway features are fused into slow pathway at each stage, allowing motion information to contextualize spatial features
+      - **Published results**: 79.8% top-1 on Kinetics-400, compared to 74.9% for frame-level ResNet-50
+
+      **Audio-visual fusion for context:**
+      - Audio provides critical context: identical visuals of a crowd can be a concert (cheering) or a riot (screaming, breaking glass)
+      - **Audio Spectrogram Transformer (AST)** extracts audio features from mel-spectrograms
+      - Cross-attention fusion: Audio features attend to video features and vice versa
+      - Audio alone catches ~15% of violent videos that are visually ambiguous
+
+      **Temporal adversarial robustness:**
+      - **Frame shuffling detection**: If adversaries shuffle frames to break temporal coherence, detect via optical flow discontinuities
+      - **Speed manipulation**: Harmful content played at 2x or 0.5x speed -- normalize playback before feature extraction
+      - **Interleaved innocent frames**: Temporal attention naturally looks across frames, catching brief harmful segments that frame sampling might miss
+
+      Now let's choose the model architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "What's the computational overhead of SlowFast vs. frame-level classification?"
+      - speaker: candidate
+        text: "SlowFast processes 32 frames in a single forward pass in about 100ms on an A100. Frame-level classification of 32 frames would take about 32 x 15ms = 480ms. So SlowFast is actually faster for the same frame count, plus it captures temporal patterns."
+      - speaker: interviewer
+        text: "How important is the audio modality?"
+      - speaker: candidate
+        text: "Critical for edge cases. Research shows audio context resolves about 15% of visually ambiguous cases. A person screaming in pain vs. on a roller coaster looks similar but sounds completely different. It's also important for detecting harmful speech in video."
+    next: mod_question
+
+  # ============ MODEL ============
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Vision Model Architecture"
+    speaker: interviewer
+    content: |
+      Now let's choose the core vision model. For image classification at this scale, two leading approaches dominate:
+
+      **Option A:** Fine-tuned Vision Transformer (ViT) -- the architecture behind CLIP, Google's ViT, and most SOTA image classifiers.
+      **Option B:** EfficientNet ensemble -- multiple lightweight models combined for robust classification.
+
+      Consider the accuracy-latency-cost trade-off at 50K images/second scale.
+    choices:
+      - label: "Fine-tuned ViT-L/14 (Vision Transformer)"
+        answer: |
+          I'd fine-tune **ViT-L/14** pre-trained with CLIP or DINOv2 on platform-specific labeled data:
+
+          **Model specification:**
+          - **Architecture**: Vision Transformer Large with 14x14 patch size, 304M parameters
+          - **Pre-training**: CLIP (OpenAI) or DINOv2 (Meta) -- trained on 400M+ image-text pairs
+          - **Input resolution**: 336x336 (higher resolution improves detection of small harmful objects in scene)
+          - **Fine-tuning**: Multi-label classification heads (6 categories), trained on ~5M platform-labeled images
+
+          **Why ViT-L/14:**
+          - **SOTA accuracy**: ViT-L achieves 88.5% top-1 on ImageNet vs. 84.4% for EfficientNet-B7. For content moderation, this translates to 3-5% higher recall on subtle violations
+          - **CLIP pre-training advantage**: CLIP-trained ViT understands text-in-image naturally (learned from image-text pairs). Critical for detecting text overlays on harmful content
+          - **Self-attention captures global context**: Unlike CNNs that build local-to-global features, ViT attends to all image patches simultaneously. A small hate symbol in the corner is attended to equally with the main subject
+          - **Transfer learning quality**: CLIP/DINOv2 pre-training produces features that transfer exceptionally well to downstream tasks with limited labeled data
+
+          **Performance at scale:**
+          - **Latency**: ~25ms per image on A100 GPU (after TensorRT optimization)
+          - **Throughput**: ~40 images/second per GPU. Need ~1,250 A100s for 50K images/second
+          - **Cost**: ~$1.5M/month in GPU compute (A100 spot pricing at ~$1.20/hr)
+          - **Distillation option**: Distill to ViT-B/16 (86M params) for 3x throughput with ~2% accuracy drop
+
+          **Trade-off**: Higher accuracy but more expensive per inference than EfficientNet. The 3-5% recall improvement at the critical tier (CSAM, terrorism) justifies the cost premium.
+        next: train_strategy
+      - label: "EfficientNet-V2 ensemble"
+        answer: |
+          I'd deploy an **ensemble of EfficientNet-V2 models**, each specialized or operating at different scales:
+
+          **Ensemble composition:**
+
+          | Model | Role | Params | Latency | Accuracy Contribution |
+          |-------|------|--------|---------|---------------------|
+          | EfficientNet-V2-S | Fast triage (all images) | 22M | ~5ms | Catches obvious violations |
+          | EfficientNet-V2-M | Standard classifier | 54M | ~12ms | Main classification backbone |
+          | EfficientNet-V2-L | High-resolution detail | 120M | ~25ms | Small objects, text-in-image |
+
+          **Tiered ensemble strategy:**
+          1. **All images** pass through V2-S (~5ms): Catches ~60% of obvious violations and ~80% of clearly safe content
+          2. **Uncertain images** (score 0.2-0.8) pass through V2-M (~12ms): Resolves ~70% of remaining uncertain cases
+          3. **Still uncertain** pass through V2-L (~25ms): High-resolution analysis for edge cases
+          4. **Ensemble score** = weighted average with learned weights per category
+
+          **Why EfficientNet ensemble:**
+          - **Cost efficiency**: Average cost per image is ~$0.000003 (vs. $0.000008 for ViT-L on every image). At 50K/sec, saves ~$650K/month
+          - **Graceful degradation**: If one model in the ensemble fails, others still provide reasonable accuracy
+          - **Multi-scale analysis**: V2-S captures scene-level features, V2-L captures fine-grained details. Combined, they match or exceed single-model accuracy
+          - **Proven at scale**: Google's Cloud Vision API uses EfficientNet variants for content classification, processing billions of images daily
+          - **Faster iteration**: Smaller models train faster (hours vs. days), enabling more frequent updates
+
+          **Compound scaling philosophy:**
+          EfficientNet's compound scaling (depth + width + resolution) means each variant is optimally balanced. The ensemble exploits this by combining models optimized for different resolution-accuracy trade-offs.
+
+          **Trade-off**: Slightly lower peak accuracy than ViT-L (especially on subtle/contextual violations), but significantly better cost-efficiency and operational resilience.
+        next: train_strategy
+
+  # ============ TRAINING ============
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: interviewer
+    content: |
+      Let's design the training pipeline. Visual content moderation training has unique challenges around data sensitivity, labeler trauma, and extreme class imbalance.
+
+      **Training data composition:**
+
+      | Source | Volume | Quality | Notes |
+      |--------|--------|---------|-------|
+      | Platform-labeled images | ~5M | High (3-5 labeler votes) | Primary training source |
+      | NCMEC/GIFCT databases | ~500K hashes | Ground truth | CSAM and terrorism only |
+      | Active learning samples | ~200K/month | Highest (uncertain cases) | Model improvement focus |
+      | Synthetic adversarial | ~100K | Generated | Evasion technique augmentation |
+      | Public datasets (Open Images) | ~9M | Medium | Pre-training and benchmarking |
+
+      **Class imbalance handling:**
+      - CSAM: ~0.001% of uploads (extremely rare but critical)
+      - Terrorism: ~0.01% of uploads
+      - Violence: ~0.1% of uploads
+      - NSFW: ~2% of uploads
+      - Safe content: ~97.8% of uploads
+
+      **Strategies for extreme imbalance:**
+      - **Focal loss** (gamma=2): Down-weights easy negatives, focuses on hard examples. Standard cross-entropy gives 97.8% accuracy by predicting everything as safe
+      - **Category-specific sampling**: Each training batch has 25% violating content per category (vs. natural rate of 0.001-2%)
+      - **Hard negative mining**: Collect borderline non-violating content (medical images, war journalism, art) as hard negatives to improve precision
+      - **Curriculum learning**: Train on obvious cases first (weeks 1-2), then progressively add borderline cases (weeks 3-4)
+
+      **Labeler well-being protocols (legally and ethically required):**
+      - Maximum 4 hours/day exposure to graphic content, with mandatory 15-minute breaks every hour
+      - AI pre-filtering blurs extremely graphic content -- labelers see AI-generated descriptions with optional reveal
+      - Mandatory counseling access and quarterly wellness check-ins
+      - Rotation across severity tiers -- no labeler works exclusively on CSAM or self-harm
+      - Compensation: Content moderators should be paid 2-3x standard labeling rates given psychological burden
+
+      **Training schedule:**
+      - Full retrain: Bi-weekly on 6-month rolling window
+      - Quick update: Daily fine-tuning of classification heads on last 48 hours of labels
+      - Emergency update: Same-day when new attack pattern identified (new evasion technique, viral harmful meme)
+
+      Now let's decide on the threshold and decision strategy.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle CSAM training data given its extreme sensitivity?"
+      - speaker: candidate
+        text: "CSAM training data is handled under strict legal protocols. Access is limited to certified personnel, data is stored in air-gapped systems, and we use Microsoft's PhotoDNA hashes rather than raw images wherever possible. For ML training, we use synthetic data augmentation and transfer learning from adjacent tasks to minimize direct exposure."
+      - speaker: interviewer
+        text: "What about the labeler trauma problem?"
+      - speaker: candidate
+        text: "This is an ethical imperative, not just a nice-to-have. Exposure limits, mandatory counseling, premium compensation, and AI-assisted pre-filtering are all essential. Companies like Accenture and Cognizant have faced lawsuits from traumatized moderators. Some platforms now use AI-generated descriptions instead of showing raw content."
+      - speaker: interviewer
+        text: "Good awareness of the human cost. Let's discuss deployment."
+    next: deploy_threshold_question
+
+  # ============ DEPLOYMENT ============
+  - id: deploy_threshold_question
+    stage: deployment
+    type: question
+    label: "Threshold Strategy"
+    speaker: interviewer
+    content: |
+      The threshold strategy determines the human-automation balance. At 50K images/second, you cannot human-review everything. How do you set thresholds and route decisions?
+
+      **Option A:** High-precision auto-removal -- only auto-remove when the model is very confident, send everything else to human review.
+      **Option B:** Tiered automation with human review for the uncertain band -- auto-approve low-risk, auto-remove high-risk, human review middle band.
+    choices:
+      - label: "High-precision auto-remove (human-heavy)"
+        answer: |
+          I'd set **very high auto-removal thresholds** to minimize false positives, with extensive human review:
+
+          **Threshold configuration:**
+
+          | Category | Auto-Approve | Human Review | Auto-Remove |
+          |----------|-------------|-------------|-------------|
+          | CSAM | <0.05 | 0.05-0.999 | >0.999 + hash match |
+          | Terrorism | <0.10 | 0.10-0.95 | >0.95 |
+          | Violence | <0.15 | 0.15-0.92 | >0.92 |
+          | NSFW | <0.20 | 0.20-0.90 | >0.90 |
+
+          **Human review queue sizing:**
+          - At these thresholds, ~8-12% of content enters human review (~4K-6K images/second)
+          - That's ~350M-520M images/day requiring human review
+          - Need ~10,000-15,000 trained moderators (at ~50 reviews/hour per moderator)
+          - **Cost**: ~$150M-200M/year in human moderation labor
+
+          **Why human-heavy:**
+          - **Minimum false positives**: Auto-removal only at extremely high confidence means <0.1% of removed content was wrongly flagged
+          - **Legal defensibility**: Every borderline removal has a human decision behind it
+          - **Cultural sensitivity**: Humans can distinguish a Jain swastika from a Nazi one; models struggle
+          - **Appeal reduction**: Fewer incorrect removals means fewer appeals, reducing downstream costs
+          - **Trust**: Platforms like Meta report that user trust increases when they know humans are involved in decisions
+
+          **Trade-off**: Extremely expensive in human labor. The ~$150-200M/year in moderation costs is Meta's actual spend level. Smaller platforms cannot afford this approach.
+        next: deploy_infra
+      - label: "Tiered automation with narrow human band"
+        answer: |
+          I'd use **tiered automation** with aggressive auto-actions and a narrow human review band:
+
+          **Threshold configuration:**
+
+          | Category | Auto-Approve | Human Review | Auto-Remove |
+          |----------|-------------|-------------|-------------|
+          | CSAM | <0.01 | 0.01-0.85 | >0.85 + any hash match |
+          | Terrorism | <0.05 | 0.05-0.80 | >0.80 |
+          | Violence | <0.10 | 0.10-0.75 | >0.75 |
+          | NSFW | <0.15 | 0.15-0.70 | >0.70 |
+
+          **Human review queue sizing:**
+          - At these thresholds, ~3-5% of content enters human review (~1.5K-2.5K images/second)
+          - That's ~130M-215M images/day requiring human review
+          - Need ~5,000-8,000 trained moderators
+          - **Cost**: ~$75M-120M/year in human moderation labor (40-50% savings vs. human-heavy)
+
+          **Why tiered automation:**
+          - **Cost efficiency**: ~50% reduction in human moderation costs by auto-removing high-confidence violations
+          - **Speed**: Auto-removal happens in <1 second vs. 1-4 hours for human review queue. For self-harm content, immediate removal can be life-saving
+          - **Scalability**: As platform grows, automation scales linearly with compute; human review requires linear hiring
+          - **Focus human attention**: Moderators focus on genuinely ambiguous cases where human judgment adds the most value
+
+          **Handling the higher false positive rate:**
+          - Robust **appeal process** with 24-hour turnaround for auto-removed content
+          - User notification with specific policy citation and appeal link
+          - Track per-category appeal overturn rate -- if it exceeds 10%, raise the threshold
+          - **Shadow evaluation**: Randomly sample 1% of auto-removed content for human review to continuously estimate precision
+
+          **Dynamic thresholds:**
+          - During crisis events (mass shooting, election): Lower thresholds temporarily (accept more false positives for safety)
+          - During cultural events (Diwali, religious holidays): Raise thresholds for symbols that might be misclassified
+          - Per-region thresholds: Different regions have different base rates and cultural contexts
+        next: deploy_infra
+
+  - id: deploy_infra
+    stage: deployment
+    type: info
+    label: "Deployment Infrastructure"
+    speaker: interviewer
+    content: |
+      Let's detail the serving infrastructure for 50K images/second.
+
+      **Inference architecture:**
+
+      ```
+      Image/Video Upload
+           |
+      CDN (CloudFront/Fastly) -- stores original + resized
+           |
+      Load Balancer (L7, content-aware routing)
+           |
+      +----+----+----+
+      |    |    |    |
+      v    v    v    v
+      GPU Inference Pods (K8s, auto-scaling)
+      - NVIDIA Triton Inference Server
+      - TensorRT optimization (FP16/INT8)
+      - Dynamic batching (batch_size up to 64)
+      - Model: ONNX export of fine-tuned ViT/EfficientNet
+           |
+      Score + Decision
+           |
+      +----+----+----+
+      |         |         |
+      v         v         v
+      Auto-Approve  Human Queue  Auto-Remove
+      (publish)     (Kafka -> reviewers)  (block + log + report)
+      ```
+
+      **Infrastructure sizing:**
+
+      | Component | Specification | Count | Monthly Cost |
+      |-----------|--------------|-------|-------------|
+      | GPU nodes | A100 80GB, 8 GPUs each | 150-200 nodes | ~$800K-$1.2M |
+      | CPU preprocessing | c6i.8xlarge | 100 nodes | ~$80K |
+      | Kafka (review queue) | MSK, 3 brokers | 1 cluster | ~$15K |
+      | Redis (hash cache) | r6g.4xlarge | 6 nodes | ~$20K |
+      | Model store | S3 + local SSD cache | N/A | ~$5K |
+
+      **Latency breakdown (P99):**
+      - Image decode + resize: ~20ms
+      - Hash matching (PhotoDNA + GIFCT): ~5ms
+      - Model inference (batched): ~30ms
+      - Score aggregation + decision: ~5ms
+      - **Total: ~60ms for images, ~200ms for video**
+
+      **Rollout strategy:**
+      1. **Shadow mode** (1 week): New model scores all content alongside production model, no actions taken
+      2. **Canary** (3 days): 5% of traffic uses new model
+      3. **Gradual rollout**: 5% -> 25% -> 50% -> 100% over 1 week
+      4. **Automated rollback**: If removal rate changes >15% or appeal rate doubles, instant rollback
+
+      **Failover:**
+      - If GPU cluster is unavailable: Fall back to hash-matching-only mode (catches ~40% of known harmful content)
+      - If hash database is unavailable: Route all uploads through GPU with lower confidence thresholds
+      - If both fail: Queue uploads for async processing, publish with "pending review" flag
+
+      Let's design the monitoring system.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle the cold-start problem when deploying a new model?"
+      - speaker: candidate
+        text: "Warm-up period: Pre-load the model and process 10K synthetic images before accepting real traffic. This ensures TensorRT optimizations are compiled and GPU caches are warm. We also use Triton's model ensemble feature to run old and new models simultaneously during transition."
+      - speaker: interviewer
+        text: "What about the cost at Meta's scale? $1M+/month seems high."
+      - speaker: candidate
+        text: "It is, but the alternative is worse. A single viral CSAM incident costs orders of magnitude more in legal liability, regulatory fines, and brand damage. Meta reportedly spends $5B+ annually on safety and security. The GPU inference cost is a fraction of total safety spend."
+      - speaker: interviewer
+        text: "Good cost-benefit framing. Let's discuss monitoring."
+    next: mon_question
+
+  # ============ MONITORING ============
+  - id: mon_question
+    stage: monitoring
+    type: question
+    label: "Monitoring Strategy"
+    speaker: interviewer
+    content: |
+      Visual content moderation monitoring has unique challenges: the adversarial landscape evolves rapidly, cultural events create distribution shifts, and new types of harmful content emerge constantly. What monitoring approach would you prioritize?
+    choices:
+      - label: "Adversarial robustness monitoring"
+        answer: |
+          I'd prioritize **adversarial robustness monitoring** -- proactively detecting and responding to evasion techniques:
+
+          **Adversarial detection pipeline:**
+
+          | Signal | Detection Method | Response Time |
+          |--------|-----------------|---------------|
+          | New evasion technique | Cluster analysis of false negatives from user reports | <24 hours |
+          | Hash database evasion | Monitor for near-miss hashes (high similarity, no exact match) | Real-time |
+          | Text-in-image bypass | OCR on user-reported content that model auto-approved | <4 hours |
+          | Steganography | Statistical analysis of LSB patterns in reported images | Weekly scan |
+          | AI-generated harmful content | CLIP similarity scoring against known harmful text descriptions | Real-time |
+          | Style transfer evasion | Monitor for cartoon/artistic versions of known harmful content | <24 hours |
+
+          **Red team program:**
+          - Dedicated team of 5-10 analysts who continuously attempt to bypass the system
+          - Monthly adversarial challenge: Team has 1 week to find new evasion techniques, results fed into training data
+          - External bug bounty for evasion technique discovery ($500-$5000 per valid technique)
+          - Partnership with academic researchers (DARPA MediFor, NIST) for cutting-edge adversarial analysis
+
+          **Automated adversarial monitoring:**
+          - **Embedding drift detection**: If the distribution of embeddings for reported content shifts significantly from training distribution (measured by Maximum Mean Discrepancy), alert the team -- likely new evasion technique
+          - **Evasion pattern clustering**: Cluster user-reported false negatives by visual similarity. Large clusters indicate systematic evasion campaigns
+          - **A/B testing new defenses**: Continuously test new preprocessing steps (denoising, color normalization, super-resolution) on adversarial examples
+
+          **Key metric**: **Adversarial recall** -- percentage of known adversarial examples correctly detected. Target: >95%, measured weekly against an evolving adversarial test suite.
+        next: mon_terminal_adversarial
+      - label: "Distribution shift and fairness monitoring"
+        answer: |
+          I'd prioritize **distribution shift and fairness monitoring** -- ensuring the system performs consistently across all populations and evolving content:
+
+          **Distribution shift detection:**
+
+          | Shift Type | Detection Method | Example |
+          |-----------|-----------------|---------|
+          | **Content shift** | Embedding cluster analysis + PSI >0.1 | New meme format, AI-generated content surge |
+          | **Demographic shift** | Per-demographic precision/recall tracking | Model performs worse on darker skin tones |
+          | **Cultural shift** | Per-region error rate monitoring | Religious holiday creates symbol misclassification spike |
+          | **Temporal shift** | Weekly model accuracy on fresh human labels | Accuracy decays 2-3% per month without retraining |
+          | **Adversarial shift** | User report rate on auto-approved content | New evasion technique increases false negatives |
+
+          **Fairness monitoring framework:**
+          - **Skin tone fairness**: Evaluate NSFW classifier accuracy across Fitzpatrick skin tone scale (I-VI). Research shows many models have higher false positive rates for darker skin tones -- partially nude images of Black users flagged more aggressively than comparable images of white users
+          - **Gender fairness**: Male vs. female nudity detection should have equal thresholds. Historical bias in training data tends to flag female bodies more aggressively
+          - **Cultural fairness**: Religious and cultural symbols must be evaluated per-region. Track false positive rates for Jain/Hindu/Buddhist imagery separately from white supremacist symbols
+          - **Geographic fairness**: Per-country detection rates should not vary by more than 10% from global baseline after controlling for actual violation rates
+
+          **Automated monitoring dashboard:**
+
+          | Metric | Frequency | Alert Threshold | Owner |
+          |--------|-----------|----------------|-------|
+          | Per-category precision/recall | Daily | >5% drop | ML team |
+          | Per-skin-tone false positive rate | Weekly | >2x disparity | Fairness team |
+          | Per-region appeal success rate | Weekly | >15% any region | Policy team |
+          | Model embedding drift (PSI) | Daily | >0.1 | ML team |
+          | User report rate | Hourly | >30% increase | Ops team |
+          | Inference latency P99 | Real-time | >500ms images | Infra team |
+
+          **Key metric**: **Maximum Disparity Ratio** -- the ratio of worst-performing demographic group's error rate to best-performing group's error rate. Target: <2.0x across all categories and demographics.
+        next: mon_terminal_fairness
+
+  # ============ TERMINALS ============
+  - id: mon_terminal_adversarial
+    stage: monitoring
+    type: terminal
+    label: "Adversarial Monitoring Path Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive **harmful visual content detection system** with strong adversarial robustness monitoring.
+
+      **Your design summary:**
+      - **Problem**: Multi-label visual content classification across 6 severity-tiered categories at 50K images/second
+      - **Metrics**: Tiered recall/precision targets with critical categories (CSAM, terrorism) at >99.5% recall
+      - **Features**: Robust feature extraction with hash matching, OCR, audio integration, and adversarial-resistant preprocessing
+      - **Model**: Production-optimized vision architecture with TensorRT acceleration
+      - **Training**: Active learning pipeline with extreme class imbalance handling and labeler well-being protocols
+      - **Deployment**: Tiered threshold strategy with automated decision routing and human review queues
+      - **Monitoring**: Adversarial-first monitoring with red team program, evasion pattern detection, and continuous robustness testing
+
+      **Key strengths of your design:**
+      - Proactive adversarial defense rather than reactive patching
+      - Perceptual hashing for known content provides a fast, reliable first layer
+      - Red team program ensures continuous improvement against evolving threats
+      - Multi-layered defense (hashing + ML + human review) provides defense in depth
+
+      **Areas to explore further:**
+      - AI-generated harmful content (deepfakes, synthetic CSAM) -- an emerging and rapidly growing threat
+      - Cross-platform coordination through GIFCT and Tech Coalition
+      - Legal compliance automation (NCMEC reporting, EU DSA transparency requirements)
+
+      Outstanding system design that balances automation with adversarial awareness!
+
+  - id: mon_terminal_fairness
+    stage: monitoring
+    type: terminal
+    label: "Fairness Monitoring Path Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive **harmful visual content detection system** with strong fairness and distribution shift monitoring.
+
+      **Your design summary:**
+      - **Problem**: Multi-label visual content classification across 6 severity-tiered categories at massive platform scale
+      - **Metrics**: Tiered recall/precision targets with fairness constraints across demographics and regions
+      - **Features**: Multi-modal feature extraction combining visual, textual, and audio signals
+      - **Model**: Scalable vision architecture with cost-optimized inference
+      - **Training**: Active learning with class imbalance handling and ethical labeling protocols
+      - **Deployment**: Threshold strategy balancing automation with human judgment
+      - **Monitoring**: Fairness-first monitoring with demographic disparity tracking, cultural sensitivity, and distribution shift detection
+
+      **Key strengths of your design:**
+      - Explicit fairness metrics prevent disparate impact across skin tones, genders, and cultures
+      - Per-region monitoring catches culturally-specific misclassifications
+      - Distribution shift detection provides early warning of model degradation
+      - Maximum Disparity Ratio as a north-star fairness metric keeps the team accountable
+
+      **Areas to explore further:**
+      - Intersectional fairness (combinations of demographics, not just individual axes)
+      - Causal analysis of fairness gaps (is it training data bias, model architecture, or labeler bias?)
+      - User transparency (explaining why content was flagged in a way that's culturally appropriate)
+
+      Outstanding system design that balances safety with equity!

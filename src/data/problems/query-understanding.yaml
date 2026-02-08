@@ -1,0 +1,708 @@
+id: query-understanding
+title: "Search Query Understanding"
+description: "Design a query understanding system that interprets user search intent, extracts entities, and rewrites queries."
+companies: ["Google", "Amazon", "Airbnb"]
+domains: ["NLP", "Ranking/Search"]
+root: pd_start
+
+nodes:
+  # ============ PROBLEM DEFINITION ============
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we will design a **Search Query Understanding (QU)** system -- the critical first stage of any search engine that interprets what users actually mean before retrieving results.
+
+      **Business context:**
+      - Google processes ~**8.5 billion searches per day**; Amazon handles ~**600 million product searches daily**
+      - **71% of search queries** are 3 words or fewer -- extremely ambiguous (e.g., "apple" = fruit, company, or records label?)
+      - **15% of daily queries** have never been seen before (tail queries), meaning you cannot rely solely on historical click data
+      - Airbnb reports that **query understanding improvements of 2-3%** in intent accuracy translate to **$50-100M annual revenue impact** through better booking conversions
+
+      **Core problem:** Given a raw user query string (e.g., "cheap flights nyc to la next friday"), produce a structured interpretation including:
+      1. **Intent classification** -- What does the user want? (navigational, informational, transactional, local)
+      2. **Entity extraction** -- What are the key entities? (origin=NYC, destination=LA, date=next Friday)
+      3. **Query rewriting** -- Normalize, expand, and correct the query for downstream retrieval ("inexpensive flights from New York City to Los Angeles departing 2026-02-13")
+
+      **Key challenges:**
+      - **Ambiguity**: "apple" has 5+ distinct meanings; "jaguar" could be animal, car, or MacOS version
+      - **Multi-intent queries**: "best restaurants near me with parking and outdoor seating" has 3 facets
+      - **Spelling errors**: ~10-15% of queries contain typos ("restraurant near me")
+      - **Latency budget**: The entire QU pipeline must complete in **<10ms** for online serving
+      - **Personalization**: The query "python" means different things to a software engineer vs. a zoologist
+
+      Let's start with the core architecture decision.
+    dialogue:
+      - speaker: interviewer
+        text: "Let's design a query understanding system for search. Where would you start?"
+      - speaker: candidate
+        text: "I'd start by defining the scope. Query understanding is the first stage of the search pipeline -- it transforms a raw text query into a structured representation that downstream retrieval and ranking can use."
+      - speaker: interviewer
+        text: "What are the main components of a QU system?"
+      - speaker: candidate
+        text: "Three core components: intent classification, entity extraction, and query rewriting. The key question is whether to build these as separate specialized models or unify them."
+      - speaker: interviewer
+        text: "Good framing. Let's explore that architecture decision."
+    next: pd_architecture
+
+  - id: pd_architecture
+    stage: problem_definition
+    type: question
+    label: "System Architecture"
+    speaker: interviewer
+    content: |
+      How would you architect the query understanding system? The fundamental tension is between **specialization** (separate models optimized for each subtask) and **unification** (a single model that handles everything). This choice impacts latency, maintainability, and accuracy.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you architect the QU pipeline? Separate models for each task or one unified model?"
+      - speaker: candidate
+        text: "This is the classic pipeline vs. end-to-end debate. Each has strong trade-offs."
+      - speaker: interviewer
+        text: "Walk me through both approaches and when you'd choose each."
+    choices:
+      - label: "Pipeline of specialized models"
+        answer: |
+          I would build a **pipeline of specialized models**, each optimized for one subtask:
+
+          **Architecture:**
+          ```
+          Raw Query → Spell Correction → Intent Classifier → Entity Extractor → Query Rewriter → Structured Output
+                         (~2ms)            (~2ms)              (~3ms)              (~2ms)           Total: ~9ms
+          ```
+
+          **Why a pipeline?**
+          - **Independent optimization**: Each model can be trained on task-specific data. Google's spell corrector is trained on billions of query pairs; the intent classifier on click-through signals; the NER on annotated entity data. Mixing these degrades each
+          - **Selective deployment**: Upgrade the spell corrector without touching intent classification. At Amazon's scale (~600M queries/day), this reduces blast radius of changes
+          - **Interpretability**: When "apple watch repair" misclassifies intent, you can pinpoint which component failed. Airbnb's search team reports that pipeline debugging is 3x faster than end-to-end
+          - **Latency control**: Each component has its own latency budget. Use a lightweight CNN for spell correction (2ms), a distilled BERT for intent (2ms), and a CRF for entities (3ms). Total: <10ms
+
+          **Proven at scale:**
+          - Google's QU system uses a pipeline: spell correction (Did You Mean), intent classification, entity recognition, query expansion -- all separate services
+          - Amazon Alexa uses a similar pipeline: ASR -> NLU (intent + slot filling) -> Dialog Management
+
+          **Trade-off:** Error propagation. If spell correction changes "java island" to "javascript island," downstream entity extraction fails. Mitigate by passing multiple hypotheses (n-best lists) between stages and letting downstream components pick the best.
+        next: met_metrics
+      - label: "Unified LLM-based approach"
+        answer: |
+          I would use a **single unified model** (fine-tuned LLM) that performs intent classification, entity extraction, and query rewriting in one pass:
+
+          **Architecture:**
+          ```
+          Raw Query → Unified Transformer → Structured JSON Output
+                           (~8ms)
+          {intent: "transactional", entities: {...}, rewritten_query: "..."}
+          ```
+
+          **Why unified?**
+          - **No error propagation**: A pipeline's spell corrector might change "jaguar xj price" to "jaguar xj prince," which cascades errors. A unified model sees the full context and handles corrections implicitly
+          - **Cross-task learning**: Intent and entities are deeply connected. Knowing "near me" signals local intent helps the entity extractor understand spatial context. A unified model shares these representations naturally
+          - **Simpler serving**: One model, one inference call, one latency budget. No RPC overhead between services. At Google's scale of 99K QPS, removing inter-service calls saves significant infrastructure cost
+          - **Better on tail queries**: For the 15% of never-seen queries, a large language model generalizes from pre-training knowledge. A pipeline of narrow models often fails on novel patterns
+
+          **Implementation:**
+          - Fine-tune a **DistilBERT (66M params)** or **TinyLLaMA (1.1B params)** on a multi-task objective
+          - Input: raw query text; Output: structured JSON with intent, entities, rewritten query
+          - Use instruction tuning: "Parse the following search query into intent, entities, and rewrite"
+          - Quantize to INT8 + ONNX runtime for 8ms inference on CPU
+
+          **Proven approaches:**
+          - Apple's Siri uses a unified NLU model for intent + slot filling
+          - Microsoft's Bing has moved toward unified transformer models for QU
+
+          **Trade-off:** Harder to debug when something goes wrong -- was it intent, entity, or rewrite that failed? Also, updating one capability requires retraining the entire model. Mitigate with multi-task loss weighting and fine-grained evaluation metrics per subtask.
+        next: met_metrics
+
+  # ============ METRICS ============
+  - id: met_metrics
+    stage: metrics
+    type: question
+    label: "Evaluation Metrics"
+    speaker: interviewer
+    content: |
+      How would you measure the quality of query understanding? We need metrics that capture accuracy at each stage and overall downstream impact.
+    dialogue:
+      - speaker: interviewer
+        text: "What metrics would you use to evaluate query understanding?"
+      - speaker: candidate
+        text: "We need both component-level metrics and end-to-end search quality metrics that show the impact of QU improvements."
+      - speaker: interviewer
+        text: "How do you handle the tension between optimizing each component versus optimizing the end-to-end system?"
+    choices:
+      - label: "Component-level accuracy metrics"
+        answer: |
+          I would prioritize **component-level accuracy metrics** with clear ownership and actionability:
+
+          **Intent classification metrics:**
+          - **Accuracy**: Overall correct intent rate. Target: **>92%** for head queries (top 10K), **>78%** for tail queries. Google reports ~95% accuracy on head intents
+          - **Macro F1**: Weighted by intent class to catch rare intents (e.g., "local" queries are only 8% of volume but high-revenue). Target: **>0.85**
+          - **Confusion matrix analysis**: Track specific failure pairs (e.g., "informational" misclassified as "navigational" is more costly than the reverse)
+
+          **Entity extraction metrics:**
+          - **Entity-level F1**: Strict match (exact span + correct type). Target: **>0.88** for common entities (product, location, person), **>0.72** for rare entity types
+          - **Span-level partial match**: Credit for partially correct spans ("New York" extracted from "New York City"). Useful during development
+          - **Entity linking accuracy**: For ambiguous entities, did we link to the correct knowledge base entry? Target: **>0.82** (e.g., "apple" -> Apple Inc. vs. apple fruit)
+
+          **Spell correction metrics:**
+          - **Correction accuracy**: Percentage of typos correctly fixed. Target: **>95%** for common misspellings
+          - **False correction rate**: Percentage of correct queries wrongly "corrected." Critical -- "Java island" should NOT become "JavaScript island." Target: **<0.5%**
+          - **Query rewrite BLEU/ROUGE**: Compare rewritten query to human-annotated gold standard. Target BLEU: **>0.75**
+
+          **Why component-level?**
+          - **Actionable debugging**: If search relevance drops 2%, component metrics immediately reveal whether it was intent accuracy (dropped 5%) or entity extraction (unchanged)
+          - **Team ownership**: Each team owns their component metrics and can iterate independently
+          - Amazon reports that component-level metrics enabled 3x faster iteration cycles vs. only tracking end-to-end NDCG
+        next: data_collection
+      - label: "End-to-end search quality metrics"
+        answer: |
+          I would focus on **end-to-end search quality metrics** that measure the actual downstream impact of QU improvements:
+
+          **Primary online metrics:**
+          - **Query-Result NDCG@10**: How well do the final search results match user intent? A QU improvement that does not improve NDCG is not a real improvement. Target: **>0.42** (Google-caliber benchmark on diverse query sets)
+          - **Null Result Rate (NRR)**: Percentage of queries returning zero results. QU improvements (especially query expansion and spell correction) directly reduce NRR. Target: **<3%** for major locales
+          - **Reformulation Rate**: Percentage of queries where the user immediately rephrases. High reformulation = QU failed to understand the original query. Target: **<18%** for e-commerce, **<25%** for web search
+
+          **A/B test metrics:**
+          - **Click-through rate (CTR)**: Better query understanding -> more relevant results -> higher CTR. Measure CTR@1 and CTR@5
+          - **Revenue per search (RPS)**: For e-commerce (Amazon, Airbnb), the ultimate metric. A 1% QU improvement at Amazon's scale is worth **~$1.3B annually** in GMV
+          - **Time to first click**: Faster clicks = better understanding. Target: **<8 seconds** median
+
+          **Satisfaction signals:**
+          - **Good click rate**: Clicks with dwell time >30s. Better QU leads to more satisfying first clicks
+          - **Session success rate**: Did the user's search session end with a conversion/satisfaction signal without excessive reformulation?
+          - **User surveys**: Sample 0.1% of queries with "Did we understand your search?" prompt. Target: **>88%** positive
+
+          **Why end-to-end?**
+          - **Avoids local optima**: A spell corrector with 99% accuracy that breaks 1% of queries in a way that tanks NDCG is worse than a 95%-accurate corrector that is safer
+          - **Captures cross-component effects**: Intent + entity + rewrite quality jointly determine search quality. Optimizing each independently can lead to conflicting behavior
+          - Airbnb reports that switching to end-to-end metrics revealed that their "best" entity extractor by F1 actually hurt booking conversion by 0.3%
+        next: data_collection
+
+  # ============ DATA ============
+  - id: data_collection
+    stage: data
+    type: info
+    label: "Training Data & Collection"
+    speaker: interviewer
+    content: |
+      Let's discuss the data needed to train the query understanding models. Data quality is the single biggest lever for QU accuracy.
+
+      **Data sources and volumes:**
+
+      | Source | Volume | Use Case |
+      |--------|--------|----------|
+      | **Search query logs** | ~8.5B queries/day (Google), ~600M/day (Amazon) | Intent patterns, query reformulation pairs, entity co-occurrence |
+      | **Click-through data** | Billions of (query, clicked_result) pairs daily | Implicit intent labels, entity relevance signals |
+      | **Query reformulation pairs** | ~25% of queries are reformulations of previous query | Spell correction training, query expansion pairs |
+      | **Human annotations** | ~50K-100K annotated queries per month | Intent labels, entity spans, rewrite gold standards |
+      | **Knowledge bases** | Wikidata (~100M entities), Google KG (~800B facts) | Entity linking targets, type taxonomy |
+
+      **Annotation pipeline for intent + entities:**
+      - **Active learning**: Select the most uncertain/ambiguous queries for human annotation. Reduces annotation budget by ~60% vs. random sampling
+      - **Annotator agreement**: Require 3 annotators per query, take majority vote. Discard queries with <2/3 agreement (typically ~12% of samples)
+      - **Quality control**: Embed gold-standard queries (pre-labeled by experts) in annotation batches. Flag annotators falling below 90% accuracy on gold queries
+
+      **Synthetic data generation:**
+      - **Query augmentation**: For each annotated query, generate 5-10 variants with typos, abbreviations, and reformulations using a seq2seq model
+      - **Entity substitution**: Replace entities with same-type alternatives ("flights to NYC" -> "flights to LAX", "flights to Chicago")
+      - **Back-translation**: Translate query to French/German and back to English for paraphrase diversity
+
+      **Data challenges:**
+      - **Class imbalance**: Informational queries are ~55% of volume, but transactional (high-revenue) queries are only ~15%. Oversample or weight
+      - **Temporal drift**: Query patterns shift with trends, seasons, and world events. New entities emerge daily ("GPT-5", new product names)
+      - **Privacy**: User queries contain PII. Apply k-anonymity (aggregate queries with <5 occurrences), differential privacy for model training
+    dialogue:
+      - speaker: interviewer
+        text: "What training data do you need for query understanding?"
+      - speaker: candidate
+        text: "Three main sources: search logs for patterns and reformulation pairs, click data for implicit labels, and human annotations for gold-standard supervision."
+      - speaker: interviewer
+        text: "How do you handle the cold-start problem for new domains or languages?"
+      - speaker: candidate
+        text: "Cross-lingual transfer from high-resource languages using multilingual BERT, plus synthetic data generation through back-translation and entity substitution."
+      - speaker: interviewer
+        text: "Good. Let's move to feature engineering."
+    next: feat_question
+
+  # ============ FEATURES ============
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Engineering"
+    speaker: interviewer
+    content: |
+      What features would you extract from queries for intent classification and entity extraction? Think about both **query-level features** (properties of the query itself) and **contextual features** (user context, session history).
+    dialogue:
+      - speaker: interviewer
+        text: "What features matter most for understanding search queries?"
+      - speaker: candidate
+        text: "Beyond the raw text, we need lexical patterns, session context, and user signals to disambiguate."
+      - speaker: interviewer
+        text: "How do you balance feature richness with the latency constraint?"
+    choices:
+      - label: "Rich contextual features (user history, session, location)"
+        answer: |
+          I would invest heavily in **contextual features** that disambiguate queries using everything we know about the user and session:
+
+          **User-level features (~12 features):**
+          - **User search history embedding**: Average embedding of last 50 queries. A user who frequently searches for code topics will have "python" interpreted as the programming language
+          - **User click category distribution**: Historical click categories (tech: 45%, cooking: 30%, sports: 25%). Enables personalized intent
+          - **User location**: GPS or IP-derived. "Pizza" near Times Square = navigational; in a suburb = discovery. Airbnb reports location features improve search relevance by **8-12%**
+          - **User device type**: Mobile queries are 40% shorter and more local-intent; desktop queries are more informational
+          - **User language preference**: Detected from browser settings, past queries. Critical for multilingual disambiguation
+
+          **Session-level features (~8 features):**
+          - **Previous queries in session**: If the user just searched "iPhone 15 specs," the follow-up query "cases" should be understood as "iPhone 15 cases"
+          - **Session intent drift**: Track how intent changes across a session. Browsing -> comparison -> purchase intent progression
+          - **Dwell time on previous results**: Long dwell on an informational page suggests the next query is a refinement, not a new topic
+          - **Time since last query**: <30 seconds = likely refinement; >5 minutes = likely new topic
+
+          **Query-level features (~15 features):**
+          - **Character n-gram embeddings**: Capture morphological patterns. FastText-style subword embeddings handle typos gracefully
+          - **Query length** (tokens, characters): Strong intent signal. 1-word queries are mostly navigational; 5+ words are informational
+          - **Presence of intent markers**: "buy," "how to," "near me," "vs," "best" are strong intent signals
+          - **Entity density**: Queries with many entities ("flights JFK to LAX dec 15 2 adults") are transactional
+          - **Query popularity**: Head queries (>1000 daily occurrences) vs. tail queries. Different strategies for each
+
+          **Why contextual?**
+          - Google reports that personalized query understanding improves **CTR by 5-8%** and reduces reformulation by **12%**
+          - The same query "apple" from a developer in San Francisco vs. a farmer in Washington should be interpreted differently
+          - **Trade-off**: Requires real-time feature serving infrastructure. Pre-compute user embeddings hourly, session features in real-time. Adds ~2ms to feature lookup
+        next: mod_architecture
+      - label: "Lightweight lexical features (text-only, no user context)"
+        answer: |
+          I would focus on **lightweight text-only features** that are fast to compute and privacy-preserving:
+
+          **Lexical features (~20 features):**
+          - **BPE/WordPiece token IDs**: The raw input to any transformer model. Let the model learn its own representations rather than hand-crafting features
+          - **Character-level CNN features**: A small 1D-CNN over characters captures morphological patterns, typo robustness, and subword information. Processes in <1ms
+          - **TF-IDF weighted n-grams**: 1-3 grams weighted by inverse query frequency. Rare terms ("brachiosaurus") are more informative than common terms ("the")
+          - **Query length features**: Token count, character count, word count. Strong baseline signals -- 1-word navigational queries vs. 6-word informational queries
+
+          **Pattern-based features (~10 features):**
+          - **Intent trigger words**: Binary features for "how to," "buy," "near me," "what is," "best," "vs," "price," "review." These alone achieve ~75% intent accuracy
+          - **URL/domain detection**: Does the query contain a URL or domain pattern? Strong navigational signal. "facebook.com" = navigational 99% of the time
+          - **Question word detection**: Starts with who/what/when/where/why/how = informational with ~85% probability
+          - **Numeric patterns**: Dates, prices, quantities signal transactional intent ("flights under $300")
+          - **Entity pattern matching**: Regex + gazetteer-based entity detection for common types (cities, products, brand names). Fast (<0.5ms) and high precision (~92%)
+
+          **Pre-computed query features (~5 features):**
+          - **Query cluster ID**: Pre-cluster the top 10M queries into ~10K clusters using k-means on embeddings. At serving time, map query to nearest cluster in <0.5ms
+          - **Query frequency bucket**: Bucket queries into head/torso/tail by daily occurrence count. Different models may be triggered per bucket
+          - **Historical intent distribution**: For recurring queries, store the distribution of user intents from past clicks. "Python" is 78% programming, 12% snake, 10% Monty Python
+
+          **Why lexical-only?**
+          - **Latency**: No user feature lookup needed. Feature extraction is <2ms, all CPU-side. Critical for the <10ms budget
+          - **Privacy**: No user data required. Compliant with GDPR/CCPA by design. Apple's Siri uses on-device, context-free NLU for this reason
+          - **Simplicity**: Fewer moving parts. No real-time feature store, no user embedding service, no session tracking infrastructure
+          - **Trade-off**: ~5-8% lower accuracy on ambiguous queries vs. contextual features. But for 85% of queries that are unambiguous ("weather," "amazon.com," "how to boil eggs"), text-only features are sufficient
+        next: mod_architecture
+
+  # ============ MODEL ============
+  - id: mod_architecture
+    stage: model
+    type: question
+    label: "Intent Classification Model"
+    speaker: interviewer
+    content: |
+      Now let's design the core intent classification model. How would you classify query intent (navigational, informational, transactional, local) given the features you described?
+    dialogue:
+      - speaker: interviewer
+        text: "What model architecture would you use for intent classification?"
+      - speaker: candidate
+        text: "The choice depends on the taxonomy complexity and latency requirements."
+      - speaker: interviewer
+        text: "Would you use a flat classifier or a hierarchical approach?"
+    choices:
+      - label: "Flat multi-class classifier (BERT/DistilBERT)"
+        answer: |
+          I would use a **flat multi-class classifier** based on a distilled transformer:
+
+          **Architecture:**
+          ```
+          Query tokens → DistilBERT (6 layers, 66M params) → [CLS] pooling → FC(768→256) → ReLU → FC(256→K) → Softmax
+          ```
+          Where K = number of intent classes (typically 15-30 fine-grained intents grouped into 4 coarse categories).
+
+          **Why DistilBERT flat classifier?**
+          - **Speed**: DistilBERT inference is ~2ms on CPU with ONNX runtime (vs. 8ms for BERT-base). Fits within our 10ms total budget
+          - **Accuracy**: DistilBERT retains 97% of BERT's accuracy while being 2x faster. On internal benchmarks at Google, DistilBERT achieves **93.2% intent accuracy** vs. BERT's 94.1%
+          - **Simple training**: Standard cross-entropy loss, no hierarchical dependency modeling. Training takes ~2 hours on 8 V100 GPUs with 500K labeled queries
+          - **Easy to update**: Retrain weekly as new intent patterns emerge. No hierarchy to restructure when adding new intent types
+
+          **Intent taxonomy (flat, 20 classes):**
+          - Navigational: `nav_website`, `nav_app`, `nav_person`, `nav_business`
+          - Informational: `info_factual`, `info_howto`, `info_comparison`, `info_definition`, `info_news`
+          - Transactional: `txn_purchase`, `txn_download`, `txn_book`, `txn_subscribe`
+          - Local: `local_directions`, `local_business`, `local_hours`, `local_menu`
+          - Media: `media_image`, `media_video`, `media_music`
+
+          **Multi-label extension**: For multi-intent queries ("best restaurants near me with parking"), output a probability for each intent and threshold at 0.3. ~12% of queries have multiple intents.
+
+          **Training details:**
+          - **Data**: 500K human-labeled queries + 5M pseudo-labeled from click patterns
+          - **Augmentation**: Synonym replacement, random deletion, back-translation
+          - **Loss**: Label smoothing cross-entropy (smoothing=0.1) to handle annotation noise
+          - **Calibration**: Temperature scaling post-training. Calibrated probabilities enable downstream decisions (e.g., if P(transactional) < 0.6, show mixed results)
+
+          **Trade-off**: Flat taxonomy treats all intents as equidistant. "nav_website" misclassified as "nav_app" is less harmful than "nav_website" misclassified as "info_howto." Flat loss does not capture this. Mitigate with cost-sensitive loss weighting.
+        next: mod_entity
+      - label: "Hierarchical taxonomy with coarse-to-fine models"
+        answer: |
+          I would use a **hierarchical coarse-to-fine classification** approach with cascaded models:
+
+          **Architecture:**
+          ```
+          Query → Coarse Classifier (4 classes, ~1ms) → Fine-grained Classifier (5-8 classes per coarse, ~1.5ms)
+          ```
+
+          **Level 1 -- Coarse intent (4 classes):**
+          - Navigational (user wants a specific page)
+          - Informational (user wants to learn something)
+          - Transactional (user wants to do/buy something)
+          - Local (user wants location-based results)
+          - Model: Lightweight CNN or TF-IDF + logistic regression. **Accuracy: >96%** on coarse labels. Inference: <1ms
+
+          **Level 2 -- Fine-grained intent (5-8 per coarse):**
+          - Under "Informational": factual, how-to, comparison, definition, news, opinion, academic
+          - Under "Transactional": purchase, book, download, subscribe, apply, register
+          - Model: DistilBERT fine-tuned per coarse category. Each model is specialized and more accurate on its subset. **Accuracy: >90%** per fine-grained class. Inference: ~1.5ms
+
+          **Why hierarchical?**
+          - **Error cost modeling**: Misclassifying across coarse categories is much more costly than within. "Purchase" misclassified as "book" (both transactional) is acceptable; "purchase" as "definition" (transactional vs. informational) destroys search results. Hierarchy explicitly models this
+          - **Scalability of taxonomy**: Amazon has ~50 fine-grained intent types. A flat 50-class classifier struggles; hierarchical decomposition keeps each classifier manageable
+          - **Short-circuit for easy cases**: If coarse classifier outputs P(navigational) > 0.98, skip fine-grained classification and directly retrieve the target page. Saves ~1.5ms for 30% of queries
+          - **Independent updates**: Add new fine-grained intents (e.g., "AI chat" intent emerging in 2024-2025) without retraining the coarse classifier
+
+          **Proven at scale:**
+          - Amazon Alexa uses a hierarchical NLU with domain -> intent -> slot structure
+          - Google's QU system uses coarse intent routing to select specialized downstream pipelines
+
+          **Trade-off**: Two-stage classification adds latency (~2.5ms total vs. ~2ms flat). Also requires maintaining multiple models. But the accuracy gain on fine-grained intents (90% hierarchical vs. 84% flat for 50-class) justifies the complexity. At Amazon's scale, that 6% improvement means millions more correctly routed queries per day.
+        next: mod_entity
+
+  - id: mod_entity
+    stage: model
+    type: question
+    label: "Entity Extraction Approach"
+    speaker: interviewer
+    content: |
+      How would you handle entity extraction? The goal is to identify and type entities in queries like "cheap flights **JFK** to **LAX** **next friday**" where JFK=airport, LAX=airport, next friday=date.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you extract entities from short, noisy search queries?"
+      - speaker: candidate
+        text: "Search queries are much harder than document NER -- they're short, ungrammatical, and have heavy ambiguity."
+      - speaker: interviewer
+        text: "What approach would you take for entity extraction?"
+    choices:
+      - label: "NER + entity linking (two-stage)"
+        answer: |
+          I would use a **two-stage approach**: first extract entity spans with NER, then link them to a knowledge base:
+
+          **Stage 1 -- Named Entity Recognition:**
+          - **Model**: BERT-CRF (BERT encoder + Conditional Random Field output layer)
+          - CRF captures label dependencies (B-LOC must be followed by I-LOC or O, never I-PER). Critical for short queries where context is limited
+          - **Entity types**: Product, Brand, Location, Person, Date/Time, Price, Category, Attribute (~15 types)
+          - **Training**: 200K human-annotated query-entity pairs + 2M weakly labeled from click data (clicked result entities = query entities)
+          - **Performance**: Entity-level F1 of **0.89** on head queries, **0.74** on tail queries
+
+          **Stage 2 -- Entity Linking:**
+          - Given extracted span "apple," link to the correct knowledge base entry
+          - **Candidate generation**: Lookup in alias table (string -> [candidate entities]). "apple" -> [Apple_Inc, Apple_fruit, Apple_Records, Fiona_Apple]
+          - **Candidate ranking**: Score each candidate using context features:
+            - Co-occurring entities: "apple" + "iphone" -> Apple_Inc (0.99)
+            - Query intent: transactional + "apple" -> Apple_Inc (0.85)
+            - Prior popularity: P(Apple_Inc | "apple") = 0.72 from historical queries
+          - **Knowledge base**: Wikidata (100M entities) + proprietary product catalog
+
+          **Why two-stage?**
+          - **Modularity**: NER can be improved independently of entity linking. Different teams can own each stage
+          - **Interpretability**: If "jaguar repair cost" links to the animal instead of the car, you can see the NER correctly identified "jaguar" as an entity but linking chose the wrong candidate. Actionable debugging
+          - Google's Knowledge Graph integration with search uses exactly this pattern: NER -> entity linking -> Knowledge Panel display
+
+          **Trade-off**: Two-stage has error propagation -- if NER misses an entity span, linking never sees it. Also, total latency is ~3ms (NER) + ~2ms (linking) = ~5ms. But the accuracy and debuggability justify it for production systems.
+        next: train_pipeline
+      - label: "End-to-end extraction (unified span + type + linking)"
+        answer: |
+          I would use an **end-to-end model** that jointly extracts entity spans, types, and knowledge base links in a single pass:
+
+          **Architecture: Unified Entity Extractor**
+          ```
+          Query tokens → Shared Encoder (DistilBERT) → Three parallel heads:
+                                                        ├── Span Detection (BIO tagging)
+                                                        ├── Type Classification (per-span softmax over 15 types)
+                                                        └── Entity Linking (per-span dot product with entity embeddings)
+          ```
+
+          **Joint training objective:**
+          ```
+          L_total = L_span (BIO cross-entropy) + 0.3 * L_type (type classification) + 0.3 * L_link (contrastive linking loss)
+          ```
+
+          **Entity linking via dense retrieval:**
+          - Pre-compute embeddings for all ~10M candidate entities using their descriptions
+          - At inference: encode extracted span in query context, retrieve top-5 entity candidates by cosine similarity
+          - **FAISS index** over entity embeddings enables <1ms retrieval for linking
+          - No need for hand-crafted alias tables -- the model learns "apple" in tech context maps to Apple_Inc
+
+          **Why end-to-end?**
+          - **Shared context**: The linking head can use span detection confidence to better disambiguate. If the model is uncertain about the span boundary for "New York City pizza," the linking head leverages this uncertainty
+          - **Faster inference**: One forward pass (~3ms) instead of two sequential passes (~5ms). Saves 2ms, which is significant in a 10ms budget
+          - **Better on tail entities**: Two-stage systems rely on alias tables that may not contain new entities ("GPT-5," new product names). The end-to-end model generalizes from entity descriptions
+          - Microsoft's BLINK entity linker and Meta's GENRE both use end-to-end architectures and achieve state-of-the-art results
+
+          **Performance:**
+          - Entity F1: **0.87** (slightly below two-stage 0.89 on head queries, but **0.78** on tail queries vs. 0.74 for two-stage)
+          - Linking accuracy: **0.84** (comparable to two-stage)
+          - Inference: **3ms** total (vs. 5ms for two-stage)
+
+          **Trade-off**: Harder to debug -- if "jaguar" is linked to the wrong entity, is it a span issue, a type issue, or a linking issue? The multi-head architecture helps somewhat, but it is inherently less interpretable. Also requires retraining the entire model when adding new entity types.
+        next: train_pipeline
+
+  # ============ TRAINING ============
+  - id: train_pipeline
+    stage: training
+    type: info
+    label: "Training Pipeline & Optimization"
+    speaker: interviewer
+    content: |
+      Let's design the training pipeline for the QU models. The key challenge is combining multiple data sources of varying quality and handling the rapid evolution of query patterns.
+
+      **Multi-source training strategy:**
+
+      **Phase 1 -- Pre-training (once):**
+      - Start from a pre-trained language model (BERT/DistilBERT) trained on web text
+      - Domain-adaptive pre-training: Continue MLM on 1B search queries (no labels needed). This teaches the model query-specific language patterns (abbreviations, typos, telegraphic syntax)
+      - **Impact**: Domain-adaptive pre-training improves downstream task accuracy by **2-4%** across intent, entity, and rewrite tasks
+
+      **Phase 2 -- Supervised fine-tuning (weekly):**
+      - **Human labels**: 50K-100K annotated queries per month, actively sampled from model uncertainty regions
+      - **Click-derived labels**: 5M pseudo-labeled queries from click patterns (e.g., if users click a product page, query was transactional)
+      - **Curriculum learning**: Train first on easy/high-agreement examples, gradually add ambiguous/hard examples. Improves convergence by ~15%
+      - **Multi-task training**: Joint loss across intent classification, entity extraction, and query rewrite. Shared encoder, task-specific heads
+
+      **Phase 3 -- Online adaptation (daily):**
+      - **Teacher-student distillation**: Large teacher model (BERT-large, 340M params) runs offline on yesterday's queries to generate soft labels. Smaller student (DistilBERT, 66M params) trains on these soft labels for online serving
+      - **Temporal adaptation**: Emphasize recent data (exponential decay weighting). Queries from last 7 days weighted 3x vs. queries from 30 days ago
+      - **New entity injection**: When trending entities appear (product launches, breaking news), fast-track annotation and inject into training within 24 hours
+
+      **Hyperparameter optimization:**
+
+      | Parameter | Search Range | Optimal |
+      |-----------|-------------|---------|
+      | Learning rate | 1e-5 to 5e-5 | 2e-5 |
+      | Batch size | 32 to 256 | 128 |
+      | Warmup steps | 500 to 5000 | 2000 |
+      | Label smoothing | 0 to 0.2 | 0.1 |
+      | Dropout | 0.1 to 0.3 | 0.15 |
+      | Max query length | 32 to 128 tokens | 64 |
+
+      **Training infrastructure:**
+      - 8x A100 GPUs, ~2 hours for full fine-tuning, ~30 minutes for daily incremental update
+      - Model versioning with MLflow; automatic rollback if validation metrics degrade >1%
+    dialogue:
+      - speaker: interviewer
+        text: "How do you train the QU models given diverse data sources?"
+      - speaker: candidate
+        text: "Three-phase approach: domain-adaptive pre-training on query logs, supervised fine-tuning on human labels plus click-derived pseudo-labels, and daily online adaptation with teacher-student distillation."
+      - speaker: interviewer
+        text: "How do you handle the temporal nature of queries? New entities and intents emerge constantly."
+      - speaker: candidate
+        text: "Exponential decay weighting on training data, new entity injection within 24 hours, and weekly full retraining with monthly active learning annotation refreshes."
+      - speaker: interviewer
+        text: "Good. Let's discuss query rewriting and then deployment."
+    next: deploy_serving
+
+  # ============ DEPLOYMENT ============
+  - id: deploy_serving
+    stage: deployment
+    type: question
+    label: "Serving Architecture"
+    speaker: interviewer
+    content: |
+      How would you deploy the query understanding system for online serving at scale? Remember the constraints: **<10ms latency**, **99,000 QPS** (Google-scale), and global availability.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you serve QU at 99K queries per second with sub-10ms latency?"
+      - speaker: candidate
+        text: "The key decisions are model optimization, caching strategy, and whether to serve on CPU vs. GPU."
+      - speaker: interviewer
+        text: "Walk me through the serving architecture."
+    choices:
+      - label: "CPU-optimized serving with aggressive caching"
+        answer: |
+          I would deploy on **CPU with ONNX optimization and a multi-tier cache**:
+
+          **Model optimization for CPU:**
+          - **ONNX conversion**: Export DistilBERT to ONNX format. ONNX Runtime on CPU achieves **2ms inference** for queries up to 64 tokens
+          - **INT8 quantization**: Post-training quantization reduces model size from 260MB to 65MB, speeds up inference by 1.5x with <0.5% accuracy loss
+          - **Operator fusion**: ONNX Runtime fuses attention layers, reducing memory allocation overhead
+          - **Thread-pinning**: Pin model inference threads to specific CPU cores to avoid cache thrashing
+
+          **Multi-tier caching architecture:**
+          ```
+          Query → L1 Cache (exact match, in-memory) → Hit? Return cached QU result
+                         │ Miss
+                         ▼
+                  L2 Cache (normalized match) → Hit? Return cached QU result
+                         │ Miss
+                         ▼
+                  L3 Cache (embedding similarity, ANN) → Hit? Return nearest cached result
+                         │ Miss
+                         ▼
+                  Full model inference (~8ms)
+          ```
+
+          - **L1 hit rate**: ~35% (top 10M exact queries cached). Latency: **<0.1ms**
+          - **L2 hit rate**: ~15% additional (lowercase + whitespace normalization). Latency: **<0.2ms**
+          - **L3 hit rate**: ~10% additional (queries with cosine similarity >0.95 share QU results). Latency: **~1ms**
+          - **Net model inference rate**: Only ~40% of queries need full model inference
+          - **Cache refresh**: L1/L2 refreshed daily with new query patterns; evict LRU entries
+
+          **Infrastructure:**
+          - **~5,000 CPU instances** (e.g., c6i.4xlarge, 16 vCPUs each) across 20+ data centers globally
+          - Each instance handles ~20 QPS sustained (with caching, effective throughput is ~50 QPS)
+          - **Load balancing**: Consistent hashing by query prefix for better cache locality
+          - **Cost**: ~$2M/month compute (vs. ~$8M/month for GPU serving)
+
+          **Why CPU + caching?**
+          - **Cost**: CPU instances are 4x cheaper than GPU instances. At 99K QPS, this saves ~$6M/month
+          - **Scaling**: CPU instances are easier to auto-scale and available in all cloud regions
+          - **Cache effectiveness**: Search queries follow a Zipf distribution -- the top 10M queries cover 35% of traffic. Caching is extremely effective
+          - Amazon's product search QU runs on CPU with similar caching strategies
+        next: mon_monitoring
+      - label: "GPU-accelerated serving with batched inference"
+        answer: |
+          I would deploy on **GPU with batched inference** for maximum throughput and future model scaling:
+
+          **GPU serving architecture:**
+          ```
+          Query stream → Request Batcher (collects queries for 1ms) → GPU Batch Inference → Fan out results
+                              (~1ms wait)                               (~3ms for batch of 32)
+          ```
+
+          **Batched inference benefits:**
+          - A single A100 GPU can process a **batch of 64 queries in ~3ms** with DistilBERT (vs. 2ms per query on CPU)
+          - **Throughput**: ~21K QPS per GPU. Need ~5 GPUs for 99K QPS (vs. 5000 CPU instances)
+          - **GPU utilization**: Without batching, GPU is idle during memory transfers. Batching achieves >85% GPU utilization
+
+          **Inference optimization:**
+          - **TensorRT**: NVIDIA's inference optimizer for transformer models. 2-3x speedup over vanilla PyTorch
+          - **FP16 inference**: Half-precision reduces memory bandwidth by 2x with negligible accuracy loss (<0.1%)
+          - **KV-cache optimization**: For autoregressive components (query rewriting), cache key-value pairs to avoid recomputation
+          - **Dynamic batching**: Triton Inference Server collects incoming requests and forms optimal batch sizes dynamically
+
+          **Infrastructure:**
+          - **~50 A100 GPUs** across 10 data centers (5 GPUs per DC for redundancy)
+          - Each GPU handles ~2K QPS with batching
+          - **Fallback**: CPU-based serving for overflow and GPU failures. The CPU path adds ~3ms latency but ensures availability
+          - **Cost**: ~$8M/month (higher than CPU, but enables larger models)
+
+          **Why GPU?**
+          - **Future-proofing**: As models grow (BERT-large, cross-encoder reranking, LLM-based QU), GPU is essential. CPU inference time grows linearly with model size; GPU inference grows sub-linearly due to parallelism
+          - **Unified inference**: Run intent classification, entity extraction, and query rewriting in a single GPU forward pass. On CPU, you might need separate optimized models
+          - **Enables larger models**: With GPU, you can serve BERT-base (110M params) or even BERT-large (340M params) within latency budget. On CPU, you are limited to DistilBERT (66M params)
+          - Google's production QU system uses TPUs (custom GPUs) for exactly this reason
+
+          **Trade-off**: GPU instances have longer startup times (~2 min vs. ~30 sec for CPU), making auto-scaling less responsive to traffic spikes. Mitigate with over-provisioning by 30% and pre-warmed standby instances.
+        next: mon_monitoring
+
+  # ============ MONITORING ============
+  - id: mon_monitoring
+    stage: monitoring
+    type: info
+    label: "Monitoring & Iteration"
+    speaker: interviewer
+    content: |
+      Let's design the monitoring system for query understanding. QU failures silently degrade search quality, so proactive detection is critical.
+
+      **Real-time system health monitoring:**
+
+      | Metric | Alert Threshold | Action |
+      |--------|----------------|--------|
+      | P99 latency | >15ms | Scale infra or check model version |
+      | Intent confidence < 0.5 | >8% of queries | Investigate new/ambiguous query patterns |
+      | Entity extraction empty | >20% of 4+ word queries | Check entity model, knowledge base coverage |
+      | Cache hit rate drop | >10% decrease | Check cache invalidation, new query patterns |
+      | QPS anomaly | >30% deviation from forecast | Investigate traffic source, potential bot traffic |
+
+      **Query understanding quality monitoring:**
+
+      **Daily automated checks:**
+      - Run QU on a "canary set" of 10K queries with gold labels. Track intent accuracy, entity F1, rewrite BLEU. Alert if any metric drops >1% day-over-day
+      - **Drift detection**: Compare today's intent distribution to 7-day moving average. If "transactional" intent share shifts >3%, something changed (new product launch? seasonal trend? model bug?)
+      - **Tail query monitoring**: Separately track accuracy on queries seen <5 times. Tail query accuracy is the best indicator of model generalization
+      - **New entity coverage**: Track the fraction of trending entities (from Google Trends / Twitter trending) that our entity extractor recognizes. Target: >80% within 24 hours of trending
+
+      **Weekly human evaluation:**
+      - Sample 2000 queries stratified by intent type and query frequency
+      - Human raters evaluate: (1) Was intent correct? (2) Were all entities extracted? (3) Is the rewritten query an improvement?
+      - Compute inter-annotator agreement (Cohen's kappa). If kappa < 0.7, the task definition is ambiguous and needs refinement
+
+      **A/B testing framework:**
+      - Every QU model change goes through a **1% -> 5% -> 25% -> 100%** ramp-up
+      - Guardrail metrics (latency P99, error rate, null result rate) are monitored at each stage with automatic rollback
+      - Minimum experiment duration: 7 days (to capture weekly patterns)
+      - **Interleaving tests**: For queries where old and new QU disagree, serve both interpretations to downstream ranking and compare click quality
+
+      **Feedback loop for continuous improvement:**
+      ```
+      Failed queries (low confidence, user reformulation)
+                    │
+                    ▼
+      Queue for human annotation (active learning)
+                    │
+                    ▼
+      Add to training set → Retrain → Deploy → Monitor
+      ```
+
+      This active learning loop means the model automatically improves on its weakest areas. Google reports that this feedback loop improves tail query accuracy by **5-8% per quarter**.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you monitor QU quality in production?"
+      - speaker: candidate
+        text: "Three layers: real-time system health alerts, daily automated quality checks on canary sets with drift detection, and weekly human evaluation with stratified sampling."
+      - speaker: interviewer
+        text: "How do you handle emerging entities and new query patterns?"
+      - speaker: candidate
+        text: "Trending entity coverage tracking with 24-hour SLA, active learning on low-confidence queries, and weekly retraining with temporal data weighting."
+      - speaker: interviewer
+        text: "Excellent approach. Let's wrap up."
+    next: conclusion
+
+  # ============ TERMINAL ============
+  - id: conclusion
+    stage: monitoring
+    type: terminal
+    label: "Design Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You have designed a comprehensive **Search Query Understanding** system.
+
+      **Your design covers:**
+      - **Architecture**: Pipeline of specialized models (spell correction, intent, entity, rewrite) or unified LLM-based approach -- each with clear trade-offs on latency, debuggability, and accuracy
+      - **Metrics**: Component-level accuracy (intent F1, entity F1, correction precision) or end-to-end search quality (NDCG, reformulation rate, revenue per search)
+      - **Data pipeline**: Search logs, click-derived labels, human annotations with active learning, synthetic augmentation
+      - **Features**: Rich contextual features (user history, session, location) or lightweight lexical features (text patterns, n-grams) balancing accuracy vs. latency
+      - **Intent classification**: Flat multi-class DistilBERT classifier or hierarchical coarse-to-fine cascade with error-cost modeling
+      - **Entity extraction**: Two-stage NER + entity linking or unified end-to-end extraction -- trading off interpretability for speed
+      - **Training**: Three-phase pipeline (pre-training, fine-tuning, daily adaptation) with teacher-student distillation
+      - **Deployment**: CPU-optimized with multi-tier caching or GPU-accelerated with batched inference -- cost vs. future-proofing
+      - **Monitoring**: Real-time health alerts, daily canary set evaluation, weekly human assessment, active learning feedback loops
+
+      **Key design trade-offs highlighted:**
+      - Pipeline vs. unified architecture (debuggability vs. simplicity)
+      - Personalized vs. context-free features (accuracy vs. privacy/latency)
+      - CPU vs. GPU serving (cost vs. model scalability)
+      - Component vs. end-to-end optimization (actionability vs. global optimum)
+
+      This demonstrates strong understanding of NLP at production scale, the multi-faceted nature of query understanding, and the operational challenges of serving millions of users with sub-10ms latency. Well done!
+    dialogue:
+      - speaker: interviewer
+        text: "Great design. You balanced accuracy, latency, and maintainability throughout. Any final thoughts?"
+      - speaker: candidate
+        text: "The most impactful investment is in the data flywheel -- active learning on failed queries, combined with click-derived labels, creates a compounding quality improvement over time."
+      - speaker: interviewer
+        text: "That's exactly the right insight. Excellent interview!"

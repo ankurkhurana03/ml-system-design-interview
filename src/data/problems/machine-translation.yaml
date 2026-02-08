@@ -1,0 +1,807 @@
+id: machine-translation
+title: "Neural Machine Translation System"
+description: "Design a machine translation system supporting 100+ languages at production scale."
+companies: ["Google", "Meta", "Apple"]
+domains: ["NLP", "Generative AI"]
+category: "NLP & Language"
+root: pd_start
+
+nodes:
+  # ============ PROBLEM DEFINITION ============
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we'll design a **neural machine translation (NMT) system** supporting 100+ languages at production scale, similar to Google Translate or Meta's NLLB (No Language Left Behind).
+
+      **Business context:**
+      - Google Translate serves **~1 billion translations per day** across 133 languages
+      - Meta's NLLB project achieved SOTA on 200 languages, including many low-resource African and Asian languages
+      - Apple Translate supports 20 languages with on-device inference for privacy
+      - The global language services market is worth **~$60 billion**, with machine translation growing at 15% CAGR
+
+      **Scale of the challenge:**
+      - 100 languages means **9,900 possible translation pairs** (100 x 99)
+      - Language resource distribution is extremely skewed: English-French has billions of parallel sentences; Yoruba-Tamil has virtually zero
+      - Quality expectations vary: legal/medical translation requires near-perfect accuracy; casual chat accepts rough translations
+      - Latency requirements: real-time keyboard translation (<100ms per word) vs. document translation (seconds acceptable)
+
+      **Key technical challenges:**
+      - **Low-resource languages**: 80% of the world's 7,000 languages have minimal digital text data
+      - **Domain adaptation**: Medical, legal, and technical translations require specialized vocabulary and style
+      - **Cultural nuance**: Formality levels (Japanese keigo), gendered language (Spanish), honorifics (Korean)
+      - **Code-switching**: Bilingual speakers mix languages mid-sentence ("Let's get some chai, it's getting thanda outside")
+      - **Script diversity**: Latin, Cyrillic, Arabic (RTL), CJK, Devanagari, Thai (no spaces), and dozens more
+
+      Let's start with the architecture decision.
+    dialogue:
+      - speaker: interviewer
+        text: "Let's design a machine translation system for 100+ languages. What's the first big architectural decision?"
+      - speaker: candidate
+        text: "The fundamental choice is between a single multilingual model that handles all language pairs, or a collection of bilingual models for specific pairs. This affects everything downstream -- data strategy, training cost, quality, and serving complexity."
+      - speaker: interviewer
+        text: "Good framing. What factors would influence that decision?"
+      - speaker: candidate
+        text: "Three main factors: coverage breadth vs. per-pair quality, training and serving cost, and how we handle low-resource languages. A multilingual model enables transfer learning for low-resource pairs, but a bilingual model can be optimized for high-traffic pairs like English-Spanish."
+      - speaker: interviewer
+        text: "Let's explore both options."
+    next: pd_arch_question
+
+  - id: pd_arch_question
+    stage: problem_definition
+    type: question
+    label: "Model Architecture Strategy"
+    speaker: interviewer
+    content: |
+      The architecture decision shapes the entire system. How would you structure translation across 100+ languages?
+
+      **Option A:** A single multilingual model -- one model handles all 9,900+ language pairs. This is the approach Meta used for NLLB-200.
+      **Option B:** Language-pair specific models for high-resource pairs, with a multilingual fallback for the rest.
+    choices:
+      - label: "Single multilingual model (NLLB approach)"
+        answer: |
+          I'd build a **single massive multilingual model** following Meta's NLLB approach:
+
+          **Architecture: Encoder-Decoder Transformer**
+          - **Encoder**: 24 layers, 1024-dim, 16 attention heads (~600M params)
+          - **Decoder**: 24 layers, 1024-dim, 16 attention heads (~600M params)
+          - **Total**: ~1.3B parameters (similar to NLLB-1.3B)
+          - **Language tokens**: Prepend source and target language tags (`<eng_Latn>`, `<fra_Latn>`) to control translation direction
+          - **Shared vocabulary**: SentencePiece with 256K tokens covering all 100+ languages and scripts
+
+          **Why single multilingual model:**
+          - **Positive transfer**: High-resource languages (English, French, Chinese) improve low-resource language quality through shared representations. NLLB showed +44% BLEU improvement on low-resource pairs vs. bilingual baselines
+          - **Zero-shot translation**: Can translate between any pair (e.g., Yoruba -> Tamil) even without direct parallel data, by routing through shared representation space
+          - **Operational simplicity**: One model to deploy, monitor, and update instead of potentially hundreds
+          - **Cost efficiency**: One 1.3B model vs. hundreds of specialized models saves significantly on GPU memory and serving infrastructure
+          - **Emergent capabilities**: Cross-lingual transfer enables pivot-free translation -- the model doesn't need to route through English internally
+
+          **Trade-offs:**
+          - **Capacity bottleneck**: One model must encode knowledge for 9,900+ pairs. High-resource pairs may degrade 5-10% vs. dedicated bilingual models (the "curse of multilinguality")
+          - **Training cost**: Training a 1.3B model on multilingual data takes ~1000 A100 GPU-days
+          - **Language interference**: Adding a new language can cause regression on existing languages
+          - **Harder to debug**: When French-German quality drops, it's harder to isolate the cause in a multilingual model
+        next: met_overview
+      - label: "Hybrid: pair-specific + multilingual fallback"
+        answer: |
+          I'd build a **hybrid system** with dedicated models for top pairs and a multilingual fallback:
+
+          **Architecture:**
+          ```
+          Translation Request (source_lang, target_lang)
+               |
+          Router: Check if dedicated model exists
+               |
+          +--------+---------+
+          |                  |
+          Dedicated Model    Multilingual Fallback
+          (top 20 pairs)     (remaining 9,880+ pairs)
+          |                  |
+          v                  v
+          High-quality       Good-quality
+          (bilingual, 600M)  (multilingual, 1.3B)
+          ```
+
+          **Dedicated bilingual models (top 20 pairs by traffic):**
+          - en<->es, en<->fr, en<->de, en<->zh, en<->ja, en<->pt, en<->ru, en<->ko, en<->ar, en<->hi
+          - Each model: 600M parameter encoder-decoder transformer
+          - Trained on large parallel corpora (10M-100M sentence pairs per pair)
+          - These 20 pairs typically handle **~80% of total translation traffic**
+
+          **Multilingual fallback (remaining pairs):**
+          - Single 1.3B model covering all 100+ languages
+          - Handles the long tail of language pairs
+          - Uses transfer learning for zero-shot and low-resource pairs
+
+          **Why hybrid:**
+          - **Best quality where it matters most**: Dedicated en-es model achieves 3-5 BLEU higher than the multilingual model on English-Spanish. For the top 20 pairs serving 80% of traffic, this quality gap matters
+          - **Faster iteration**: Can update the Spanish model without risking regression on Japanese
+          - **Specialized domain adaptation**: Train a dedicated en-de-medical model for medical translation without polluting the general model
+          - **Scalable**: Add new dedicated models as language pairs grow in traffic
+
+          **Trade-offs:**
+          - **Operational complexity**: 21+ models to deploy, version, and monitor
+          - **Higher total serving cost**: Need GPU memory for 20 dedicated models + 1 multilingual model
+          - **Routing complexity**: Need a language detection + routing layer
+          - **Low-resource quality**: Dedicated models can't benefit from cross-lingual transfer, so fallback model quality matters
+        next: met_overview
+
+  # ============ METRICS ============
+  - id: met_overview
+    stage: metrics
+    type: info
+    label: "Metrics Framework"
+    speaker: interviewer
+    content: |
+      Good architectural thinking. Now let's define how we measure translation quality. This is notoriously difficult -- there's no single "correct" translation.
+
+      **Automated metrics:**
+
+      | Metric | What It Measures | Limitations |
+      |--------|-----------------|-------------|
+      | **BLEU** (BiLingual Evaluation Understudy) | N-gram overlap with reference translation | Penalizes valid paraphrases, insensitive to meaning errors |
+      | **chrF** (Character F-score) | Character n-gram overlap | Better for morphologically rich languages, still surface-level |
+      | **COMET** (Crosslingual Optimized Metric) | Learned metric using XLM-R embeddings | Best correlation with human judgment, but opaque |
+      | **BERTScore** | Contextual embedding similarity | Captures semantic similarity beyond surface form |
+
+      **Why BLEU alone is insufficient:**
+      - BLEU of 30 can mean "decent" in one language pair and "terrible" in another (scale varies by language)
+      - "The cat sat on the mat" and "A feline rested upon the rug" have low BLEU but identical meaning
+      - BLEU doesn't catch critical errors: negation ("he is happy" -> "he is not happy" may have moderate BLEU)
+      - For morphologically rich languages (Finnish, Turkish), BLEU penalizes valid morphological variants
+
+      **Human evaluation framework:**
+      - **MQM (Multidimensional Quality Metrics)**: Industry standard from TAUS. Categorizes errors as accuracy (mistranslation, omission, addition) and fluency (grammar, spelling, style)
+      - **Direct Assessment**: Human raters score translations 0-100 on adequacy and fluency
+      - **Comparative evaluation**: Show two translations side-by-side, rater picks better one (more reliable than absolute scoring)
+
+      **Production metrics:**
+
+      | Metric | Target | Measurement |
+      |--------|--------|-------------|
+      | COMET score (automated) | >0.85 for high-resource, >0.75 for low-resource | Continuous on test sets |
+      | Human MQM error rate | <5 errors per 100 words (high-resource) | Monthly sampling |
+      | P99 latency | <200ms per sentence (real-time), <2s (document) | Service monitoring |
+      | User satisfaction | >4.0/5.0 star rating | In-app feedback |
+      | Edit distance (post-editing) | <20% characters changed by human translators | Professional translator feedback |
+
+      Let's discuss the data strategy.
+    dialogue:
+      - speaker: interviewer
+        text: "Why is BLEU still widely used if it has so many limitations?"
+      - speaker: candidate
+        text: "BLEU is fast to compute, well-understood, and provides a rough ranking. It's useful for quick regression checks during training. But for actual quality assessment and production decisions, we should use COMET plus human evaluation. BLEU is a necessary but insufficient metric."
+      - speaker: interviewer
+        text: "How do you handle the fact that there can be multiple valid translations?"
+      - speaker: candidate
+        text: "Multi-reference evaluation: compare against 3-5 reference translations instead of one. Also, COMET and BERTScore capture semantic equivalence rather than surface matching, so valid paraphrases score well. For critical domains like legal translation, we prefer human MQM evaluation."
+      - speaker: interviewer
+        text: "Good distinction between development metrics and production metrics."
+    next: data_question
+
+  # ============ DATA ============
+  - id: data_question
+    stage: data
+    type: question
+    label: "Data Strategy for Low-Resource Languages"
+    speaker: interviewer
+    content: |
+      The core data challenge in multilingual translation: **data scarcity for low-resource languages**. English-French has billions of parallel sentences from EU/UN proceedings. Yoruba-Hindi has nearly zero.
+
+      How would you build training data for low-resource language pairs?
+    choices:
+      - label: "Parallel corpora + back-translation from monolingual data"
+        answer: |
+          I'd use **back-translation** to generate synthetic parallel data from abundant monolingual text:
+
+          **Back-translation pipeline:**
+          ```
+          1. Start with whatever parallel data exists (even 10K sentences)
+          2. Train initial target->source model (e.g., Yoruba->English)
+          3. Collect large monolingual Yoruba corpus (web crawl, Wikipedia, news)
+          4. Translate monolingual Yoruba -> synthetic English using the initial model
+          5. Use (synthetic English, real Yoruba) as additional training data for English->Yoruba
+          6. Iterate: improved English->Yoruba model generates better back-translations
+          ```
+
+          **Data sources by type:**
+
+          | Source | Languages | Volume | Quality |
+          |--------|-----------|--------|---------|
+          | OPUS (parallel corpora collection) | 700+ pairs | 100B+ sentences | Varies widely |
+          | CCAligned (web-mined parallel) | 137 languages | 8.5B pairs | Noisy, needs filtering |
+          | WikiMatrix | 85 languages | 135M pairs | Medium (mining errors) |
+          | Monolingual web crawl (CC-100) | 100+ languages | Billions of sentences | High (native text) |
+          | Back-translated synthetic | Any pair | As needed | Medium (model quality dependent) |
+
+          **Why back-translation works:**
+          - Monolingual data is 100-1000x more abundant than parallel data for low-resource languages
+          - The synthetic source side doesn't need to be perfect -- the model learns from the real target side
+          - Meta's NLLB used back-translation to add **~1.3 billion synthetic pairs** for low-resource languages, improving BLEU by +8 on average
+          - **Tagged back-translation**: Mark synthetic data with a special token so the model learns to weight it differently from genuine parallel data
+
+          **Data quality filtering (critical):**
+          - **LASER/LaBSE similarity filtering**: Compute cross-lingual sentence embeddings, remove pairs with cosine similarity <0.6 (misaligned pairs)
+          - **Language ID filtering**: Remove pairs where source/target language is wrong (common in web-mined data)
+          - **Length ratio filtering**: Remove pairs where length ratio is >3x (likely misaligned)
+          - **Deduplication**: Remove exact and near-duplicate pairs (common in web-mined corpora)
+        next: feat_overview
+      - label: "Transfer learning + pivot through English"
+        answer: |
+          I'd rely on **transfer learning** from high-resource languages and **pivot translation** through English:
+
+          **Pivot translation approach:**
+          ```
+          Yoruba -> [Yoruba->English model] -> English -> [English->Tamil model] -> Tamil
+          ```
+
+          **Why pivoting through English:**
+          - English is the **lingua franca of parallel data** -- most language pairs have English on one side
+          - For 100 languages, we need only **200 models** (100 to-English + 100 from-English) instead of 9,900 direct models
+          - English-X parallel data is abundant for most languages, enabling high-quality pivot models
+          - Google Translate historically used English pivoting before multilingual models
+
+          **Transfer learning for low-resource languages:**
+          - **Language family transfer**: Train on Hindi (1B sentences) and transfer to related languages (Marathi, Nepali, Bengali) that share grammatical structures
+          - **Script-level transfer**: Languages sharing Devanagari script (Hindi, Marathi, Sanskrit) benefit from shared subword tokenization
+          - **Cross-lingual pre-training**: Initialize with mBART or mT5 pre-trained on 100+ languages, then fine-tune on available parallel data
+
+          **Language family groupings for transfer:**
+
+          | Family | High-Resource Anchor | Transfer Targets |
+          |--------|---------------------|-----------------|
+          | Romance | French, Spanish | Portuguese, Italian, Romanian, Catalan |
+          | Slavic | Russian | Ukrainian, Polish, Czech, Serbian |
+          | Indo-Aryan | Hindi | Marathi, Bengali, Nepali, Gujarati |
+          | Bantu | Swahili | Zulu, Shona, Lingala |
+          | Turkic | Turkish | Azerbaijani, Uzbek, Kazakh |
+
+          **Trade-offs vs. back-translation:**
+          - **Pro**: Simpler pipeline, no need for monolingual data collection or synthetic data generation
+          - **Pro**: Well-understood quality characteristics (pivot error is bounded by each leg's quality)
+          - **Con**: Pivot adds latency (two model inferences instead of one)
+          - **Con**: Error compounds across two translation steps -- a 95% accurate pivot produces ~90% end-to-end accuracy
+          - **Con**: Information loss: nuances in Yoruba may not survive the round-trip through English representation
+        next: feat_overview
+
+  # ============ FEATURES ============
+  - id: feat_overview
+    stage: features
+    type: info
+    label: "Input Representation & Tokenization"
+    speaker: interviewer
+    content: |
+      Good data strategy. Now let's discuss input representation -- how we tokenize and represent text across 100+ languages with diverse scripts.
+
+      **Tokenization strategy: SentencePiece with BPE**
+
+      **Why SentencePiece:**
+      - **Script-agnostic**: Works on raw Unicode bytes -- handles Latin, Cyrillic, CJK, Arabic, Devanagari, Thai without language-specific preprocessing
+      - **No pre-tokenization**: Thai and Chinese have no spaces between words. SentencePiece doesn't require word boundaries
+      - **Shared vocabulary**: A single 256K-token vocabulary covers all languages, enabling shared subword units across related languages
+
+      **Vocabulary design (critical for multilingual):**
+
+      | Strategy | Pros | Cons |
+      |----------|------|------|
+      | **Temperature-sampled BPE** (T=5) | Balances high and low-resource languages | Optimal T requires tuning |
+      | **Equal allocation** per language | Fair representation | English gets too few tokens |
+      | **Frequency-based** | Natural distribution | Low-resource languages get 1-2% of vocab, severe fragmentation |
+
+      **Meta's NLLB approach (recommended):**
+      - Train SentencePiece BPE on a temperature-sampled mixture of all languages
+      - Temperature T=5: upsamples low-resource languages so they get more vocabulary capacity
+      - Result: Average tokens-per-word ratio of 1.2 for English (efficient) and 2.5 for Yoruba (acceptable)
+      - **256K vocabulary** provides enough capacity for 100+ languages without extreme fragmentation
+
+      **Vocabulary fertility as a quality indicator:**
+      - **Fertility** = average number of subword tokens per word
+      - English: 1.1-1.3 (efficient -- most words are single tokens)
+      - Chinese: 1.5-2.0 (characters often split into 1-2 tokens)
+      - Low-resource languages: 2.5-4.0 (over-fragmentation hurts quality)
+      - If fertility >4.0 for any language, allocate more vocabulary capacity
+
+      **Positional encodings for diverse scripts:**
+      - **Rotary Position Embeddings (RoPE)**: Better than learned positional embeddings for variable-length sequences
+      - **Right-to-left handling**: Arabic and Hebrew text reversed at byte level before tokenization, or use bidirectional attention in encoder
+
+      **Special tokens for translation control:**
+      - `<src_lang>`: Source language code (e.g., `<eng_Latn>`)
+      - `<tgt_lang>`: Target language code (prepended to decoder input)
+      - `<formal>` / `<informal>`: Formality control for languages with register distinction
+      - `<domain:medical>`: Optional domain tag for specialized vocabulary activation
+
+      Let's choose the core model architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "Why 256K vocabulary instead of the more common 32K or 64K?"
+      - speaker: candidate
+        text: "With 100+ languages, a smaller vocabulary causes severe fragmentation for low-resource languages. A Yoruba word might become 8-10 subword tokens with 32K vocab but only 2-3 with 256K. This fragmentation directly hurts translation quality and increases sequence length, which increases latency and cost."
+      - speaker: interviewer
+        text: "How do you handle code-switching, like Hindi-English Hinglish?"
+      - speaker: candidate
+        text: "SentencePiece handles it naturally because the vocabulary includes subwords from both languages. The encoder sees the mixed-language input and the attention mechanism figures out the language boundaries. We also add code-switched training data -- parallel Hinglish to pure Hindi/English translations."
+      - speaker: interviewer
+        text: "Good. Let's discuss the model itself."
+    next: mod_question
+
+  # ============ MODEL ============
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Translation Model Architecture"
+    speaker: interviewer
+    content: |
+      For the core translation model, two paradigms compete:
+
+      **Option A:** A dedicated encoder-decoder transformer (the traditional NMT architecture used by Google, Meta, and most production systems).
+      **Option B:** An LLM-based approach using a decoder-only model (like GPT-4 or PaLM) with few-shot prompting or fine-tuning.
+
+      Consider quality, cost, latency, and adaptability.
+    choices:
+      - label: "Encoder-decoder transformer (dedicated NMT)"
+        answer: |
+          I'd use a **dedicated encoder-decoder transformer**, the architecture behind Google Translate, Meta NLLB, and most production NMT:
+
+          **Architecture specification:**
+          - **Encoder**: 24 layers, 1024 hidden dim, 16 heads, ~600M params
+          - **Decoder**: 24 layers, 1024 hidden dim, 16 heads, ~600M params
+          - **Cross-attention**: Decoder attends to encoder outputs at every layer
+          - **Total**: ~1.3B parameters
+          - **Activation**: SwiGLU (better than ReLU for translation quality)
+          - **Normalization**: Pre-layer norm (more stable training)
+
+          **Why encoder-decoder for translation:**
+          - **Bidirectional encoding**: The encoder sees the full source sentence bidirectionally. "Bank" in "river bank" vs. "Bank of America" is disambiguated by full context before any translation begins. Decoder-only models can only attend left-to-right
+          - **Cross-attention is key**: The decoder explicitly attends to source positions, creating direct alignment between source and target tokens. This is fundamental to faithful translation
+          - **Efficiency**: 1.3B encoder-decoder outperforms 7B decoder-only on translation benchmarks (Meta NLLB vs. BLOOM results)
+          - **Latency**: Encoder runs once, decoder runs autoregressively. For a 30-token translation, the encoder processes the source in one pass (~10ms), then the decoder generates 30 tokens (~60ms). Total ~70ms vs. ~200ms for a 7B LLM
+          - **Proven at scale**: Google Translate's production model is encoder-decoder, serving 1B+ translations/day
+
+          **Specific optimizations for multilingual:**
+          - **Mixture of Experts (MoE)**: Replace every other FFN layer with MoE (32 experts, top-2 routing). Increases model capacity from 1.3B to ~8B effective parameters with only 2x compute. Different experts specialize in different language families
+          - **Language-adaptive attention**: Language-specific attention heads emerge naturally, but we can encourage specialization with auxiliary language prediction loss
+
+          **Trade-off**: Purpose-built for translation but can't handle general NLP tasks. Worth it because translation quality is the product.
+        next: train_strategy
+      - label: "LLM-based translation (decoder-only)"
+        answer: |
+          I'd use a **fine-tuned decoder-only LLM** for translation, leveraging the general capabilities of large language models:
+
+          **Architecture: Fine-tuned LLM**
+          - **Base model**: LLaMA-2 13B or Mistral 7B (open-source, fine-tunable)
+          - **Fine-tuning**: LoRA adaptation (rank-64) on parallel corpora, ~2% of parameters updated
+          - **Prompt format**: `Translate from {source_lang} to {target_lang}: {source_text}`
+          - **Total serving params**: 7-13B (vs. 1.3B for encoder-decoder)
+
+          **Why LLM-based translation:**
+          - **World knowledge**: LLMs trained on trillions of tokens have broad knowledge that aids translation. "He went to the bank" is disambiguated by the LLM's world knowledge, not just bilingual training data
+          - **Few-shot domain adaptation**: Provide 5 example translations in the prompt to adapt to medical, legal, or casual domains without any fine-tuning. GPT-4 achieves near-SOTA translation quality with 5-shot prompting
+          - **Formality and style control**: Natural language instructions ("Translate formally", "Use casual tone") work out of the box
+          - **Multi-task capability**: The same model handles translation, summarization, and explanation. Ask "Translate and explain cultural references" in one request
+          - **Rapid improvement**: LLMs improve rapidly with each generation. GPT-4's translation quality surpasses many dedicated NMT systems on WMT benchmarks
+
+          **Quality comparison (WMT 2023 benchmarks):**
+
+          | System | en->de BLEU | en->zh BLEU | Low-resource avg BLEU |
+          |--------|------------|------------|---------------------|
+          | GPT-4 (5-shot) | 36.2 | 32.8 | 18.5 |
+          | NLLB-1.3B | 34.1 | 30.5 | 22.3 |
+          | Google Translate | 35.5 | 33.1 | 20.1 |
+
+          **Trade-offs:**
+          - **Cost**: 7-13B model is 5-10x more expensive per translation than 1.3B encoder-decoder. At 1B translations/day, this is $5-10M/month vs. $500K-1M
+          - **Latency**: Decoder-only autoregressive generation is slower (~200-400ms per sentence vs. ~70ms for encoder-decoder)
+          - **Hallucination**: LLMs can generate fluent but unfaithful translations -- adding content not in the source or omitting critical information
+          - **Low-resource gap**: LLMs are trained primarily on English text, so low-resource language quality lags behind dedicated multilingual models
+          - **Reproducibility**: Temperature >0 means non-deterministic translations, problematic for legal/medical domains
+        next: train_strategy
+
+  # ============ TRAINING ============
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: interviewer
+    content: |
+      Let's design the training pipeline. Multilingual translation training has unique challenges around data balance, training stability, and catastrophic forgetting.
+
+      **Training data preparation:**
+      - **Total parallel data**: ~10B sentence pairs across all language pairs (after filtering)
+      - **Data cleaning**: LASER/LaBSE similarity filtering, language ID verification, length ratio filtering, deduplication
+      - **Quality weighting**: Weight high-quality data (human translations, official documents) higher than web-mined data
+
+      **Temperature-based data sampling (critical for multilingual):**
+      ```
+      For language pair i with D_i parallel sentences:
+      Sampling probability p_i = (D_i^(1/T)) / sum(D_j^(1/T))
+
+      T=1: Proportional to data size (English dominates)
+      T=5: Upsamples low-resource languages (NLLB default)
+      T=infinity: Equal sampling across all pairs
+      ```
+
+      **Recommended T=5** balances high-resource quality with low-resource coverage. At T=5:
+      - English-French: Sampled at 2% instead of natural 15%
+      - Yoruba-English: Sampled at 0.8% instead of natural 0.01%
+
+      **Training schedule (for 1.3B encoder-decoder):**
+
+      | Phase | Duration | Data | Learning Rate | Purpose |
+      |-------|----------|------|---------------|---------|
+      | Pre-training | 2 weeks (256 A100s) | Monolingual (mBART-style) | 3e-4 warmup | Learn language representations |
+      | Parallel training | 4 weeks (256 A100s) | All parallel data, T=5 | 3e-4 -> 1e-5 | Learn translation |
+      | Fine-tuning | 3 days (64 A100s) | High-quality curated data | 1e-5 | Polish quality |
+      | Domain adaptation | 1 day per domain (8 A100s) | Domain-specific parallel data | 5e-6 | Specialized models |
+
+      **Preventing catastrophic forgetting when adding new languages:**
+      - **Elastic Weight Consolidation (EWC)**: Penalize changes to weights important for existing languages
+      - **Replay buffer**: Mix 10% of existing language data into new language training
+      - **Modular addition**: If using MoE, add new experts for new languages without modifying existing experts
+
+      **Evaluation during training:**
+      - Compute BLEU/COMET on validation set every 1K steps
+      - Per-language monitoring: Alert if any language drops >2 BLEU from its peak
+      - Checkpoint selection: Choose the checkpoint with best average COMET across all language tiers
+
+      Let's discuss quality estimation for deployment.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle the 'curse of multilinguality' -- adding more languages degrades high-resource pairs?"
+      - speaker: candidate
+        text: "Three strategies: First, increase model capacity with MoE so different experts handle different language families. Second, use temperature sampling at T=5 instead of T=infinity to still give high-resource pairs enough training signal. Third, optionally train separate distilled models for the top 5-10 pairs from the multilingual teacher."
+      - speaker: interviewer
+        text: "What's the total training cost?"
+      - speaker: candidate
+        text: "For a 1.3B model on 256 A100s for ~6 weeks: roughly $500K-800K in compute. This is a one-time cost, with incremental updates costing ~$50K per retraining cycle. Meta's NLLB training cost was estimated at similar scale."
+      - speaker: interviewer
+        text: "Let's talk about deployment."
+    next: deploy_question
+
+  # ============ DEPLOYMENT ============
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Quality Estimation & Serving"
+    speaker: interviewer
+    content: |
+      A critical deployment challenge for translation: **how do you know if a translation is good before showing it to the user?** Unlike classification where you have ground truth, translation quality is unknown at serving time.
+
+      How would you handle quality estimation in production?
+    choices:
+      - label: "Reference-free quality estimation model"
+        answer: |
+          I'd deploy a **reference-free quality estimation (QE) model** that scores translations without needing a reference:
+
+          **QE model architecture:**
+          - **Input**: (source sentence, generated translation) pair
+          - **Backbone**: Fine-tuned XLM-R Large (550M params) on human quality annotations
+          - **Output**: Quality score 0-1 (calibrated so 0.8 = "good", 0.5 = "acceptable", <0.3 = "poor")
+          - **Training data**: ~500K (source, translation, human score) triples from WMT QE shared tasks + platform human evaluations
+
+          **Production integration:**
+          ```
+          Source Text
+               |
+          Translation Model -> Generated Translation
+               |
+          QE Model -> Quality Score
+               |
+          +----+----+----+
+          |         |         |
+          v         v         v
+          Score > 0.8    0.5-0.8      < 0.5
+          Show as-is   Show with    Show with warning
+                       "Machine     "Low confidence" +
+                       translated"  suggest human
+                       disclaimer   review option
+          ```
+
+          **Why reference-free QE:**
+          - **Real-time quality signal**: Know translation quality before showing it to users
+          - **Dynamic routing**: Low-quality translations can be re-translated with a different model or sent for human post-editing
+          - **Per-language quality tracking**: Continuously monitor per-language quality without waiting for human evaluation
+          - **COMET-QE** (state-of-art): Achieves 0.75+ Kendall's tau correlation with human judgments, sufficient for production routing
+
+          **Latency impact:** QE adds ~15ms per translation (runs in parallel with response formatting). Acceptable overhead for the quality signal it provides.
+
+          **Fallback strategies based on QE score:**
+          - Score < 0.3: Try alternative translation (different beam search parameters, or pivot through English)
+          - Score < 0.5 after retry: Show translation with explicit quality disclaimer
+          - Track low-QE languages: If a language consistently scores <0.6, prioritize it for data collection and model improvement
+        next: deploy_serving
+      - label: "Confidence-based with ensemble disagreement"
+        answer: |
+          I'd use **model confidence signals** and **ensemble disagreement** as quality indicators:
+
+          **Confidence signals from the translation model:**
+
+          | Signal | What It Measures | Implementation |
+          |--------|-----------------|----------------|
+          | **Token-level entropy** | Model uncertainty per generated token | H(p) = -sum(p_i * log(p_i)) at each position |
+          | **Sequence-level log-probability** | Overall translation confidence | Sum of log-probs, length-normalized |
+          | **Beam diversity** | Agreement among top beam search candidates | Edit distance between top-4 beams |
+          | **Attention entropy** | Source-target alignment confidence | High entropy = uncertain alignment |
+
+          **Ensemble disagreement (if using multiple models):**
+          - Generate translations from 2-3 models (or model checkpoints)
+          - Compute chrF between outputs
+          - High agreement (chrF > 0.8): Confident translation
+          - Low agreement (chrF < 0.5): Uncertain, route to human review
+
+          **Decision logic:**
+          ```
+          Translation generated
+               |
+          Compute confidence = 0.4 * norm_log_prob + 0.3 * (1 - avg_entropy) + 0.3 * beam_agreement
+               |
+          +----+----+----+
+          |         |         |
+          v         v         v
+          Conf > 0.8    0.5-0.8      < 0.5
+          High quality  Acceptable   Low confidence
+          (show as-is)  (disclaimer) (retry/human review)
+          ```
+
+          **Why confidence-based:**
+          - **Zero additional latency**: Confidence scores come from the translation model itself -- no separate QE model inference
+          - **No additional model to maintain**: One fewer model to train, deploy, and monitor
+          - **Token-level granularity**: Can highlight uncertain words/phrases in the translation UI (like Google Translate's gray vs. black text)
+          - **Cost efficient**: No extra GPU for QE model serving
+
+          **Trade-off vs. dedicated QE:**
+          - Lower correlation with human quality judgments (~0.55 Kendall's tau vs. ~0.75 for COMET-QE)
+          - Model confidence is not the same as translation quality -- a model can be confidently wrong
+          - Less reliable for detecting systematic errors (e.g., consistent mistranslation of a term)
+        next: deploy_serving
+
+  - id: deploy_serving
+    stage: deployment
+    type: info
+    label: "Serving Infrastructure"
+    speaker: interviewer
+    content: |
+      Let's detail the serving architecture for 1 billion translations per day.
+
+      **Traffic patterns:**
+      - Average: ~12K translations/second
+      - Peak (business hours, global): ~40K translations/second
+      - Burst (viral event, breaking news): ~100K translations/second
+
+      **Inference optimization stack:**
+
+      | Optimization | Speedup | Quality Impact |
+      |-------------|---------|---------------|
+      | **KV-cache** (decoder) | 3-5x | None |
+      | **FP16 inference** | 2x | <0.1 BLEU drop |
+      | **INT8 quantization** (encoder) | 2x | <0.3 BLEU drop |
+      | **Speculative decoding** | 2-3x | None (exact) |
+      | **Continuous batching** (vLLM) | 2-4x throughput | None |
+      | **Flash Attention 2** | 1.5x | None |
+      | **Total combined** | ~15-25x | <0.5 BLEU |
+
+      **Speculative decoding (key optimization):**
+      - Use a small 200M "draft" model to generate 4-8 candidate tokens
+      - Large 1.3B "verifier" model accepts or rejects candidates in parallel
+      - Acceptance rate: ~70-80% (most tokens are straightforward)
+      - Result: 2-3x faster generation with identical output quality
+
+      **Serving architecture:**
+      ```
+      Client Request
+           |
+      API Gateway (rate limiting, auth)
+           |
+      Language Detection (fastText, ~1ms)
+           |
+      Router (selects model based on language pair)
+           |
+      GPU Inference Cluster
+      - NVIDIA Triton or vLLM
+      - Auto-scaling 50-200 A100 pods
+      - Regional deployment (NA, EU, APAC)
+           |
+      Post-processing
+      - Detokenization
+      - Script conversion if needed
+      - Quality score attachment
+           |
+      Response Cache (Redis, TTL=1hr)
+      - Cache popular translations
+      - Hit rate ~15-20% (saves significant compute)
+      ```
+
+      **Infrastructure costs:**
+
+      | Component | Monthly Cost | Notes |
+      |-----------|-------------|-------|
+      | GPU inference (A100s) | $800K-$1.5M | Auto-scaling, spot instances for batch |
+      | Language detection | $20K | CPU-only, lightweight |
+      | API gateway + caching | $50K | Redis + CloudFront |
+      | Monitoring + logging | $30K | Datadog + custom dashboards |
+      | **Total** | **~$1-2M/month** | |
+
+      **On-device translation (for privacy-sensitive use cases):**
+      - Distill to 200M parameter model for on-device use (Apple's approach)
+      - INT4 quantization + CoreML/TFLite optimization
+      - Quality: ~85% of server model, sufficient for casual translation
+      - Latency: ~100ms on iPhone 15 Pro, ~200ms on mid-range Android
+
+      Let's discuss monitoring.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you handle the latency difference between short phrases and long documents?"
+      - speaker: candidate
+        text: "For documents, we split into sentences, translate in parallel batches, then reconstruct. A 1000-word document becomes ~50 sentences, translated in 2-3 batches on GPU, total ~200ms. For streaming keyboard translation, we use the draft model alone for instant suggestions and refine with the full model when the user pauses."
+      - speaker: interviewer
+        text: "What about caching? Translations are highly repetitive."
+      - speaker: candidate
+        text: "Aggressive caching at multiple levels: exact string cache (Redis, ~15-20% hit rate), translation memory for repeated segments, and pre-computed translations for popular phrases. Google Translate reportedly caches aggressively, serving many translations from cache rather than model inference."
+    next: mon_question
+
+  # ============ MONITORING ============
+  - id: mon_question
+    stage: monitoring
+    type: question
+    label: "Monitoring Strategy"
+    speaker: interviewer
+    content: |
+      Translation quality monitoring is uniquely challenging because you can't compute ground-truth metrics in real-time (there's no reference translation for user inputs). How would you monitor quality in production?
+    choices:
+      - label: "Continuous human evaluation sampling"
+        answer: |
+          I'd implement **continuous human evaluation** as the primary quality monitoring signal:
+
+          **Daily human evaluation pipeline:**
+          1. **Random sampling**: 100 translations per language pair per day from production traffic (anonymized)
+          2. **Professional evaluation**: Bilingual evaluators score each translation on:
+             - **Adequacy** (1-5): Does the translation preserve the meaning?
+             - **Fluency** (1-5): Does the translation read naturally?
+             - **Error annotation**: Mark specific errors (mistranslation, omission, grammar)
+          3. **MQM scoring**: Calculate error rate per 100 words per language pair
+
+          **Evaluation infrastructure:**
+          - **~50 bilingual evaluators** covering top 30 language pairs
+          - **Crowdsourced evaluation** via platform like Appen/Toloka for remaining 70 languages
+          - **Cost**: ~$200K/month for continuous evaluation across 100+ languages
+          - **Turnaround**: 24-hour feedback loop -- today's production translations evaluated by tomorrow
+
+          **Alert thresholds:**
+
+          | Metric | Warning | Critical | Response |
+          |--------|---------|----------|----------|
+          | Average adequacy score | <4.0 | <3.5 | Investigate + retrain |
+          | MQM errors per 100 words | >5 | >10 | Hotfix threshold |
+          | Fluency score | <3.8 | <3.0 | Model rollback |
+          | Any language drop >0.5 BLEU | Alert | >1.0 BLEU drop | Emergency investigation |
+
+          **Complementary automated monitoring:**
+          - **QE score distribution**: Track daily distribution of quality scores -- shift indicates model degradation
+          - **User feedback signals**: Thumbs up/down, copy rate (users who copy translations found them useful), edit distance (for translation memory users)
+          - **Regression test suite**: 10K curated test translations run daily, BLEU/COMET compared against baseline
+
+          **Key insight**: Human evaluation is expensive but irreplaceable. Automated metrics can detect large regressions, but subtle quality issues (awkward phrasing, cultural insensitivity, domain misuse) require human judgment.
+        next: mon_terminal_human
+      - label: "Automated quality metrics with user feedback signals"
+        answer: |
+          I'd build an **automated monitoring system** combining model metrics with user behavior signals:
+
+          **Automated quality tracking:**
+
+          | Signal | Frequency | What It Detects |
+          |--------|-----------|----------------|
+          | **COMET-QE scores** (production) | Real-time | Per-translation quality estimate |
+          | **Daily regression suite** | Daily | 10K test translations, BLEU + COMET vs. baseline |
+          | **Embedding drift** (input) | Hourly | Source text distribution shift (new domains, events) |
+          | **Token-level entropy** | Real-time | Model uncertainty increase |
+          | **Output length ratio** | Real-time | Unusually short/long translations (hallucination indicator) |
+
+          **User behavior signals (implicit quality feedback):**
+
+          | Signal | What It Indicates | Reliability |
+          |--------|------------------|-------------|
+          | **Post-edit distance** | How much users correct translations | High (direct quality measure) |
+          | **Copy rate** | Users trust and use the translation | Medium |
+          | **Re-translation rate** | User tries same text again (dissatisfied) | High |
+          | **Session duration** | Longer sessions with translation = useful | Low |
+          | **Thumbs up/down** | Explicit feedback | Medium (biased sample) |
+          | **Alternative selection** | User picks different suggested translation | High |
+
+          **Anomaly detection system:**
+          ```
+          Per-language quality signal
+               |
+          Exponential moving average (window=7 days)
+               |
+          If signal deviates >2 standard deviations:
+               |
+          +----+----+
+          |         |
+          Quality   Quality
+          drop      spike
+          |         |
+          Alert     Investigate
+          + triage  (positive change
+                    or data issue?)
+          ```
+
+          **User behavior correlation with quality:**
+          - Track correlation between QE scores and user behavior signals
+          - If QE says quality is high but re-translation rate increases, QE model may be miscalibrated
+          - If users consistently edit translations in a specific domain, trigger domain-specific data collection
+
+          **Advantages over human evaluation:**
+          - **Real-time**: Detect issues in minutes, not 24 hours
+          - **100% coverage**: Every translation is monitored, not just a sample
+          - **Cost**: ~$30K/month (compute) vs. ~$200K/month (human evaluators)
+          - **Scalable**: Adding new languages doesn't require hiring bilingual evaluators
+
+          **Key trade-off**: Automated metrics miss subtle quality issues. Monthly human evaluation spot-checks are still needed as a calibration signal, but daily monitoring is automated.
+        next: mon_terminal_auto
+
+  # ============ TERMINALS ============
+  - id: mon_terminal_human
+    stage: monitoring
+    type: terminal
+    label: "Human Evaluation Monitoring Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive **neural machine translation system** with continuous human evaluation monitoring.
+
+      **Your design summary:**
+      - **Problem**: 100+ language translation system covering 9,900+ language pairs at 1B+ translations/day
+      - **Architecture**: Multilingual model strategy with careful capacity planning
+      - **Metrics**: Multi-level evaluation (BLEU, COMET, human MQM) acknowledging BLEU limitations
+      - **Data**: Robust strategy for low-resource languages leveraging monolingual data and cross-lingual transfer
+      - **Features**: 256K SentencePiece vocabulary with temperature-sampled training for language balance
+      - **Model**: Purpose-built translation architecture with optimization for production latency
+      - **Training**: Temperature-sampled multilingual training with catastrophic forgetting prevention
+      - **Deployment**: Quality estimation, speculative decoding, and multi-region serving at ~$1-2M/month
+      - **Monitoring**: Continuous human evaluation across 100+ languages with 24-hour feedback loops
+
+      **Key strengths:**
+      - Human evaluation provides ground truth quality signal that automated metrics cannot match
+      - Per-language monitoring prevents quality blind spots in low-resource languages
+      - MQM error annotation creates targeted data for model improvement
+      - Quality-aware serving routes uncertain translations appropriately
+
+      **Areas to explore further:**
+      - Document-level translation (maintaining consistency across paragraphs)
+      - Real-time speech translation (combining ASR + MT + TTS)
+      - Personalized translation style (learning user preferences over time)
+
+      Outstanding system design for one of the hardest problems in NLP!
+
+  - id: mon_terminal_auto
+    stage: monitoring
+    type: terminal
+    label: "Automated Monitoring Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You've designed a comprehensive **neural machine translation system** with scalable automated monitoring.
+
+      **Your design summary:**
+      - **Problem**: 100+ language translation system supporting diverse scripts and resource levels
+      - **Architecture**: Thoughtful model strategy balancing quality and operational complexity
+      - **Metrics**: Multi-faceted evaluation combining automated metrics with human judgment
+      - **Data**: Effective strategy for bridging the low-resource data gap
+      - **Features**: Multilingual tokenization with balanced vocabulary allocation
+      - **Model**: Optimized architecture for translation quality and serving efficiency
+      - **Training**: Balanced multilingual training with language-aware data sampling
+      - **Deployment**: Production-optimized serving with quality estimation and intelligent caching
+      - **Monitoring**: Real-time automated quality tracking with user behavior signal integration
+
+      **Key strengths:**
+      - Real-time monitoring catches quality regressions within minutes, not days
+      - User behavior signals provide implicit quality feedback at zero labeling cost
+      - 100% translation coverage (every translation monitored, not just a sample)
+      - Cost-efficient: $30K/month automated vs. $200K/month for equivalent human coverage
+
+      **Areas to explore further:**
+      - Adaptive translation: Dynamically choosing model size based on language pair complexity and latency budget
+      - Multimodal translation: Translating text in images (OCR + MT) and speech (ASR + MT + TTS)
+      - Translation memory integration for professional translator workflows
+
+      Outstanding system design combining scale with quality awareness!

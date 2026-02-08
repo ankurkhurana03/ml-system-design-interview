@@ -1,0 +1,586 @@
+id: food-delivery-ranking
+title: "Food Delivery Restaurant & Item Ranking"
+description: "Design the ranking system for a food delivery app like DoorDash or UberEats."
+companies: ["DoorDash", "UberEats", "Instacart"]
+domains: ["Ranking/Search", "Recommendation", "Tabular/Structured"]
+root: pd_start
+
+nodes:
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we are going to design the **restaurant and item ranking system** for a food delivery app like DoorDash or UberEats.
+
+      This is a **three-sided marketplace**: customers want great food fast, restaurants want orders and revenue, and dashers (delivery drivers) want efficient routes and fair earnings. The ranking system directly mediates all three sides -- what we show at the top of the feed determines who gets orders, who gets fed, and who gets paid.
+
+      **Scale context**: DoorDash processes over **2 million orders per day** across 27 countries, with **600,000+ active merchants**. A typical user in a metro area has 200-400 eligible restaurants within delivery radius. The app must rank these restaurants and then rank menu items within each restaurant.
+
+      **Key challenges**:
+      - **Real-time operational constraints**: A restaurant that is slammed with orders right now should rank lower, even if it is normally excellent. Delivery time estimates must be accurate and integrated into ranking.
+      - **Hyper-local dynamics**: Rankings differ block by block. A restaurant 0.5 miles away might have a 15-minute delivery, while one 2 miles away takes 45 minutes due to traffic.
+      - **Three-sided fairness**: If we only optimize for customer clicks, we might starve smaller restaurants of orders, causing them to leave the platform.
+
+      Current pain points: delivery time estimates are often inaccurate (leading to cancellations), new restaurants struggle to get visibility, and users in suburban areas see the same 20 restaurants repeatedly.
+
+      Let's scope the problem.
+    dialogue:
+      - speaker: interviewer
+        text: "Today we're designing the ranking system for a food delivery app. It's a three-sided marketplace with customers, restaurants, and drivers."
+      - speaker: candidate
+        text: "What's the scale we're working with?"
+      - speaker: interviewer
+        text: "About 2 million orders per day, 600K+ merchants. A typical urban user has 200-400 eligible restaurants. We need to rank both restaurants and menu items."
+      - speaker: candidate
+        text: "The three-sided nature is really interesting. What are the main pain points?"
+      - speaker: interviewer
+        text: "Inaccurate delivery time estimates, new restaurant discoverability, and repetitive results in suburban areas. Let's scope the problem."
+    next: pd_objective_q
+
+  - id: pd_objective_q
+    stage: problem_definition
+    type: question
+    label: "Optimization Objective"
+    speaker: interviewer
+    content: |
+      The first critical decision: what should the ranking system optimize for? This determines which restaurants appear at the top and what kind of marketplace dynamics we create.
+    dialogue:
+      - speaker: interviewer
+        text: "What should the ranking system optimize for? This is the most consequential design decision for a food delivery marketplace."
+      - speaker: candidate
+        text: "There's a fundamental tension between short-term conversion and long-term marketplace health."
+      - speaker: interviewer
+        text: "Exactly. Walk me through the trade-offs."
+    choices:
+      - label: "Order conversion rate (maximize P(order))"
+        answer: |
+          I would optimize primarily for **P(order)** -- the probability that a user places an order from a given restaurant, given that it is shown.
+
+          **Why conversion?** Conversion is the clearest signal that we matched a user with the right restaurant. Unlike clicks (which can be exploratory) or impressions (which measure nothing), a completed order means the user evaluated the restaurant, chose items, and committed money. At DoorDash's scale, a **1% improvement in conversion rate** translates to approximately **20,000 additional orders per day**, worth roughly **$500K-800K in daily GMV**.
+
+          **Specific formulation:**
+          ```
+          RankScore = P(order | user, restaurant, context) * E[order_value]
+          ```
+          Including expected order value ensures we don't just maximize cheap orders. A restaurant with 5% conversion and $45 average order is more valuable than one with 8% conversion and $15 average.
+
+          **Why not GMV directly?** GMV (Gross Merchandise Volume) as the direct target creates perverse incentives -- the system would always push expensive restaurants, ignoring the majority of users looking for a quick $15 lunch. Conversion as the primary metric, weighted by expected value, naturally balances accessibility with revenue.
+
+          **Guardrails**: Monitor restaurant diversity (unique restaurants ordered from per user per month), delivery time accuracy, and customer satisfaction (post-order rating). If conversion goes up but ratings drop, we are likely showing "easy to order from" restaurants that disappoint on quality.
+
+          **Trade-off**: Pure conversion optimization creates a **winner-take-all dynamic**. The top 10% of restaurants (established chains like McDonald's, Chipotle) have the highest conversion rates due to brand recognition. New or independent restaurants cannot compete on conversion alone. DoorDash addresses this with explicit **new restaurant boosting** and diversity slots, but these are band-aids on a fundamentally biased objective.
+        next: met_metrics
+      - label: "Customer lifetime value (satisfaction + retention)"
+        answer: |
+          I would optimize for **customer lifetime value (CLV)**, which captures long-term satisfaction and platform retention, not just the immediate order.
+
+          **Why CLV?** The food delivery market is intensely competitive -- DoorDash, UberEats, and Grubhub all operate in the same markets. Customer acquisition costs are **$30-50 per new user**. If our ranking system maximizes short-term orders but users churn after a month, we lose money. The ranking system should surface restaurants that make users **want to come back**.
+
+          **CLV signals:**
+          - **Post-order rating**: Did the user rate the order 4-5 stars?
+          - **Reorder rate**: Does the user order from this restaurant again within 30 days? (Strong quality signal)
+          - **Session-to-order conversion**: Did the user complete the session with an order, or abandon?
+          - **Return rate**: Does the user open the app again within 7 days?
+          - **Negative signals**: Refund requests, support tickets, 1-star reviews, uninstalls within 7 days
+
+          **Value model:**
+          ```
+          RankScore = w1*P(order) + w2*P(5_star_rating | order) + w3*P(reorder_30d | order) - w4*P(refund | order)
+          ```
+          This heavily weights restaurants that deliver great experiences (high ratings, reorders) and penalizes those with high refund rates, even if they have decent conversion.
+
+          **Why this works for three-sided fairness**: High-quality independent restaurants that have loyal fans naturally score well on reorder rate and ratings, even if their raw conversion (brand awareness) is lower than chains. This organically promotes marketplace diversity without explicit rules.
+
+          **Trade-off**: CLV signals are **delayed and noisy**. We do not know if a user will reorder from a restaurant for 30 days. Training labels are sparse -- only ~15% of orders result in a reorder. This makes the model harder to train than a simple conversion predictor. Practical compromise: use conversion for real-time ranking, but tune the value model weights to maximize CLV metrics in A/B tests (similar to Instagram's approach of training for engagement but optimizing for satisfaction).
+        next: met_metrics
+
+  - id: met_metrics
+    stage: metrics
+    type: info
+    label: "Metrics Framework"
+    speaker: interviewer
+    content: |
+      Good choice. Let's define the full metrics framework for the ranking system.
+
+      **Online metrics (A/B testing):**
+      - **Primary**: Your chosen objective (conversion rate or CLV composite)
+      - **Topline KPIs**: Orders per DAU, GMV per DAU, average order value
+      - **User guardrails**: 7-day retention, session abandonment rate, average delivery time deviation (predicted vs actual), post-order rating distribution
+      - **Restaurant guardrails**: Unique restaurants with orders per day, new restaurant order share (target >5%), restaurant Gini coefficient (impression distribution)
+      - **Dasher guardrails**: Average delivery distance, idle time between deliveries
+
+      **Offline metrics (model evaluation):**
+      - **AUC-ROC**: Target >0.78 for conversion prediction. Food delivery conversion is inherently noisy (users browse without ordering ~60% of sessions), so AUC ceilings are lower than content recommendation.
+      - **Calibration**: ECE <0.02. Critical because predicted probabilities feed into the value model.
+      - **NDCG@10**: Measures whether the top-10 restaurants are ordered from more than alternatives. Target >0.6.
+      - **Delivery time MAE**: Mean Absolute Error of delivery time predictions. Target <4 minutes for orders within 3 miles.
+
+      **The delivery time accuracy problem**: This is a **make-or-break metric** unique to food delivery. If we predict 25 minutes but it takes 45 minutes, the user has a terrible experience regardless of food quality. DoorDash's research shows that **delivery time accuracy is the #1 predictor of 1-star reviews** -- more than food quality or order accuracy. We must integrate delivery time estimation tightly into the ranking model.
+
+      **Marketplace health metrics (monthly review):**
+      - Restaurant churn rate (target <3% monthly)
+      - New restaurant 30-day survival rate (target >70%)
+      - Customer NPS (Net Promoter Score)
+      - Cross-city consistency (ranking quality should not vary drastically between markets)
+
+      Now, a key design decision: how should delivery time estimation integrate with ranking?
+    dialogue:
+      - speaker: interviewer
+        text: "For offline evaluation, conversion AUC above 0.78 is the target. Food delivery is noisier than content recommendation because users browse without ordering 60% of sessions."
+      - speaker: candidate
+        text: "Delivery time accuracy seems critical. How important is it relative to other factors?"
+      - speaker: interviewer
+        text: "It's the number one predictor of 1-star reviews -- more than food quality. We need delivery time MAE under 4 minutes for nearby orders."
+      - speaker: candidate
+        text: "That suggests delivery time estimation should be deeply integrated into ranking, not just displayed as a label."
+      - speaker: interviewer
+        text: "Exactly. How should we integrate delivery time with ranking?"
+    next: met_dt_question
+
+  - id: met_dt_question
+    stage: metrics
+    type: question
+    label: "Delivery Time Integration"
+    speaker: interviewer
+    content: |
+      Delivery time estimation is the backbone of the food delivery ranking system. How should it integrate with the ranking model?
+    dialogue:
+      - speaker: interviewer
+        text: "Delivery time estimation is make-or-break. How should it integrate with ranking?"
+      - speaker: candidate
+        text: "There are two philosophies -- we could use delivery time as a direct feature in the ranking model, or as a separate penalty applied post-ranking."
+      - speaker: interviewer
+        text: "Walk me through the trade-offs. This is a critical architectural decision."
+    choices:
+      - label: "ETA as ranking feature (joint optimization)"
+        answer: |
+          I would make delivery time estimation a **first-class feature inside the ranking model** so the model jointly learns how delivery time interacts with other factors.
+
+          **How it works**: The delivery time prediction model (a separate ML model) produces an ETA estimate for each user-restaurant pair. This ETA, along with its confidence interval, is fed as input features to the ranking model. The ranking model learns the relationship between ETA and conversion probability: for example, it might learn that users ordering lunch tolerate 25-minute ETAs but dinner orderers accept up to 40 minutes.
+
+          **ETA model details**: A gradient-boosted tree (LightGBM) predicting delivery time in minutes. Features include: distance, current traffic (Google Maps API), restaurant prep time history, current order queue depth, dasher supply in area, time of day, weather. Trained on **50M completed deliveries** with actual delivery timestamps. MAE target: <3.5 minutes for orders within 3 miles.
+
+          **Joint learning benefits**: The ranking model discovers nuanced interactions. For instance, a **highly-rated Italian restaurant** with a 35-minute ETA might still rank above a mediocre burger place with a 20-minute ETA for a user with high cuisine sensitivity. The model learns these trade-offs from data rather than us hard-coding rules.
+
+          **Trade-off**: If the ETA model is inaccurate, the ranking model inherits that error. A systematic ETA underestimate (predicting 20 minutes when it is really 35) causes the ranking model to over-promote distant restaurants, leading to poor user experiences. The ranking model cannot distinguish between "genuinely fast" and "incorrectly predicted as fast." This tight coupling means ETA model bugs propagate directly to ranking quality.
+        next: data_pipeline
+      - label: "ETA as post-ranking penalty (decoupled)"
+        answer: |
+          I would keep delivery time estimation **decoupled from the ranking model** and apply it as a post-ranking adjustment layer.
+
+          **How it works**: The ranking model optimizes purely for **user-restaurant match quality** (cuisine fit, quality, price, personalization) without considering delivery time. Then, a separate post-ranking layer applies a delivery time penalty:
+          ```
+          FinalScore = RankScore * penalty(ETA)
+          ```
+          Where `penalty(ETA)` is a learned monotonic function: 1.0 for ETA < 20 min, decaying smoothly to 0.2 for ETA > 50 min.
+
+          **Why decoupled?** This creates **clean separation of concerns**. The ranking team optimizes relevance; the logistics team optimizes ETA accuracy. Each model can be updated, debugged, and A/B tested independently. When the ETA model improves, ranking automatically benefits without retraining.
+
+          **Penalty function design**: Learned from A/B tests with different penalty curves. Key insight from DoorDash's research: the penalty should be **non-linear and context-dependent**. Users are more sensitive to ETA at lunch (sharp penalty above 25 min) than dinner (gradual penalty above 35 min). The penalty function can be conditioned on meal period and user history (some users consistently order from far-away restaurants).
+
+          **Operational benefits**: If the ETA service goes down temporarily, the ranking model still works -- it just shows results without delivery time weighting. With the joint approach, an ETA service outage would degrade the entire ranking model since it is a required input feature.
+
+          **Trade-off**: The decoupled approach cannot learn **interactions between delivery time and other factors**. The penalty function treats ETA the same regardless of restaurant quality. But a user who craves their favorite sushi (30 min away) may be willing to wait longer than for generic pizza. The joint approach captures this nuance; the decoupled approach applies a one-size-fits-all penalty.
+        next: data_pipeline
+
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline"
+    speaker: interviewer
+    content: |
+      The data pipeline for food delivery ranking has unique characteristics because of the **real-time operational dimension**.
+
+      **Scale**: DoorDash logs approximately **500 million restaurant impressions per day** (200-400 restaurants shown per session x 2M+ sessions). Each impression includes: user, restaurant, position, session context, and outcome (clicked, ordered, or scrolled past).
+
+      **Key data sources:**
+      - **User order history**: Past orders, restaurants visited, cuisine preferences, typical order value, ordering patterns (lunch vs dinner, weekday vs weekend), dietary preferences (inferred from order contents)
+      - **Restaurant catalog**: Menu items, prices, cuisine tags, hours of operation, photos, ratings distribution, historical performance metrics
+      - **Real-time operational signals** (updated every 1-5 minutes):
+        - Current prep time estimate (based on active orders in queue)
+        - Restaurant open/closed/busy status
+        - Available dasher supply in the area
+        - Current traffic conditions (from mapping API)
+        - Dynamic delivery radius (contracts during peak hours)
+      - **Historical delivery data**: Actual vs predicted delivery times, order accuracy rates, packaging quality scores (from dasher ratings)
+      - **Geospatial data**: User-restaurant distance, neighborhood demand patterns, traffic patterns by time of day
+
+      **Data freshness hierarchy**:
+      - **Real-time (<1 min)**: Restaurant open/close status, dasher availability, active order queue depth
+      - **Near real-time (1-5 min)**: Current prep time, traffic conditions, dynamic delivery radius
+      - **Batch (daily)**: User taste profiles, restaurant aggregate statistics, menu embeddings
+      - **Slow-changing (weekly/monthly)**: Restaurant quality scores, cuisine category mappings, geographic zone definitions
+
+      **Label construction**: The primary label is **order completion** (binary). Secondary labels: clicked but did not order (weak positive), scrolled past (negative), order rating (1-5, delayed by hours), reorder within 30 days (delayed). Importantly, we must handle **selection bias**: users can only order from restaurants we showed them.
+
+      Now let's discuss features.
+    dialogue:
+      - speaker: interviewer
+        text: "The data pipeline has a unique real-time operational dimension. Restaurant status, prep times, and dasher availability update every 1-5 minutes."
+      - speaker: candidate
+        text: "That's a much faster operational cadence than typical recommendation systems. How do we handle the different freshness requirements?"
+      - speaker: interviewer
+        text: "We tier the data: real-time for operational signals, near real-time for traffic and prep times, daily batch for user profiles and restaurant stats, and weekly for slow-changing category data."
+      - speaker: candidate
+        text: "The label construction is tricky too -- we only see outcomes for restaurants we showed, creating selection bias."
+      - speaker: interviewer
+        text: "Right. We'll need counterfactual approaches for that. Let's talk features."
+    next: feat_question
+
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Strategy"
+    speaker: interviewer
+    content: |
+      What feature engineering strategy would you use? The core tension in food delivery is between **restaurant quality features** (how good is the food?) and **real-time operational features** (can we deliver it quickly right now?).
+    dialogue:
+      - speaker: interviewer
+        text: "The core tension: restaurant quality features versus real-time operational signals. How do you balance them?"
+      - speaker: candidate
+        text: "This is interesting because it's not just about what the user wants to eat -- it's about what can actually be delivered well right now."
+      - speaker: interviewer
+        text: "Exactly. A 5-star restaurant with a 60-minute delivery time right now might be worse than a 4-star restaurant that can deliver in 20 minutes."
+    choices:
+      - label: "Operations-heavy: real-time delivery + restaurant state"
+        answer: |
+          I would build an **operations-first feature set** that heavily emphasizes real-time delivery feasibility, supplemented by quality signals.
+
+          **Real-time operational features (~40 features):**
+          - **Delivery time estimate** (the single most important feature): Computed as prep_time + pickup_wait + travel_time. Each component modeled separately:
+            - Prep time: Based on restaurant's current order queue (from POS integration), historical prep times by hour, and menu item complexity scores
+            - Pickup wait: Based on nearby dasher availability (count within 0.5 miles, average idle time)
+            - Travel time: From mapping API (Google Maps / Mapbox), adjusted for current traffic, weather, and historical accuracy
+          - **Delivery time confidence**: Not just the point estimate, but the variance. A 25-minute estimate with +/-3 min confidence is better than 25 minutes +/-15 min.
+          - **Restaurant current load**: Active orders / typical capacity. If a restaurant normally handles 15 orders/hour and currently has 20 in queue, it is overloaded.
+          - **Dasher supply/demand ratio**: In the user's delivery zone, how many available dashers vs pending orders? Low ratio = longer delivery times.
+          - **Dynamic pricing signals**: Is surge pricing active? What multiplier? (Affects conversion but signals high demand)
+
+          **Quality features (~20 features):**
+          - Restaurant average rating (smoothed with Bayesian prior, minimum 50 ratings)
+          - Rating trend (improving or declining over last 90 days)
+          - Order accuracy rate (% of orders with no missing items)
+          - Reorder rate (% of customers who order again within 30 days)
+          - Photo quality score (does the restaurant have high-quality menu photos?)
+
+          **User-restaurant cross features (~15 features):**
+          - Has user ordered from this restaurant before? How recently? What did they rate it?
+          - User's cuisine preference match (from order history)
+          - Price sensitivity match (user's average order value vs restaurant's average order value)
+
+          **Why operations-first?** DoorDash's internal research shows that **delivery time is the #1 factor in conversion** after the initial restaurant consideration set. A user may crave sushi, but if the best sushi place has a 50-minute estimate while a good Thai place can deliver in 20, they often choose Thai. Operations features have the highest feature importance in DoorDash's production ranking model, contributing **~35% of model lift**.
+
+          **Trade-off**: Over-weighting operations can create **unfairness to restaurants in less accessible locations**. A great restaurant 3 miles away will always rank lower than a mediocre one 0.5 miles away. This can also create a **feedback loop**: restaurants that rank higher get more orders, which makes their operations smoother, which makes them rank even higher.
+        next: mod_question
+      - label: "Quality-heavy: preferences + restaurant quality + personalization"
+        answer: |
+          I would build a **quality-and-personalization-first feature set** that focuses on matching users with restaurants they will love, with operational signals as constraints rather than ranking factors.
+
+          **User preference features (~35 features):**
+          - **Cuisine affinity vector**: A 20-dim vector representing the user's affinity for each cuisine type (Italian, Chinese, Mexican, etc.), computed from order history with recency weighting and exploration smoothing
+          - **Price tier preference**: Distribution of user's past orders across price tiers ($, $$, $$$, $$$$)
+          - **Dietary pattern signals**: Vegetarian/vegan/halal/gluten-free inferred from order history (e.g., >80% of orders contain no meat = likely vegetarian)
+          - **Time-of-day patterns**: User's cuisine preferences shift between meals -- pizza for lunch, sushi for dinner. Model this with time-conditioned features.
+          - **Session intent signals**: Search queries in current session, cuisine filters applied, restaurants clicked but not ordered from (reveals what they are considering)
+
+          **Restaurant quality features (~30 features):**
+          - **Rating distribution**: Not just average, but the full distribution. A restaurant with 90% 5-star and 10% 1-star (polarizing) is different from one with uniform 3-star ratings (consistently mediocre).
+          - **Review sentiment analysis**: NLP-extracted topics from reviews -- "great portion sizes," "always cold on delivery," "friendly staff." These provide actionable quality signals beyond numeric ratings.
+          - **Menu embedding**: Encode the full menu via a text embedding model (sentence-BERT), capturing cuisine style, ingredients, and pricing. Similar menus cluster together in embedding space.
+          - **Photo attractiveness score**: A trained CNN that scores menu item photos on attractiveness (lighting, presentation, resolution). Restaurants with professional photos convert **30-50% higher** than those without.
+          - **Freshness/popularity**: Orders in last 7 days (popularity), new menu items added (freshness), seasonal relevance (pumpkin spice in fall)
+
+          **Collaborative filtering features (~10 features):**
+          - "Users who ordered from X also ordered from Y" -- restaurant co-occurrence scores
+          - Neighborhood popularity: What are the most ordered restaurants in the user's zip code? Captures local food culture.
+
+          **Operational features as constraints (not ranking signals):**
+          - Filter out restaurants with estimated delivery >45 minutes (hard constraint)
+          - Apply a mild penalty for delivery times >30 minutes (soft constraint)
+          - Flag restaurants currently over capacity with a warning badge rather than demoting
+
+          **Why quality-first?** In a competitive market, the quality of recommendations is what keeps users on DoorDash vs switching to UberEats. If every platform shows the same fast-delivery restaurants at the top, there is no differentiation. DoorDash's edge should be **knowing what you want to eat before you know yourself**. Personalized quality matching drives higher order values ($35 avg from personalized recommendations vs $22 from popularity-based), better ratings, and stronger retention.
+
+          **Trade-off**: Quality features are **slower to update** than operational features. If a restaurant's kitchen catches fire at 6pm, quality features will not reflect this until the next day's batch update. This is why operational signals must still serve as constraints. Also, over-personalization can create a filter bubble where users never discover new cuisines or restaurants.
+        next: mod_question
+
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Model Architecture"
+    speaker: interviewer
+    content: |
+      What model architecture would you use for the food delivery ranking system? Consider that we need to rank 200-400 restaurants per request within ~50ms, and the model must handle both restaurant-level ranking and item-level ranking within a restaurant.
+    dialogue:
+      - speaker: interviewer
+        text: "What model architecture for ranking 200-400 restaurants per request within 50ms? We also need item-level ranking within each restaurant."
+      - speaker: candidate
+        text: "There are two main paradigms: learning-to-rank approaches and multi-objective point-wise prediction."
+      - speaker: interviewer
+        text: "How do you handle the two-level nature -- restaurant ranking plus item ranking?"
+    choices:
+      - label: "LambdaMART + neural re-ranker (learning to rank)"
+        answer: |
+          I would use a **two-stage learning-to-rank pipeline**: LambdaMART for the first pass, followed by a neural re-ranker for the top candidates.
+
+          **Stage 1 -- LambdaMART (400 -> top 50):**
+          - **Why LambdaMART?** It is the gold standard for tabular ranking problems. Food delivery features are predominantly tabular (delivery time, rating, distance, price, counts), and gradient-boosted trees handle tabular data better than neural networks for moderate feature counts (<200 features). LightGBM's LambdaMART implementation can score 400 restaurants in **<5ms on CPU**.
+          - **Training objective**: Pairwise ranking loss -- learn to correctly order pairs of restaurants based on conversion probability. Uses NDCG as the optimization target.
+          - **Feature input**: All 75+ features (operational + quality + cross features). Trees naturally handle feature interactions (e.g., "cheap restaurant + lunch hour + near user = high conversion") without manual cross-feature engineering.
+
+          **Stage 2 -- Neural re-ranker (top 50 -> final 20):**
+          - A 4-layer MLP (256-128-64-1) with multi-task heads for P(order), P(5-star), E[order_value]
+          - Takes LambdaMART features PLUS dense features: user embedding (from order history), restaurant embedding (from menu and reviews), and cross-attention features between user and restaurant
+          - Latency: ~10ms for 50 candidates on CPU
+
+          **Item-level ranking (within a restaurant):**
+          - Separate LambdaMART model for **menu item ranking** within each restaurant
+          - Features: item popularity, user's past orders from this restaurant, price, item category (entree/appetizer/drink), photo quality, item-level ratings
+          - Lightweight -- only runs when user clicks into a restaurant (~50 items, <2ms)
+
+          **Why this two-stage approach?** LambdaMART is extremely fast, interpretable, and effective on tabular data. DoorDash and Uber Eats both use gradient-boosted trees as their primary ranker. The neural re-ranker adds embedding-based personalization for the most important (top) positions without the latency cost of running it on all candidates.
+
+          **Trade-off**: LambdaMART cannot use dense embeddings effectively (trees split on individual dimensions, missing embedding structure). The two-stage architecture means the first stage might filter out restaurants that the neural re-ranker would have scored highly. Also, maintaining two separate models doubles the operational complexity.
+        next: train_strategy
+      - label: "Multi-objective deep model (MMOE)"
+        answer: |
+          I would use a **Multi-gate Mixture-of-Experts (MMoE)** deep model that jointly predicts multiple objectives relevant to the ranking decision.
+
+          **Architecture:**
+          - **Input layer**: Concatenation of all feature groups. Categorical features (cuisine type, price tier, neighborhood) go through embedding tables. Continuous features (delivery time, distance, rating) are normalized and optionally bucketized.
+          - **Expert networks** (6 shared experts): Each expert is a 3-layer MLP (256-128-64). Experts implicitly specialize -- some learn operational patterns, others learn preference patterns.
+          - **Gating networks** (one per task): Learned soft attention over experts, allowing each task to weight experts differently.
+          - **Task towers** (4 tasks):
+            1. P(order) -- primary conversion prediction
+            2. P(5-star rating | order) -- quality prediction
+            3. E[delivery_time_error] -- delivery accuracy prediction
+            4. P(reorder_30d | order) -- long-term satisfaction
+
+          **Final ranking score:**
+          ```
+          Score = w1*P(order) * E[order_value] + w2*P(5_star) - w3*E[dt_error] + w4*P(reorder)
+          ```
+          Weights tuned via A/B tests to optimize the chosen primary metric.
+
+          **Why MMoE?** Food delivery ranking has **inherently multi-objective** nature. A restaurant might have high conversion but poor delivery accuracy, or great food quality but low reorder rate (expensive/special occasion). MMoE lets us model these correlated-but-distinct objectives with shared representations, which provides **regularization** for sparse signals (reorder rate has only ~15% positive label rate).
+
+          **Item-level ranking**: Add a fifth task tower for P(item_click | restaurant_click) that shares the same expert backbone but with additional item-level features.
+
+          **Inference optimization**: With ~3M parameters, ONNX-optimized inference takes ~15ms for 400 candidates on CPU. Well within budget.
+
+          **Trade-off**: Deep models on tabular data often underperform gradient-boosted trees, especially with <200 features. DoorDash's published research (KDD 2023) showed their GBDT baseline was hard to beat with neural approaches until they had **>500 features including dense embeddings**. If the feature set is predominantly tabular, LambdaMART may be simpler and equally effective. Also, MMoE is harder to interpret -- when the model ranks a restaurant poorly, it is difficult to explain which objective drove the decision.
+        next: train_strategy
+
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: interviewer
+    content: |
+      Let's discuss the training pipeline for the food delivery ranking model.
+
+      **Training data construction:**
+      - Window: Last **7 days** of impressions (longer than content recommendation because food preferences are more stable)
+      - Volume: ~3.5 billion impressions per week, downsampled to ~500M training examples
+      - **Negative sampling**: For conversion prediction, negatives are restaurants shown but not ordered from. Ratio is naturally ~95% negative (most sessions have only 1 order). Downsample negatives 10:1 with calibration adjustment.
+      - **Position bias correction**: Use the **position feature** approach -- include position as a training feature, then set it to position 1 during inference. This lets the model learn position effects and factor them out.
+
+      **Multi-task label construction:**
+      - P(order): Available immediately after session ends
+      - P(5-star): Available 1-4 hours after delivery (when user rates)
+      - E[delivery_time_error]: Available after delivery completion (actual - predicted)
+      - P(reorder): Available after 30 days. Use a **sliding window** approach -- training examples from 30+ days ago have reorder labels; recent examples use predicted values from a separate reorder model.
+
+      **Training infrastructure:**
+      - LambdaMART: Trained on **CPU cluster** (128 cores), ~2 hours for full retrain on 500M examples
+      - Neural model: Trained on **8 A100 GPUs**, ~4-6 hours for full retrain
+      - **Retraining cadence**: Daily retraining with warm-start. Deploy every morning after offline quality gates pass.
+
+      **Key gotchas specific to food delivery:**
+      - **Temporal patterns**: Weekday lunch ranking is very different from Saturday dinner. Include day-of-week and meal-period features, and ensure training data has balanced representation of all time slots.
+      - **Geographic heterogeneity**: A model trained on San Francisco data performs poorly in Houston. Use geographic features (city, neighborhood type) as input, not separate models per city.
+      - **Menu changes**: Restaurants frequently update menus, prices, and hours. Stale catalog data leads to bad recommendations. Integrate catalog freshness into the feature pipeline.
+      - **Seasonal effects**: Soup restaurants rank higher in winter; ice cream in summer. Use seasonal features and ensure training windows span multiple seasons for robust learning.
+
+      Let's discuss deployment.
+    dialogue:
+      - speaker: interviewer
+        text: "Training uses the last 7 days of data with daily retraining. Position bias is handled by including position as a feature and setting it to 1 at inference."
+      - speaker: candidate
+        text: "How do we handle the 30-day delay for reorder labels?"
+      - speaker: interviewer
+        text: "Use a sliding window -- older examples have real reorder labels, recent examples use predicted values from a separate model. Also, food delivery has strong temporal and geographic heterogeneity."
+      - speaker: candidate
+        text: "Right -- weekday lunch vs Saturday dinner are completely different ranking problems. We need robust temporal and geographic features."
+      - speaker: interviewer
+        text: "Exactly. Let's discuss deployment."
+    next: deploy_question
+
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Deployment Architecture"
+    speaker: interviewer
+    content: |
+      How would you deploy the ranking system? A unique challenge in food delivery is that ranking depends on **real-time operational state** that changes minute-by-minute.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you serve a ranking model that depends on real-time state like restaurant queue depth and dasher availability?"
+      - speaker: candidate
+        text: "The key challenge is integrating real-time operational signals into the serving path without blowing the latency budget."
+      - speaker: interviewer
+        text: "Exactly. And this real-time state changes every minute, unlike typical recommendation features."
+    choices:
+      - label: "Pre-compute + real-time adjustment (hybrid)"
+        answer: |
+          I would use a **hybrid approach**: pre-compute personalized base scores offline, then apply real-time operational adjustments at serving time.
+
+          **Offline pre-computation (every 4 hours):**
+          - For each user-restaurant pair in the user's delivery area, compute a **base relevance score** using the full model with static features (user preferences, restaurant quality, historical match).
+          - Store scores in a **personalized ranking cache** keyed by (user_id, restaurant_id). At 10M active users x 300 restaurants each = ~3B scores, stored in Redis (~50GB with compression).
+          - Pre-compute item-level rankings within each restaurant.
+
+          **Real-time serving layer:**
+          - When user opens the app, retrieve their pre-computed base scores (~5ms from Redis)
+          - Apply **real-time adjustments** as multipliers:
+            ```
+            FinalScore = BaseScore * f(delivery_time) * g(restaurant_load) * h(dasher_supply)
+            ```
+            Where f, g, h are simple monotonic functions (e.g., f(dt) = 1.0 if dt<25min, decaying to 0.3 for dt>45min)
+          - These adjustment functions are learned from data but applied as lightweight transformations (<1ms)
+          - Re-sort restaurants by FinalScore and return top 20
+
+          **Total serving latency**: Cache lookup (5ms) + real-time signal fetch (10ms) + score adjustment + sort (5ms) = ~20ms. Well under budget.
+
+          **Why hybrid?** This separates the computationally expensive personalization (runs offline at scale) from the latency-sensitive operational adjustments (lightweight, real-time). The base scores can use the full complex model, while the serving path stays simple and fast.
+
+          **Trade-off**: The base scores are up to **4 hours stale**. If a user's preferences change (e.g., they just ordered Italian, so now they want something different), the pre-computed scores will not reflect this until the next refresh. Also, the real-time adjustment functions are **simpler than the full model** -- they cannot capture complex interactions between operational state and user preferences (e.g., "this specific user is willing to wait 45 minutes for their favorite sushi place, but not for pizza").
+
+          **Mitigation**: Trigger score recomputation after each order event and when the user changes delivery address.
+        next: mon_setup
+      - label: "Full real-time inference per request"
+        answer: |
+          I would run **full model inference on every request** with real-time features assembled at serving time.
+
+          **Serving architecture:**
+          - **Feature assembly service**: Collects all features for the request:
+            - User features from user profile store (Redis, 3ms)
+            - Restaurant features from restaurant feature store (Redis, 3ms, batch lookup for 300 restaurants)
+            - Real-time operational signals from ops service (5ms)
+            - Geographic/contextual features computed at request time (1ms)
+          - **Model inference**: Full model scores all 300-400 candidates in a single batch:
+            - LambdaMART: <5ms on CPU for 400 candidates
+            - MMoE: ~15ms on CPU (ONNX INT8) for 400 candidates
+          - **Post-processing**: Diversity insertion, new restaurant boost, sponsored results blending (5ms)
+          - **Total latency**: ~30-40ms end-to-end
+
+          **Real-time feature store architecture:**
+          - **Redis Cluster** with ~200GB of feature data per region
+          - Restaurant operational features updated every **60 seconds** via a streaming pipeline (Kafka -> Flink -> Redis)
+          - User features updated after every session/order event
+          - Dasher supply features updated every **30 seconds** from the dasher dispatch service
+
+          **Why full real-time?** Every request gets the **freshest possible ranking** that considers the current operational reality. No stale base scores, no approximation. If a restaurant's kitchen goes down at 6:15pm, by 6:16pm it is ranked lower for all users. If dasher supply suddenly drops in an area, delivery time estimates update immediately.
+
+          **Scaling**: At 200K peak QPS (2M orders/day implies roughly 10M sessions/day, with ~20 ranking requests per session during browsing):
+          - CPU-based serving: ~1,000 c6i.4xlarge instances, each handling ~200 QPS
+          - Cost: ~$500K/month for inference compute
+          - Auto-scale: 2x capacity during peak dinner hours (5-8pm)
+
+          **Trade-off**: Full real-time inference is **more expensive** than the hybrid approach (~2-3x compute cost). Feature assembly adds latency and complexity -- if any feature store is slow, the entire request is slow. Also, the model must be simple enough to score 400 candidates within the latency budget, which limits model complexity. A 50M parameter Transformer would be too slow, whereas the hybrid approach could use any model size offline.
+        next: mon_setup
+
+  - id: mon_setup
+    stage: monitoring
+    type: info
+    label: "Monitoring & Marketplace Health"
+    speaker: interviewer
+    content: |
+      Monitoring a food delivery ranking system requires tracking not just model health but **marketplace health** across all three sides.
+
+      **Model health monitoring (real-time):**
+      - **Prediction accuracy**: Track calibration of P(order) predictions hourly. Alert on ECE >0.03.
+      - **Feature health**: Monitor feature coverage, staleness, and distribution shifts. The most critical: delivery time estimate accuracy (track MAE hourly, alert on >6 minutes).
+      - **Inference latency**: p50/p95/p99, error rates. Alert on p99 >80ms.
+      - **Model freshness**: Time since last model deployment. Alert if >30 hours (daily retraining should keep this <24h).
+
+      **Customer-side monitoring (hourly):**
+      - Session-to-order conversion rate, broken down by market, time of day, and user cohort
+      - Average delivery time and delivery time accuracy (predicted vs actual)
+      - Post-order rating distribution (alert on shift toward 1-2 stars)
+      - "Where's my order?" support ticket rate (leading indicator of delivery time issues)
+
+      **Restaurant-side monitoring (daily):**
+      - **Order distribution Gini coefficient**: Measures how concentrated orders are across restaurants. Target Gini <0.65.  If top 10% of restaurants get >50% of orders, the marketplace is too concentrated.
+      - **New restaurant ramp**: Track impressions, clicks, and orders for restaurants in their first 90 days. If order rate is <50% of established restaurants with similar quality, the cold-start boost needs adjustment.
+      - **Restaurant cancellation rate**: If ranking sends too many orders to a busy restaurant, they may cancel orders. Track cancellation rate per restaurant and penalize in ranking.
+      - **Menu price changes**: Detect sudden price increases (potential gaming of the ranking system) and flag for review.
+
+      **Dasher-side monitoring (daily):**
+      - Average delivery distance and time per order (ranking affects which orders dashers receive)
+      - Dasher utilization rate (idle time between deliveries)
+      - Batching efficiency (can the system batch multiple orders per dasher trip?)
+
+      **A/B testing framework:**
+      - Minimum experiment duration: **7 days** (must capture weekday + weekend patterns)
+      - **Three-sided evaluation**: Every experiment reports metrics for customers, restaurants, AND dashers. A change that improves customer conversion but increases dasher idle time may not be net positive.
+      - **Market-level experiments**: Randomize at the **market level** (city) for marketplace-wide effects. User-level randomization can miss market equilibrium effects.
+      - **Long-term holdouts**: 2% of users held on previous model for 3 months to track retention effects.
+
+      Let's wrap up.
+    dialogue:
+      - speaker: interviewer
+        text: "Monitoring covers all three sides: customers, restaurants, and dashers. What's the most critical marketplace metric?"
+      - speaker: candidate
+        text: "I'd watch the order distribution Gini coefficient closely. If top 10% of restaurants get over 50% of orders, we have a marketplace concentration problem."
+      - speaker: interviewer
+        text: "Good. Also critical: delivery time accuracy, restaurant cancellation rates, and new restaurant ramp metrics. A/B tests must evaluate all three sides."
+      - speaker: candidate
+        text: "Market-level experiments are interesting -- user-level randomization would miss equilibrium effects like dasher supply shifts."
+      - speaker: interviewer
+        text: "Exactly. Let's wrap up the design."
+    next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Design Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You have designed a comprehensive ranking system for a food delivery marketplace. Let's summarize.
+
+      **Architecture summary:**
+      - **Optimization**: Order conversion weighted by value, or customer lifetime value with satisfaction signals
+      - **Metrics**: Conversion AUC, delivery time MAE, NDCG@10, with three-sided marketplace health guardrails
+      - **Data**: 500M impressions/day with real-time operational signals updated every 60 seconds, plus batch user/restaurant features
+      - **Features**: Operations-first (delivery time, restaurant load, dasher supply) or quality-first (preferences, ratings, personalization) with the other as supplement
+      - **Model**: LambdaMART + neural re-ranker (learning to rank) or MMoE multi-objective deep model
+      - **Serving**: Pre-compute + real-time adjustment hybrid, or full real-time inference per request
+      - **Monitoring**: Three-sided marketplace health (customers, restaurants, dashers) with market-level A/B testing
+
+      **Strengths of your design:**
+      - Addresses the three-sided marketplace nature with fairness considerations for all stakeholders
+      - Integrates real-time operational constraints (delivery time, restaurant capacity) into ranking
+      - Balances short-term conversion with long-term marketplace health
+
+      **Areas to explore further:**
+      - **Delivery time estimation**: Deep dive into the ETA prediction model (this is almost a separate ML system design problem)
+      - **Dynamic pricing integration**: How surge pricing interacts with ranking (should expensive-due-to-surge restaurants rank lower?)
+      - **Cuisine diversity enforcement**: Ensuring the top results are not all the same cuisine type
+      - **Merchant-side tools**: Giving restaurants levers (promotions, featured placement) that interact with organic ranking
+      - **Multi-order optimization**: Ranking for users who order from multiple restaurants in one session (group orders, party planning)
+
+      This design shows strong understanding of marketplace dynamics, real-time ML systems, and the unique challenges of food delivery. Well done!
+    dialogue:
+      - speaker: interviewer
+        text: "Great design! You addressed the three-sided marketplace, real-time operations, and long-term health."
+      - speaker: candidate
+        text: "Thank you. The key insight is that food delivery ranking is not just a recommendation problem -- it's a real-time marketplace optimization problem."
+      - speaker: interviewer
+        text: "Exactly. The operational dimension makes it fundamentally different from content recommendation. Any final thoughts?"
+      - speaker: candidate
+        text: "I'd want to explore the delivery time estimation model more deeply -- it's the backbone of the entire ranking system."
+      - speaker: interviewer
+        text: "That would be a great follow-up. Well done!"

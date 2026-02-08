@@ -1,0 +1,687 @@
+id: ride-matching
+title: "Ride-Sharing Driver-Rider Matching"
+description: "Design the matching system that pairs riders with drivers in a ride-sharing platform."
+companies: ["Uber", "Lyft", "DiDi"]
+domains: ["Tabular/Structured", "Graph/Network", "RL"]
+root: pd_start
+
+nodes:
+  # ======================================================================
+  # STAGE 1: PROBLEM DEFINITION (2 nodes)
+  # pd_start -> pd_formulation (question) -> ...
+  # ======================================================================
+
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we will design the core matching system for a ride-sharing platform like Uber or Lyft. The system must pair riders requesting trips with available drivers in real time.
+
+      **Platform scale:**
+      - 20 million rides per day globally across 10,000+ cities
+      - Peak hours see 500,000+ concurrent ride requests in top-10 metros alone
+      - Average of 3.2 million active drivers at any given hour
+      - Median time from request to pickup is 4.8 minutes; the business target is under 5 minutes
+
+      **Current challenges:**
+      - Greedy nearest-driver assignment leaves 15-20% of drivers idle in low-demand zones while riders in adjacent zones wait 8+ minutes
+      - Driver earnings variance is high: top-quartile drivers earn 2.3x bottom-quartile, causing churn
+      - Shared/pooled rides require matching multiple riders heading in compatible directions within tight time windows
+      - Airport queues use a simple FIFO that ignores driver ratings, vehicle type preferences, or rider loyalty tier
+
+      **Business objectives:**
+      - Minimize rider wait time (primary KPI for rider retention)
+      - Maximize driver utilization and earnings fairness (primary KPI for driver retention)
+      - Support ride pooling, scheduled rides, and premium vehicle tiers
+      - Maintain sub-second matching latency at peak load
+
+      Let us begin by deciding the fundamental matching strategy.
+    dialogue:
+      - speaker: interviewer
+        text: "Welcome! Today we are designing the core matching engine for a ride-sharing platform. The system handles 20 million rides per day globally. What are your initial thoughts on the key challenges?"
+      - speaker: candidate
+        text: "This is a two-sided marketplace problem with hard real-time constraints. The core tension is between speed — matching quickly to reduce wait times — and quality — finding the globally optimal assignment across all riders and drivers."
+      - speaker: interviewer
+        text: "Exactly. And there is a fairness dimension too. Top-quartile drivers earn 2.3x what bottom-quartile drivers earn, which drives churn. How does that factor into your thinking?"
+      - speaker: candidate
+        text: "Driver fairness is crucial for supply retention. A purely rider-optimal system might consistently route high-value trips to nearby drivers while starving others. We need to balance rider wait time against equitable driver earnings distribution."
+      - speaker: interviewer
+        text: "Good framing. Let us start with the fundamental matching strategy."
+    next: pd_formulation
+
+  - id: pd_formulation
+    stage: problem_definition
+    type: question
+    label: "Matching Strategy"
+    speaker: interviewer
+    content: |
+      The most fundamental decision is how we match riders to drivers. This choice shapes everything downstream — the latency budget, the optimization objective, and the infrastructure complexity.
+
+      Should we match greedily (one request at a time, instantly) or accumulate requests and solve a batch optimization?
+    dialogue:
+      - speaker: interviewer
+        text: "Here is the core question: should we match riders to drivers greedily — assign the nearest available driver the instant a request arrives — or batch requests over a short window and solve a global optimization?"
+      - speaker: candidate
+        text: "Both approaches are used in production. Uber started greedy and moved toward batching. The trade-off is latency versus matching quality."
+      - speaker: interviewer
+        text: "Walk me through both options and tell me which you would choose."
+    choices:
+      - label: "Greedy nearest-driver matching"
+        answer: |
+          I would start with **greedy nearest-driver matching** as the foundation, enhanced with ML-based scoring.
+
+          **How it works:** When a ride request arrives, query all available drivers within a radius (e.g., 3 km), score each candidate using an ML model, and assign the highest-scoring driver. The entire process must complete in under 500ms.
+
+          **Why greedy?**
+          - **Latency advantage**: Riders see a driver assigned within 1-2 seconds of requesting. No waiting for a batch window to close. At Uber's scale, even a 5-second batch window means 2,500+ requests accumulate during peak — each rider waiting instead of being matched.
+          - **Simplicity and reliability**: No combinatorial optimization solver needed. Each match is independent, so failures are isolated. Easy to reason about and debug.
+          - **Cold start friendly**: Works identically whether there are 10 or 10,000 concurrent requests in a city.
+
+          **ML enhancement over naive nearest-driver:**
+          Instead of pure distance, the scoring model considers: predicted ETA (accounting for traffic), driver rating match, vehicle type fit, driver earnings history (boost underearning drivers), and predicted trip value. This converts greedy from "closest driver wins" to "best-fit driver wins."
+
+          **The downside** is suboptimality. If Rider A and Rider B both want Driver X, a greedy system gives X to whoever requested first, even if the globally optimal assignment would pair A with X and B with Y (who is closer to B). Studies at Uber showed greedy matching was 8-12% worse on aggregate wait times versus batch optimization in dense markets.
+        next: met_greedy
+      - label: "Batch optimization with short windows"
+        answer: |
+          I would use **batch optimization** — accumulate requests over a short window (2-5 seconds) and solve a global assignment problem.
+
+          **How it works:** Every 2-5 seconds, collect all unmatched riders and all available drivers in a region. Formulate a bipartite matching problem: minimize total cost (weighted combination of wait time, ETA, fairness score) subject to constraints. Solve using the Hungarian algorithm or auction-based solvers.
+
+          **Why batch?**
+          - **Global optimality**: Considers all riders and drivers simultaneously, avoiding the "greedy regret" where assigning Driver X to Rider A prevents a better global assignment. Uber's internal studies showed batch matching reduces aggregate wait times by 8-12% in dense markets and improves driver utilization by 5-7%.
+          - **Fairness integration**: The optimization objective can directly include driver earnings equity as a constraint. For example: "no driver should go more than 20 minutes without a trip offer if riders are available within 5 km."
+          - **Pooling support**: Batch naturally handles ride pooling — the solver can evaluate grouping Rider A and Rider B into the same vehicle if their routes overlap by more than 60%.
+
+          **Implementation at scale:**
+          - Partition the city into hexagonal cells (Uber uses H3 geospatial indexing at resolution 7, roughly 5 km2 each). Run independent batch solvers per cell with boundary overlap handling.
+          - Batch window of 2-3 seconds balances optimality gains against rider-perceived latency. Riders see "Finding your driver..." animation during this window.
+          - Solver must complete in under 1 second for batches of up to 500 rider-driver pairs. The Hungarian algorithm is O(n3) — for 500 pairs, this is feasible on modern hardware.
+
+          **The trade-off** is added complexity. The solver infrastructure requires careful engineering — timeouts, fallback to greedy if solver fails, and geographic partitioning to keep problem sizes tractable. In sparse markets (rural areas with 2-3 drivers), batch provides no benefit and adds unnecessary latency.
+        next: met_batch
+
+  # ======================================================================
+  # STAGE 2: METRICS (2 nodes, diverge then converge)
+  # met_greedy -> data_pipeline (CONVERGE)
+  # met_batch -> data_pipeline (CONVERGE)
+  # ======================================================================
+
+  - id: met_greedy
+    stage: metrics
+    type: info
+    label: "Metrics for Greedy Matching"
+    speaker: candidate
+    content: |
+      For a greedy matching system, I would define metrics that capture both immediate match quality and longer-term marketplace health.
+
+      **Primary online metrics (real-time dashboards):**
+      - **P50/P90 rider wait time**: Median and 90th-percentile time from request to driver arrival. Target: P50 < 4 min, P90 < 8 min. This is the single most important rider experience metric.
+      - **Match rate**: Percentage of ride requests that result in a successful match within 60 seconds. Target > 95%. Unmatched requests directly cause rider churn.
+      - **Driver utilization rate**: Percentage of online driver-hours spent on active trips (vs idle/deadheading). Target > 65%. Below 50% means driver earnings suffer and they switch to competitors.
+
+      **Fairness and retention metrics (daily/weekly):**
+      - **Driver earnings Gini coefficient**: Measures inequality in hourly earnings across drivers. Target Gini < 0.35 (moderate inequality). Current greedy system produces Gini around 0.42.
+      - **Driver churn rate**: 30-day driver retention. Each 1% improvement in retention saves approximately $50M annually in recruitment and onboarding costs.
+      - **Rider NPS by wait-time bucket**: Net Promoter Score segmented by actual wait time. Rides with wait > 8 min have NPS 40 points lower than rides with wait < 3 min.
+
+      **ML model metrics (offline evaluation):**
+      - **ETA prediction MAPE**: Mean Absolute Percentage Error for predicted pickup time. Target < 15%. Inaccurate ETAs erode trust even when matching is fast.
+      - **Score model NDCG@5**: How well does the scoring model rank the truly best driver in the top 5 candidates? Evaluated using historical trip satisfaction as ground truth.
+
+      **Guardrail metrics:**
+      - Cancellation rate after match (driver or rider cancels). Target < 8%. High cancellation means the match quality is poor despite being fast.
+      - Average deadhead distance (how far the driver travels empty to reach the rider). Lower is better for driver economics and city congestion.
+    dialogue:
+      - speaker: interviewer
+        text: "Good choice on greedy matching. What metrics would you use to evaluate the system?"
+      - speaker: candidate
+        text: "I would organize metrics into three tiers. Primary online metrics — wait time and match rate — for real-time health. Fairness metrics — driver earnings Gini and churn — for marketplace balance. And ML model metrics — ETA accuracy and ranking quality — for model iteration."
+      - speaker: interviewer
+        text: "The Gini coefficient for driver earnings is interesting. What is an acceptable level of inequality?"
+      - speaker: candidate
+        text: "Some inequality is natural — drivers who work peak hours and high-demand areas will earn more. A Gini of 0.25-0.35 reflects merit-based differences. Above 0.40 indicates the system is systematically disadvantaging some drivers, which drives churn. The current greedy system sits around 0.42, so there is room to improve."
+      - speaker: interviewer
+        text: "Makes sense. Let us move on to the data pipeline."
+    next: data_pipeline
+
+  - id: met_batch
+    stage: metrics
+    type: info
+    label: "Metrics for Batch Matching"
+    speaker: candidate
+    content: |
+      For a batch optimization system, the metrics must capture both the quality of the global assignment and the additional latency cost of batching.
+
+      **Primary optimization metrics (per batch cycle):**
+      - **Total assignment cost**: The objective value from the batch solver — weighted sum of all matched pair costs (ETA + fairness penalty + preference mismatch). Lower is better. Track P50 and P99 across batch cycles.
+      - **Batch solve time**: Wall-clock time for the solver to produce assignments. Target P99 < 800ms for batches up to 500 pairs. If the solver exceeds 1.5 seconds, fall back to greedy for that cycle.
+      - **Match completeness**: Percentage of riders in the batch that receive a match (vs deferred to next batch). Target > 90%. Riders deferred more than 2 consecutive batches should be force-matched greedily.
+
+      **Rider experience metrics (same as greedy, but adjusted for batch delay):**
+      - **P50/P90 rider wait time**: Now includes the batch window (2-5 seconds of "Finding your driver..." time). Even with batching delay, the total wait should be lower because of better assignments. Target: P50 < 3.5 min (better than greedy's 4 min due to optimization).
+      - **Wait time variance**: Batch should reduce variance (more consistent experience). Track coefficient of variation across rides.
+
+      **Marketplace health (daily):**
+      - **Driver earnings Gini coefficient**: Batch optimization can directly optimize for fairness. Target Gini < 0.30 (lower than greedy's 0.42 because fairness is baked into the objective).
+      - **Pooling match rate**: For ride-pool requests, what percentage successfully match with a compatible co-rider? Target > 40% in dense markets. Batch is critical for pooling — greedy cannot evaluate multi-rider combinations.
+      - **Cross-zone matching rate**: How often does the batch solver assign a driver from an adjacent zone because it produces a globally better outcome? Track this to ensure geographic fairness.
+
+      **System reliability metrics:**
+      - Solver timeout rate (target < 0.1%), fallback-to-greedy rate, assignment rejection rate (driver declines the batch assignment).
+    dialogue:
+      - speaker: interviewer
+        text: "For batch optimization, the metrics need to justify the added complexity. How would you measure whether batching is actually better than greedy?"
+      - speaker: candidate
+        text: "The key comparison is total rider wait time including the batch window. Batching adds 2-5 seconds of solver time, but if the resulting assignment reduces ETA by 30-60 seconds on average, it is a net win. I would A/B test greedy versus batch in matched markets."
+      - speaker: interviewer
+        text: "What about the solver itself? How do you ensure it does not become a bottleneck?"
+      - speaker: candidate
+        text: "Solver health is critical. I would track P99 solve time and set a hard timeout at 1.5 seconds with automatic fallback to greedy. If the timeout rate exceeds 0.1% it means the batch size is too large and we need finer geographic partitioning."
+      - speaker: interviewer
+        text: "Good reliability thinking. Let us discuss the data pipeline."
+    next: data_pipeline
+
+  # ======================================================================
+  # STAGE 3: DATA (2 nodes)
+  # data_pipeline (CONVERGENCE) -> data_quality (question) -> ...
+  # ======================================================================
+
+  - id: data_pipeline
+    stage: data
+    type: info
+    label: "Data Pipeline Architecture"
+    speaker: interviewer
+    content: |
+      Regardless of greedy vs batch, the matching system requires a rich data pipeline that feeds both real-time matching decisions and offline model training.
+
+      **Real-time data streams (sub-second freshness):**
+
+      | Source | Update Frequency | Volume | Purpose |
+      |--------|-----------------|--------|---------|
+      | Driver location pings | Every 4 seconds | 3.2M drivers x 15/min = 48M pings/min | Candidate retrieval, ETA computation |
+      | Ride requests | Event-driven | ~230K/min at peak | Matching input |
+      | Traffic/road graph | Every 5 minutes | City-level segments | ETA prediction, routing |
+      | Driver status changes | Event-driven | Online/offline, trip start/end | Available supply computation |
+      | Surge pricing signals | Every 2 minutes | Per H3 cell | Demand-supply ratio features |
+
+      **Offline training data (daily batch):**
+      - Completed trip records: 20M trips/day with full lifecycle (request time, match time, pickup time, dropoff time, route, fare, ratings)
+      - Driver session logs: shift start/end, earnings, idle time, acceptance rates
+      - Historical demand patterns: rides per H3 cell per hour, day of week, holidays
+      - Cancellation and no-show records with reason codes
+
+      **Geospatial indexing:**
+      - Uber's H3 hexagonal grid (resolution 7 = ~5.16 km2 per cell) for spatial partitioning
+      - Redis-backed geospatial index for nearest-driver queries: `GEOSEARCH drivers FROMLONLAT -73.985 40.748 BYRADIUS 3000 m`
+      - Updated every 4 seconds as driver pings arrive
+
+      **Feature store architecture:**
+      - Online store (Redis/DynamoDB, <5ms reads): driver current location, trip count today, earnings today, acceptance rate last hour
+      - Offline store (Parquet on S3): historical aggregates, seasonal patterns, driver-route affinity scores
+
+      Now let us discuss the most critical data challenge.
+    dialogue:
+      - speaker: interviewer
+        text: "The data pipeline for ride matching is intense — 48 million location pings per minute at peak. How would you architect this?"
+      - speaker: candidate
+        text: "I would separate real-time and offline paths. Real-time pings flow through Kafka into a geospatial index — likely Redis with GEOSEARCH commands — updated every 4 seconds. Offline, completed trip records go to S3 in Parquet format for daily model training."
+      - speaker: interviewer
+        text: "What about the feature store? Matching needs both real-time features and historical aggregates."
+      - speaker: candidate
+        text: "Dual-layer feature store. Online layer in Redis for sub-5ms reads — driver current position, today's trip count, recent acceptance rate. Offline layer in Parquet for historical aggregates computed daily — driver-route affinity, seasonal demand patterns, long-term rating trends."
+      - speaker: interviewer
+        text: "Good architecture. What is the biggest data challenge you anticipate?"
+    next: data_quality
+
+  - id: data_quality
+    stage: data
+    type: question
+    label: "Data Quality Challenge"
+    speaker: interviewer
+    content: |
+      Real-time location data at this scale is notoriously noisy. GPS accuracy in urban canyons (Manhattan, downtown SF) can drift by 50-200 meters, and driver pings sometimes arrive out of order or not at all. How would you handle this?
+    dialogue:
+      - speaker: interviewer
+        text: "GPS data in cities is notoriously noisy. In Manhattan's urban canyons, GPS can drift 50-200 meters. Driver pings arrive out of order or go missing. How do you handle this?"
+      - speaker: candidate
+        text: "This is a critical issue because matching quality depends on accurate location. A 200-meter GPS error can mean the difference between a 2-minute and a 7-minute pickup. I see two approaches."
+      - speaker: interviewer
+        text: "Go ahead — what are the options?"
+    choices:
+      - label: "Map-matching with Kalman filtering"
+        answer: |
+          I would implement **map-matching with Kalman filtering** to produce clean, road-snapped driver positions.
+
+          **Kalman filter pipeline:**
+          1. Raw GPS pings arrive every 4 seconds with lat/lon, accuracy estimate, speed, and bearing
+          2. Kalman filter maintains a state estimate (position + velocity) and updates with each ping, weighting by reported accuracy. High-accuracy pings (5m) get more weight than low-accuracy pings (100m).
+          3. Outlier detection: if a new ping implies the driver moved at >200 km/h, reject it and propagate the previous state estimate forward
+          4. Map-matching: snap the filtered position to the nearest road segment using Valhalla or OSRM. This resolves urban canyon drift — a driver on 5th Avenue will not appear to be on Madison Avenue one block east.
+
+          **Why this approach?**
+          - Road-snapped positions give accurate ETAs — the routing engine knows which road the driver is actually on
+          - Smooth trajectories enable velocity estimation, which improves very-short-term position prediction ("where will this driver be in 30 seconds?")
+          - Uber's engineering blog reported that map-matching reduced ETA error by 25% in dense urban areas
+
+          **Trade-off:** Adds 10-20ms of processing latency per ping. At 48M pings/min, this requires dedicated stream processing infrastructure (Flink or Kafka Streams). But the accuracy improvement is well worth the compute cost — better positions mean better matching decisions, which mean shorter wait times.
+
+          **Handling missing pings:** If a driver's last ping is >15 seconds old, mark their position as "stale" and reduce their matching priority. If >60 seconds, temporarily remove them from the candidate pool until a fresh ping arrives.
+        next: feat_question
+      - label: "Probabilistic location with confidence radii"
+        answer: |
+          I would use a **probabilistic location model** that represents each driver's position as a distribution rather than a point.
+
+          **How it works:**
+          - Each driver's location is modeled as a 2D Gaussian centered on the last known position, with covariance derived from GPS accuracy, time since last ping, and road network topology
+          - Confidence radius expands over time: immediately after a ping, radius is ~20m. After 10 seconds without a ping, radius grows to ~100m based on the driver's recent speed and heading.
+          - Multiple hypothesis tracking: in ambiguous areas (highway next to surface street), maintain 2-3 hypotheses about which road segment the driver is on, weighted by probability
+
+          **Integration with matching:**
+          - Instead of computing a single ETA from driver to rider, compute an **expected ETA distribution**: E[ETA] and Var[ETA]
+          - The matching scorer uses both: a driver with E[ETA]=3min, Var=0.5min is preferable to one with E[ETA]=2.8min, Var=4min (high uncertainty means unreliable)
+          - Risk-averse matching: penalize high-variance positions to avoid assigning riders to drivers whose location is uncertain
+
+          **Why probabilistic?**
+          - Naturally handles GPS noise without hard-coded outlier thresholds
+          - Gracefully degrades with missing pings (uncertainty grows rather than stale data being used as-is)
+          - Provides the matching system with calibrated uncertainty — critical for batch optimization where the solver can trade off expected cost against risk
+          - DiDi published results showing probabilistic positioning improved match quality by 6% in areas with poor GPS coverage
+
+          **Trade-off:** More complex to implement and harder to debug ("why was this driver not matched?" requires understanding probability distributions). Also requires more compute per matching decision since we are doing Monte Carlo or analytical integration over position uncertainty.
+        next: feat_question
+
+  # ======================================================================
+  # STAGE 4: FEATURES (1 question node)
+  # feat_question (CONVERGENCE) -> (feat_geo | feat_behavioral) -> mod_question (CONVERGE)
+  # ======================================================================
+
+  - id: feat_question
+    stage: features
+    type: question
+    label: "Feature Engineering Priority"
+    speaker: interviewer
+    content: |
+      Feature engineering is where we encode domain knowledge into the matching model. With dozens of possible signals, which feature category would you prioritize for the greatest matching quality improvement?
+    dialogue:
+      - speaker: interviewer
+        text: "We have many possible features — geospatial, temporal, behavioral, contextual. Which category would you invest in first for the biggest matching quality improvement?"
+      - speaker: candidate
+        text: "The features need to serve the scoring model that ranks driver candidates for each rider. I would prioritize based on predictive power for the core outcome: successful, fast, satisfying trips."
+      - speaker: interviewer
+        text: "What is your top priority and why?"
+    choices:
+      - label: "Geospatial and ETA features"
+        answer: |
+          I would prioritize **geospatial and ETA prediction features** — they are the single strongest predictor of match quality and rider satisfaction.
+
+          **Core ETA features:**
+          - **Predicted pickup ETA**: Not just straight-line distance, but routed ETA accounting for current traffic, road closures, and one-way streets. Computed via routing engine (OSRM or Valhalla) with real-time traffic overlay from driver GPS traces.
+          - **ETA confidence interval**: P10/P50/P90 ETA estimates. A predicted 3-minute ETA with high variance (could be 1-8 min) is worse than a reliable 4-minute ETA.
+          - **Detour ratio**: (routed distance) / (straight-line distance). High ratios indicate the driver looks close on a map but is actually far via roads (river crossings, highway on-ramps). Riders are especially frustrated when the app shows a driver "1 minute away" but the actual route takes 5 minutes.
+
+          **Spatial demand-supply features:**
+          - **H3 cell supply density**: Number of available drivers in the rider's H3 cell and adjacent cells. Low supply = be less selective, match quickly before drivers are taken.
+          - **Demand velocity**: Rate of incoming requests per cell over the last 5 minutes. Rising demand signals we should match faster and possibly dispatch slightly farther drivers before supply is exhausted.
+          - **Pickup hotspot proximity**: Is the rider at an airport, stadium, train station, or office district? These locations have specific pickup logistics (designated pickup zones, curbside rules) that affect actual wait time beyond ETA.
+
+          **Driver heading and momentum features:**
+          - **Driver heading alignment**: Is the driver already moving toward the rider? A driver 2 km away heading toward you is better than one 1.5 km away heading away.
+          - **Traffic direction**: Will the driver be fighting traffic (upstream in rush hour) or flowing with it? This can make a 1 km pickup take 2 minutes or 10 minutes.
+
+          These features capture the physical reality of urban transportation. In my experience, ETA prediction quality has 3-4x more impact on match satisfaction than any behavioral feature.
+        next: mod_question
+      - label: "Behavioral and preference features"
+        answer: |
+          I would prioritize **behavioral and preference features** — they capture the human factors that determine whether a technically feasible match actually results in a satisfying trip.
+
+          **Driver behavior features:**
+          - **Acceptance rate (last 1h, 7d, 30d)**: Drivers with recent low acceptance rates are likely to reject the match, wasting time for everyone. A driver with a 60% acceptance rate should be scored lower than one at 95%, even if the 60% driver is closer.
+          - **Cancellation propensity**: Historical cancel-after-accept rate. Some drivers accept to "hold" riders while finishing current tasks. This is a strong negative signal.
+          - **Route familiarity score**: Has this driver completed trips in this area before? Drivers familiar with neighborhood street patterns, building entrances, and parking situations complete pickups faster. Computed from historical trip origins within 500m radius.
+          - **Shift fatigue indicator**: Hours into current driving session, trips completed today. Uber data shows cancellation rates increase 40% after 8 hours of driving. Fatigued drivers provide worse service.
+
+          **Rider preference features:**
+          - **Implicit vehicle preference**: Does this rider historically rate trips higher in SUVs vs sedans? If so, matching them with an SUV driver improves satisfaction even if the wait is 1 minute longer.
+          - **Conversation preference**: Some riders prefer quiet rides, others chat. NLP analysis of past trip reviews can surface this. Matching quiet riders with chatty drivers (or vice versa) reduces ratings by 0.2 stars on average.
+          - **Rider patience profile**: Some riders are fine waiting 6 minutes; others start anxious at 3 minutes. Derived from historical cancellation patterns. Impatient riders should get faster (even if suboptimal) matches.
+
+          **Cross-entity affinity features:**
+          - **Driver-rider historical match score**: If this specific pair has been matched before, what was the outcome? Repeat positive matches are valuable — riders feel safer with familiar drivers.
+          - **Rating compatibility**: Riders who consistently rate 4-5 stars are less discriminating; riders who average 3.5 stars need higher-quality matches to avoid complaints.
+
+          These features prevent technically optimal but practically poor matches. A 2-minute ETA is useless if the driver has a 40% chance of canceling.
+        next: mod_question
+
+  # ======================================================================
+  # STAGE 5: MODEL (1 question node)
+  # mod_question (CONVERGENCE) -> (mod_scoring | mod_rl) -> train_strategy (CONVERGE)
+  # ======================================================================
+
+  - id: mod_question
+    stage: model
+    type: question
+    label: "Model Architecture"
+    speaker: interviewer
+    content: |
+      Now let us choose the model architecture for the matching system. The model needs to score driver-rider pairs and must operate under strict latency constraints — scoring 50-200 candidates per request in under 50ms.
+
+      What modeling approach would you use?
+    dialogue:
+      - speaker: interviewer
+        text: "Time for the model architecture. We need to score 50-200 driver candidates per ride request in under 50ms. What approach would you take?"
+      - speaker: candidate
+        text: "The latency constraint is the key design driver. We need something that can evaluate hundreds of candidates almost instantaneously while still capturing complex feature interactions."
+      - speaker: interviewer
+        text: "What is your recommendation?"
+    choices:
+      - label: "Pointwise scoring with LightGBM"
+        answer: |
+          I would use a **pointwise LightGBM scoring model** that predicts a match quality score for each driver-rider pair.
+
+          **Architecture:**
+          - **Input**: Feature vector for each (rider, driver) pair — roughly 60-80 features covering ETA, driver state, behavioral signals, and contextual features
+          - **Output**: Single scalar score representing predicted match quality, trained on historical trip satisfaction (composite of: rider rating, driver rating, actual vs predicted ETA accuracy, cancellation, tip)
+          - **Inference**: Score all candidates in parallel, rank by score, assign top-scoring driver
+
+          **Why LightGBM?**
+          - **Latency**: A 500-tree LightGBM model scores a single pair in ~0.05ms. For 200 candidates, total inference is ~10ms — well within the 50ms budget.
+          - **Feature handling**: Natively handles missing values (critical when some features are unavailable for new drivers), categorical features (airport IDs, vehicle types), and learns non-linear interactions (ETA matters more when supply is low).
+          - **Interpretability**: SHAP values explain each match decision. When a driver complains "why did I not get that trip?", we can show: "Driver B scored higher because: lower ETA (+0.3), higher acceptance rate (+0.2), familiar with pickup area (+0.1)."
+
+          **Multi-objective scoring:**
+          The score combines multiple objectives: `score = w1*ETA_score + w2*quality_score + w3*fairness_score + w4*earnings_equity_score`. Weights are tuned via grid search on holdout data, with fairness weight increased when the Gini coefficient exceeds the target threshold.
+
+          **Two-stage retrieval + ranking:**
+          1. **Retrieval** (geospatial filter): Query Redis for drivers within radius, returns ~200 candidates in <5ms
+          2. **Ranking** (LightGBM): Score all candidates, return top-1 (greedy) or top-K for batch solver input
+
+          This is the approach Lyft described in their 2019 engineering blog — simple, fast, interpretable, and effective.
+        next: train_strategy
+      - label: "Reinforcement learning for sequential matching"
+        answer: |
+          I would use **reinforcement learning (RL)** to make matching decisions that optimize long-term marketplace outcomes, not just immediate match quality.
+
+          **Why RL?**
+          The key insight is that matching is a **sequential decision problem**. Assigning Driver X to Rider A right now affects which drivers are available for Rider B in 30 seconds. A greedy scorer optimizes each match independently, but RL can learn to "save" a well-positioned driver for an upcoming high-value request. DiDi reported that RL-based dispatching improved total driver income by 5% and reduced overall wait times by 3% compared to myopic scoring.
+
+          **Architecture — Contextual bandit with value function:**
+          - **State**: Current supply-demand snapshot: driver positions, pending requests, demand forecasts for next 10 minutes, surge levels per zone
+          - **Action**: For each unmatched rider, which available driver to assign (or "wait" — defer matching by one batch cycle)
+          - **Reward**: Composite reward combining: -rider_wait_time (primary), +driver_earnings_fairness, -deadhead_distance, +rider_satisfaction_prediction
+          - **Value function**: Neural network that estimates expected cumulative reward from current state. Architecture: embed H3 cells, driver features, and demand forecast into a shared representation, output per-action Q-values.
+
+          **Practical implementation:**
+          - Start with a **contextual bandit** (one-step RL, no sequential state transitions) — this is much simpler to train and debug than full RL while still capturing supply-demand context
+          - The bandit model takes (rider_features, driver_features, marketplace_state) and outputs match quality + strategic value
+          - "Strategic value" captures things like: "this driver is near an area where demand is predicted to spike in 10 minutes — do not send them 3 km away for a short trip"
+          - Train using off-policy evaluation (doubly robust estimator) on historical matching logs
+
+          **Trade-off:** RL is significantly harder to train, debug, and ensure safety. Bad exploration can cause terrible matches. Mitigation: constrain RL to only re-rank candidates that the baseline scorer already deemed acceptable (a "refinement" layer), and impose safety guardrails (no match can have ETA > 2x the nearest candidate's ETA).
+        next: train_strategy
+
+  # ======================================================================
+  # STAGE 6: TRAINING (1 node)
+  # train_strategy (CONVERGENCE) -> deploy_question
+  # ======================================================================
+
+  - id: train_strategy
+    stage: training
+    type: info
+    label: "Training Strategy"
+    speaker: candidate
+    content: |
+      For training, the key challenges are: massive data volume (20M trips/day), non-stationarity (demand patterns shift weekly), and the need for counterfactual evaluation (we only observe outcomes for matches we actually made).
+
+      **Training data construction:**
+      - **Positive examples**: Completed trips with their outcomes (wait time, ratings, cancellations, tip). Label = composite satisfaction score normalized to [0, 1].
+      - **Negative examples**: We need counterfactual negatives — "what would have happened if we had matched this rider with a different driver?" Construct by pairing each rider with 5-10 drivers who were available but not matched, using their features at request time. Approximate labels using ETA + historical driver quality for that area.
+      - **Sample size**: Use 30 days of trip data for training (~600M trips), 7 days for validation, 7 days for test. All splits are temporal — no future data leakage.
+
+      **Counterfactual evaluation (critical for offline iteration):**
+      - We cannot A/B test every model change in production (too risky with 20M daily rides). Instead, use **inverse propensity scoring (IPS)** to estimate how a new model would have performed on historical data.
+      - For each historical match, compute: "would the new model have made the same assignment?" If not, reweight the outcome by the propensity ratio.
+      - Complement with **replay-based evaluation**: replay historical request streams through the new matching logic, simulate outcomes using learned ETA and satisfaction models.
+
+      **Retraining cadence:**
+      - Daily incremental training: add latest day's data, fine-tune last 50 trees (LightGBM) or last layer (NN)
+      - Weekly full retrain: retrain from scratch on last 30 days
+      - Automated quality gates: new model must improve primary metric by >0.5% on validation set AND pass all guardrail checks (no metric degrades >2%) before promotion
+
+      **Geographic model strategy:**
+      - Global base model trained on all cities (learns universal patterns: ETA matters, high acceptance rate is good)
+      - Per-city fine-tuning for top 50 cities (learns local patterns: NYC has very different matching dynamics than suburban Phoenix)
+      - New cities start with global model and accumulate local data for fine-tuning after 10,000 trips
+    dialogue:
+      - speaker: interviewer
+        text: "Training on 20 million trips per day is a scale challenge. How would you construct training data and evaluate models offline?"
+      - speaker: candidate
+        text: "The biggest challenge is counterfactual evaluation — we only see outcomes for matches we actually made. I would use inverse propensity scoring and replay-based simulation to estimate how a new model would perform before deploying it."
+      - speaker: interviewer
+        text: "How do you handle the geographic diversity? Matching in Manhattan is very different from matching in suburban Phoenix."
+      - speaker: candidate
+        text: "Global base model plus per-city fine-tuning. The global model learns universal patterns — ETA matters, acceptance rate is predictive. City-specific models capture local nuances like NYC's one-way street grid or LA's highway-dependent routing. New cities start with the global model and fine-tune after accumulating 10,000 local trips."
+      - speaker: interviewer
+        text: "Good approach. The global-then-local strategy handles cold start for new cities. Let us move to deployment."
+    next: deploy_question
+
+  # ======================================================================
+  # STAGE 7: DEPLOYMENT (1 question node)
+  # deploy_question -> (deploy_central | deploy_edge) -> mon_strategy (CONVERGE)
+  # ======================================================================
+
+  - id: deploy_question
+    stage: deployment
+    type: question
+    label: "Deployment Architecture"
+    speaker: interviewer
+    content: |
+      How would you deploy the matching system to handle 230,000+ requests per minute at peak with sub-second end-to-end latency? Think about geographic distribution, fault tolerance, and graceful degradation.
+    dialogue:
+      - speaker: interviewer
+        text: "We need to handle 230K requests per minute at peak with sub-second latency. How would you deploy this?"
+      - speaker: candidate
+        text: "The key question is whether to run matching centrally in a few data centers or distribute the computation closer to where rides happen."
+      - speaker: interviewer
+        text: "Walk me through both options."
+    choices:
+      - label: "Centralized cloud with regional failover"
+        answer: |
+          I would deploy a **centralized matching service** in major cloud regions with active-active failover.
+
+          **Architecture:**
+          ```
+          Rider App -> API Gateway (CloudFront/regional)
+               |
+               v
+          Matching Service (K8s, auto-scaling)
+           |- Candidate Retrieval (Redis Cluster, geo-sharded by city)
+           |- Feature Assembly (Feature Store, <5ms)
+           |- Model Scoring (LightGBM via ONNX Runtime, <10ms)
+           |- Assignment Logic (greedy or batch solver)
+               |
+               v
+          Driver App <- Push notification (FCM/APNs)
+          ```
+
+          **Regional deployment:**
+          - US: us-east-1 (primary), us-west-2 (secondary)
+          - Europe: eu-west-1
+          - Asia: ap-southeast-1
+          - Each region handles its geographic area. Cross-region latency (50-100ms) is too high for matching, so each region is self-contained.
+
+          **Auto-scaling:**
+          - Scale on requests-per-second with 30-second ramp-up. Peak (Friday 6pm) requires 5-8x the pods of trough (Tuesday 3am).
+          - Pre-scale for predictable events: New Year's Eve, Super Bowl, major concerts. Load test shows we need 500+ pods for NYE.
+          - Redis cluster scales horizontally — add shards as cities grow.
+
+          **Fault tolerance:**
+          - If the ML model fails to score (timeout, crash), fall back to **distance-only matching** — always have a simple, reliable fallback.
+          - If Redis (driver index) is unavailable, serve from a read replica with 10-second staleness — slightly degraded matches are better than no matches.
+          - Circuit breaker on the feature store: if >5% of feature lookups fail in a 10-second window, switch to a reduced feature set (ETA + distance only).
+
+          **Why centralized?** Simpler operations, easier to update models (one deployment per region), better resource utilization (workloads across cities share pods), and standard K8s tooling for monitoring and debugging.
+        next: mon_strategy
+      - label: "Edge computing per metro area"
+        answer: |
+          I would deploy **edge matching services co-located with each major metro area** for minimal latency and maximum resilience.
+
+          **Architecture:**
+          - Each of the top 200 metros gets a dedicated matching cluster running in the nearest cloud availability zone or edge location (e.g., AWS Local Zones, Cloudflare Workers)
+          - Cluster contains: local Redis with driver index for that metro, pre-loaded LightGBM model, local feature cache
+          - Smaller cities share regional clusters (e.g., all of Ohio runs on a single us-east cluster)
+
+          **Why edge?**
+          - **Latency**: Matching computation happens 5-15ms from the rider's phone instead of 30-80ms. For real-time matching, this 20-60ms saving is significant — it allows more time for model scoring or batch optimization.
+          - **Resilience**: If the SF edge cluster goes down, only SF rides are affected. Other metros continue operating independently. No single point of failure for global matching.
+          - **Data locality**: Driver GPS pings stay local — no need to stream 48M pings/min to a central location. Each edge cluster only processes pings for its metro area (typically 10K-200K pings/min per cluster).
+
+          **Model deployment pipeline:**
+          - Central training cluster produces new models daily
+          - Models are pushed to all edge clusters via a content delivery network (artifact registry + CDN)
+          - Canary deployment: new model goes to 5% of requests in one metro first, then ramps to 100% city by city over 4 hours
+          - Each edge cluster can independently roll back to the previous model version if local metrics degrade
+
+          **Cross-metro coordination:**
+          - For rides crossing metro boundaries (e.g., SFO airport to San Jose), the origin metro's cluster handles the match
+          - Global aggregation service collects metrics from all edge clusters for centralized dashboards and model training data
+          - Demand forecasting model runs centrally and pushes predictions to edge clusters every 5 minutes
+
+          **Trade-off:** More operational complexity — 200+ clusters to manage instead of 3-4 regional deployments. Requires robust automated deployment, monitoring, and rollback tooling. Infrastructure cost is higher due to less resource sharing. But the latency and resilience benefits justify it for a platform where every 100ms of matching delay translates to rider wait time.
+        next: mon_strategy
+
+  # ======================================================================
+  # STAGE 8: MONITORING (3 nodes)
+  # mon_strategy (CONVERGENCE) -> mon_question -> (mon_marketplace | mon_technical) -> mon_terminal (CONVERGE)
+  # ======================================================================
+
+  - id: mon_strategy
+    stage: monitoring
+    type: info
+    label: "Monitoring Strategy Overview"
+    speaker: interviewer
+    content: |
+      A ride-matching system has unique monitoring challenges because it operates a **two-sided marketplace** — degradation can manifest as rider issues, driver issues, or marketplace imbalance.
+
+      **Why monitoring is especially critical:**
+      - **Feedback loops**: If matching quality degrades, drivers go offline, reducing supply, which further degrades matching quality. A small issue can spiral into a marketplace collapse within minutes.
+      - **Heterogeneous failure modes**: A model bug might only affect specific areas (downtown during rush hour), specific ride types (pooled rides), or specific driver cohorts (new drivers). Global metrics can mask localized disasters.
+      - **Real-time stakes**: Every bad match means a rider waiting, a driver earning nothing, or a cancellation. There is no "batch correction" — the damage is immediate and irreversible for that trip.
+      - **Ground truth is fast**: We know trip outcomes within 30 minutes of the request (was it completed? wait time? rating?). This enables rapid detection.
+
+      **Monitoring dimensions:**
+      1. **Match quality**: Are the matches we make actually good?
+      2. **Marketplace health**: Is the supply-demand equilibrium stable?
+      3. **System reliability**: Is the infrastructure performing within SLOs?
+      4. **Fairness**: Are all driver and rider segments treated equitably?
+
+      What would you focus your monitoring on first?
+    dialogue:
+      - speaker: interviewer
+        text: "Monitoring a two-sided marketplace is tricky. A small matching quality drop can spiral — drivers go offline, supply drops, matching gets worse. How would you detect problems before they spiral?"
+      - speaker: candidate
+        text: "The feedback loop risk is the scariest part. I would set up multi-layered monitoring with very tight alerting windows — for ride matching, we cannot wait hours to detect problems."
+      - speaker: interviewer
+        text: "What monitoring focus would you prioritize?"
+    next: mon_question
+
+  - id: mon_question
+    stage: monitoring
+    type: question
+    label: "Monitoring Focus"
+    speaker: interviewer
+    content: |
+      Given the marketplace dynamics, what is your primary monitoring strategy? Should we focus on marketplace health metrics or technical ML performance metrics?
+    dialogue:
+      - speaker: interviewer
+        text: "What should we monitor most closely — the marketplace dynamics or the ML model performance?"
+      - speaker: candidate
+        text: "Both matter, but they serve different purposes. Marketplace metrics detect business impact; technical metrics help diagnose root causes."
+      - speaker: interviewer
+        text: "Which would you prioritize as the primary monitoring layer?"
+    choices:
+      - label: "Marketplace health monitoring"
+        answer: |
+          I would prioritize **marketplace health monitoring** because it directly measures what matters — are riders getting rides and are drivers earning money?
+
+          **Real-time marketplace dashboard (updated every 60 seconds):**
+          - **Request-to-match rate** per city, segmented by ride type. Alert if any city drops below 90% for 5 consecutive minutes. This is the earliest signal of matching system failure.
+          - **P50/P90 ETA** per H3 cell. Alert on sudden spikes (>50% increase over 15-minute rolling average). Localized ETA spikes indicate supply exhaustion in specific zones.
+          - **Driver online rate**: Percentage of registered drivers currently online. Alert if it drops >10% from same-hour-last-week without a known cause (holiday, weather). Sudden driver offline surges indicate driver-side issues.
+          - **Surge coverage map**: Real-time heatmap of supply-demand ratio per H3 cell. Healthy marketplace has >80% of cells with ratio above 0.8.
+
+          **Marketplace equilibrium alerts (5-minute windows):**
+          - **Cancellation cascade detector**: If cancellation rate exceeds 15% in any 5-minute window in a city, trigger immediate investigation. Cascading cancellations indicate either very poor match quality or a driver-side technical issue.
+          - **Earnings inequality alarm**: If real-time driver earnings Gini exceeds 0.45 for any 30-minute window, the fairness mechanism has failed. May indicate the model is funneling all trips to a subset of drivers.
+          - **Ghost ride detector**: Matches where the driver never moves toward the rider for >3 minutes. Indicates GPS issues, fraud, or a driver who accepted but is not actually driving. Rate above 2% is actionable.
+
+          **Business impact tracking (daily):**
+          - Revenue per available driver-hour (captures both utilization and trip value)
+          - Rider retention cohort analysis: 7-day and 30-day return rates, segmented by first-ride wait time
+          - Competitive switching signals: riders who have both Uber and Lyft apps installed — if our wait time exceeds 5 minutes, they often switch
+
+          This approach catches problems at the business level first, then drills down to root causes using technical metrics.
+        next: mon_terminal
+      - label: "ML model performance monitoring"
+        answer: |
+          I would prioritize **ML model performance monitoring** because catching model degradation early prevents marketplace problems from developing in the first place.
+
+          **Model prediction quality (updated every 15 minutes):**
+          - **ETA prediction error distribution**: Compare predicted pickup ETA vs actual pickup time for completed trips. Track P50, P90, P99 error. Alert if P90 error exceeds 3 minutes (means 10% of riders are getting significantly misleading ETAs).
+          - **Score-outcome correlation**: Does the model's match quality score actually correlate with trip outcomes (rating, cancellation, tip)? Compute Spearman correlation on rolling 24-hour window. Alert if correlation drops below 0.3 (model is no longer predictive).
+          - **Feature drift detection**: PSI (Population Stability Index) for each input feature, computed hourly. Key features to watch: driver supply density (changes with weather/events), traffic speed (construction, accidents), demand patterns (holidays, concerts). PSI > 0.2 triggers investigation.
+
+          **Model serving health (real-time):**
+          - **Scoring latency** P50/P99 per region. Alert if P99 exceeds 30ms (eating into the matching latency budget).
+          - **Feature store miss rate**: Percentage of feature lookups that return default/fallback values. Above 5% means the feature pipeline is degraded, and the model is operating on incomplete information.
+          - **Fallback rate**: How often does matching fall back from ML scoring to distance-only? Target < 0.1%. Spikes indicate infrastructure issues.
+
+          **Counterfactual monitoring (daily):**
+          - **Regret analysis**: For each completed match, compute what the outcome would have been with the second-best candidate. Average "regret" (quality difference between best and assigned) should be low (<0.1 on normalized scale). Rising regret means the model is making suboptimal choices.
+          - **Exploration effectiveness**: If using any exploration (epsilon-greedy, Thompson sampling), track whether explored matches discover better strategies. Exploration that consistently produces worse outcomes should be reduced.
+
+          **A/B test framework:**
+          - Maintain always-on A/B test: 5% of rides use the previous model version as a control. This continuously validates that the current model is actually better.
+          - Market-level holdouts: 2 comparable cities use different model versions, compare marketplace metrics weekly.
+
+          This approach catches model problems before they manifest as marketplace degradation, giving us time to fix issues proactively.
+        next: mon_terminal
+
+  - id: mon_terminal
+    stage: monitoring
+    type: terminal
+    label: "Interview Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You have designed a comprehensive ride-matching system that addresses the core challenges of two-sided marketplace optimization.
+
+      **Summary of your design:**
+      1. **Problem definition**: Framed matching as a real-time scoring/optimization problem with explicit rider wait time and driver fairness objectives
+      2. **Metrics**: Defined multi-dimensional metrics covering rider experience (wait time, match rate), driver health (earnings Gini, utilization), and model quality (ETA accuracy, ranking quality)
+      3. **Data**: Designed a high-throughput pipeline handling 48M GPS pings/minute with geospatial indexing and dual-layer feature store
+      4. **Features**: Prioritized the feature category with highest impact on match quality, with clear justification for the signal-to-engineering-cost trade-off
+      5. **Model**: Selected an architecture balancing scoring quality, latency constraints (50ms budget for 200 candidates), and interpretability
+      6. **Training**: Addressed counterfactual evaluation (we only observe outcomes for matches we made), geographic diversity, and retraining cadence
+      7. **Deployment**: Designed for 230K+ requests/minute with fault tolerance and graceful degradation
+      8. **Monitoring**: Built a monitoring stack that catches problems before the two-sided marketplace enters a death spiral
+
+      **Areas for further exploration:**
+      - How would you handle ride pooling specifically? (Multiple riders, route compatibility, detour tolerance)
+      - What about scheduled rides vs on-demand? Should they use the same matching system?
+      - How do you prevent gaming — drivers who strategically position themselves or manipulate the system?
+      - How would you balance matching quality against driver autonomy (some regions require drivers to accept all dispatches; others let them choose)?
+
+      Great interview — you demonstrated strong understanding of both the ML modeling challenges and the marketplace dynamics that make ride matching uniquely complex.
+    dialogue:
+      - speaker: interviewer
+        text: "Excellent work! You have covered all eight stages of the ML system design for ride matching."
+      - speaker: candidate
+        text: "Thank you. I think the key insight throughout was that ride matching is not just an ML problem — it is a marketplace design problem where model decisions directly affect supply and demand dynamics."
+      - speaker: interviewer
+        text: "Exactly right. The feedback loops between matching quality, driver retention, and rider experience are what make this problem so challenging."
+      - speaker: candidate
+        text: "If I were to prioritize one thing for the first production deployment, it would be the monitoring and alerting system. A bad model rollout in ride matching can cause real-time marketplace damage that takes hours to recover from."
+      - speaker: interviewer
+        text: "That is a mature perspective. Ship with strong monitoring first, then iterate on model quality. Great interview!"

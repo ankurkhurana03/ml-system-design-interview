@@ -1,0 +1,862 @@
+id: document-extraction
+title: "Intelligent Document Processing & OCR"
+description: "Design a system to extract structured data from documents: forms, invoices, receipts, and contracts."
+companies: ["Google", "Amazon", "Intuit"]
+domains: ["Computer Vision", "NLP", "Tabular/Structured"]
+root: pd_start
+
+nodes:
+  # ============ PROBLEM DEFINITION ============
+  - id: pd_start
+    stage: problem_definition
+    type: info
+    label: "Problem Statement"
+    speaker: interviewer
+    content: |
+      Welcome! Today we will design an **Intelligent Document Processing (IDP)** system that extracts structured data from documents -- forms, invoices, receipts, contracts, and identity documents.
+
+      **Business context:**
+      - The global IDP market is projected at **$5.2B by 2026**, growing 30% annually
+      - Amazon Textract processes **billions of pages per year** for AWS customers across insurance, banking, and healthcare
+      - Google Document AI serves over **10,000 enterprise customers** extracting data from invoices, receipts, and lending documents
+      - Intuit processes **~800 million tax documents annually** through TurboTax, automating W-2, 1099, and receipt extraction
+      - Manual data entry costs enterprises **$20-30 per document**; automated extraction reduces this to **$0.01-0.10 per page**
+
+      **Core problem:** Given a document image (scanned PDF, photograph, or digital PDF), extract structured key-value pairs and tables into a machine-readable format:
+      - **Input**: Document image (invoice, receipt, form, contract, ID)
+      - **Output**: Structured JSON with field names, values, confidence scores, and bounding boxes
+
+      **Example** -- Extract from an invoice:
+      ```json
+      {
+        "vendor": {"value": "Acme Corp", "confidence": 0.97, "bbox": [120, 45, 320, 72]},
+        "invoice_number": {"value": "INV-2026-0042", "confidence": 0.99},
+        "total_amount": {"value": "$3,487.50", "confidence": 0.95},
+        "line_items": [
+          {"description": "Widget A", "qty": 100, "unit_price": "$25.00", "total": "$2,500.00"},
+          {"description": "Widget B", "qty": 50, "unit_price": "$19.75", "total": "$987.50"}
+        ]
+      }
+      ```
+
+      **Key challenges:**
+      - **Document diversity**: Invoices alone have thousands of layouts. Every vendor has a different template
+      - **Image quality**: Scanned at 72-600 DPI, photographed at angles, faxed documents with artifacts, crumpled receipts
+      - **Handwriting**: Insurance claim forms, medical records, and bank checks contain handwritten text
+      - **Tables**: Complex nested tables with merged cells, spanning headers, and implicit row/column structure
+      - **Multi-page documents**: Contracts span 20+ pages; data on page 15 may reference definitions on page 2
+      - **Regulatory compliance**: PII handling (SSN, bank accounts), HIPAA for medical documents, SOC 2 for financial data
+
+      Let's start with the core OCR architecture.
+    dialogue:
+      - speaker: interviewer
+        text: "Let's design an intelligent document processing system. What's the biggest technical challenge?"
+      - speaker: candidate
+        text: "The diversity of document layouts. Unlike standardized web forms, real-world documents come in thousands of templates with different structures. A system that works for one vendor's invoices may completely fail on another's."
+      - speaker: interviewer
+        text: "Good. How does that shape your architectural choices?"
+      - speaker: candidate
+        text: "It means we need either a template-based system that adapts to new layouts quickly, or a template-free approach that generalizes across unseen layouts. Each has very different data and modeling requirements."
+      - speaker: interviewer
+        text: "Let's explore the OCR engine choice first."
+    next: pd_ocr
+
+  - id: pd_ocr
+    stage: problem_definition
+    type: question
+    label: "OCR Engine Architecture"
+    speaker: interviewer
+    content: |
+      How would you design the OCR component? The fundamental choice is between a **traditional pipeline** (detection + recognition as separate stages) and an **end-to-end neural approach** that goes directly from image to text with layout understanding.
+    dialogue:
+      - speaker: interviewer
+        text: "What OCR architecture would you use for document extraction?"
+      - speaker: candidate
+        text: "The OCR approach determines everything downstream. Traditional OCR plus layout analysis versus end-to-end multimodal models."
+      - speaker: interviewer
+        text: "Walk me through both options."
+    choices:
+      - label: "Traditional OCR pipeline (detection + recognition + layout)"
+        answer: |
+          I would use a **traditional three-stage pipeline** with specialized models for each step:
+
+          **Architecture:**
+          ```
+          Document Image
+               │
+               ▼
+          1. Pre-processing (~50ms)
+             [Deskew, denoise, binarize, DPI normalization to 300 DPI]
+               │
+               ▼
+          2. Text Detection (~100ms)
+             [CRAFT / DBNet: detect text bounding boxes]
+               │
+               ▼
+          3. Text Recognition (~80ms per region)
+             [CRNN + CTC: recognize text within each box]
+               │
+               ▼
+          4. Layout Analysis (~60ms)
+             [Detect tables, key-value pairs, sections, headers]
+               │
+               ▼
+          5. Post-processing (~30ms)
+             [Spell correction, format validation, confidence scoring]
+               │
+               ▼
+          Structured Output
+          Total: ~400ms per page
+          ```
+
+          **Stage 2 -- Text detection (CRAFT / DBNet):**
+          - **CRAFT** (Character Region Awareness for Text detection): Detects character-level regions and groups them into words/lines. Handles curved text, rotated text, and irregular layouts
+          - **DBNet** (Differentiable Binarization Network): Faster alternative, outputs binary text/non-text mask. 2x faster than CRAFT with comparable accuracy
+          - **Performance**: F1 >0.95 on ICDAR 2019, >0.92 on real-world documents
+
+          **Stage 3 -- Text recognition (CRNN + CTC):**
+          - **Architecture**: CNN feature extractor (ResNet-34) -> Bidirectional LSTM (2 layers, hidden=256) -> CTC loss
+          - **Vocabulary**: 95 printable ASCII characters + 50 common symbols. For multilingual: Unicode subsets per language
+          - **Character accuracy**: >99.2% on printed text, >92% on handwritten text
+          - **Tesseract v5 alternative**: Open-source, LSTM-based, supports 100+ languages. Accuracy ~95-97% on clean printed text
+
+          **Stage 4 -- Layout analysis:**
+          - **LayoutParser** + Detectron2: Detect document regions (title, paragraph, table, figure, header, footer)
+          - **Table detection**: Specialized model (TableNet or CascadeTabNet) to find table boundaries and cell structure
+          - **Key-value pair detection**: Rule-based heuristics (label left of value, label above value) combined with learned spatial relationships
+
+          **Why pipeline?**
+          - **Modularity**: Upgrade text recognition without changing detection. Use Tesseract for English, a specialized model for Arabic/Chinese
+          - **Debuggability**: When extraction fails, you can see: did detection miss the text? Did recognition garble it? Did layout analysis misgroup it?
+          - **Mature tooling**: Tesseract, PaddleOCR, EasyOCR are battle-tested with large communities
+          - Amazon Textract's architecture follows this pipeline pattern with proprietary models at each stage
+
+          **Trade-off**: Error propagation between stages. If text detection misses a cell boundary in a table, recognition processes two cells as one, and layout analysis produces an incorrect table structure. Total pipeline error rate is the product of per-stage error rates. Also, ~400ms per page is too slow for real-time mobile scanning.
+        next: met_metrics
+      - label: "End-to-end neural model (Donut / LayoutLMv3)"
+        answer: |
+          I would use an **end-to-end multimodal model** that jointly understands document images, text, and layout:
+
+          **Architecture: Donut (Document Understanding Transformer)**
+          ```
+          Document Image (3 x 2560 x 1920)
+               │
+               ▼
+          Swin Transformer Encoder (visual features)
+               │
+               ▼
+          Text Decoder (BART-style autoregressive)
+               │
+               ▼
+          Structured JSON output
+          ```
+          No OCR needed -- the model reads directly from pixels.
+
+          **Alternative: LayoutLMv3**
+          ```
+          Document Image → Patch Embeddings ──┐
+          OCR Text → Token Embeddings ──────────┤── Multimodal Transformer (12 layers)
+          Bounding Boxes → Position Embeddings ─┘        │
+                                                          ▼
+                                                  Task-specific heads:
+                                                  ├── Token Classification (entity extraction)
+                                                  ├── Relation Extraction (key-value pairing)
+                                                  └── Document Classification
+          ```
+
+          **Why end-to-end?**
+          - **OCR-free extraction (Donut)**: Eliminates OCR errors entirely. The model learns to "read" directly from image pixels. On the CORD receipt benchmark, Donut achieves **F1 = 0.924** vs. pipeline OCR+extraction at **F1 = 0.891**
+          - **Layout understanding is built-in**: LayoutLMv3 jointly models visual layout, text semantics, and spatial relationships. It understands that a number below "Total" is the total amount, even on unseen invoice layouts
+          - **Cross-modal reasoning**: The model can use visual cues (bold text = field label, right-aligned numbers = amounts, horizontal lines = table separators) that a text-only approach misses
+          - **Template-free generalization**: Pre-trained on 11M document images (IIT-CDIP dataset), these models generalize to unseen document types. LayoutLMv3 achieves **state-of-the-art on 5/5 document understanding benchmarks** (FUNSD, CORD, SROIE, RVL-CDIP, DocVQA)
+
+          **Performance comparison:**
+
+          | Task | Pipeline OCR + Rules | LayoutLMv3 | Donut |
+          |------|---------------------|-----------|-------|
+          | Receipt extraction (CORD) | F1: 89.1% | F1: 95.2% | F1: 92.4% |
+          | Form understanding (FUNSD) | F1: 72.3% | F1: 92.1% | F1: 84.0% |
+          | Invoice extraction (SROIE) | F1: 90.5% | F1: 96.4% | F1: 93.1% |
+          | Document QA (DocVQA) | 67.5% | 83.4% | 74.5% |
+
+          **Implementation:**
+          - **Pre-training**: LayoutLMv3-large (133M params) pre-trained with masked language modeling + masked image modeling + word-patch alignment on 11M documents
+          - **Fine-tuning**: 10K labeled documents per document type (invoice, receipt, form). Takes ~4 hours on 8 A100 GPUs
+          - **Inference**: ~300ms per page on A10 GPU. Comparable to pipeline approach
+
+          **Trade-off**: These models require **GPU for inference** (unlike Tesseract which runs on CPU). At scale, this means $0.01-0.03 per page in compute costs. Also, the autoregressive decoder (Donut) can hallucinate -- producing plausible but incorrect values. Confidence calibration and human-in-the-loop verification are essential for high-stakes documents (tax forms, legal contracts).
+        next: met_metrics
+
+  # ============ METRICS ============
+  - id: met_metrics
+    stage: metrics
+    type: question
+    label: "Evaluation Metrics"
+    speaker: interviewer
+    content: |
+      How would you measure the quality of document extraction? The challenge is that different document types have different accuracy requirements -- a 1% error on a tax form SSN is catastrophic, while a 5% error on a receipt item description is acceptable.
+    dialogue:
+      - speaker: interviewer
+        text: "What metrics would you use to evaluate document extraction quality?"
+      - speaker: candidate
+        text: "We need field-level accuracy metrics that account for the varying criticality of different fields."
+      - speaker: interviewer
+        text: "How do you handle the fact that some errors are much more costly than others?"
+    choices:
+      - label: "Field-level F1 with criticality weighting"
+        answer: |
+          I would use **field-level precision/recall/F1** with **criticality-weighted scoring**:
+
+          **Core extraction metrics:**
+          - **Field-level F1**: For each field type (vendor name, invoice number, total amount, line items), compute precision, recall, and F1 separately
+          - **Exact match rate**: Percentage of fields where extracted value exactly matches ground truth (after normalization). Strictest metric
+          - **Fuzzy match rate**: Allow for minor formatting differences ("$3,487.50" vs. "$3487.50" vs. "3487.5"). Uses normalized edit distance < 0.1 as match threshold
+          - **Table extraction F1**: Cell-level F1 for table content. Both cell location (row, column) and cell content must be correct
+
+          **Criticality tiers and targets:**
+
+          | Tier | Field Types | Target F1 | Error Cost |
+          |------|------------|-----------|------------|
+          | **Critical** | SSN, account numbers, tax amounts, legal terms | >99.5% | Regulatory violation, financial loss |
+          | **High** | Invoice total, vendor name, dates, addresses | >97% | Processing errors, customer complaints |
+          | **Medium** | Line item descriptions, quantities, categories | >93% | Operational inefficiency |
+          | **Low** | Notes, comments, non-essential metadata | >85% | Minor quality degradation |
+
+          **Weighted composite score:**
+          ```
+          IDP_Score = 0.4 * F1_critical + 0.3 * F1_high + 0.2 * F1_medium + 0.1 * F1_low
+          ```
+
+          **Confidence calibration metrics:**
+          - **Expected Calibration Error (ECE)**: Model confidence should match actual accuracy. If model says 95% confidence, 95% of those extractions should be correct. Target ECE < 0.03
+          - **Human-in-the-loop trigger rate**: Percentage of fields routed to human review (confidence < threshold). Target: <15% of fields need human review while maintaining 99.5% accuracy on critical fields
+          - **Automation rate**: Percentage of documents processed fully automatically (no human review needed). Target: >70% for known document types, >40% for new/unseen types
+
+          **Why criticality-weighted?**
+          - Intuit's TurboTax applies exactly this approach: SSN extraction must be 99.9%+ (IRS penalties for errors), while expense category classification can tolerate 10% errors
+          - Flat F1 would over-invest in improving description extraction from 93% to 96% while under-investing in amount extraction from 97% to 99%
+        next: data_collection
+      - label: "End-to-end document accuracy with STP rate"
+        answer: |
+          I would focus on **end-to-end document-level metrics** that measure business impact:
+
+          **Primary metrics:**
+          - **Straight-Through Processing (STP) Rate**: Percentage of documents processed fully automatically with no human intervention and no downstream errors. This is the **north star metric** for IDP. Target: **>75%** for invoices, **>60%** for complex forms, **>85%** for receipts
+          - **Document-level accuracy**: Percentage of documents where ALL extracted fields are correct. Much stricter than field-level F1. A document with 20 fields where 1 is wrong is 0% document accuracy but 95% field-level accuracy
+          - **Processing cost per document**: Fully loaded cost including compute, human review, and error correction. Target: **<$0.50 per document** (vs. $20-30 for manual entry)
+
+          **Human-in-the-loop metrics:**
+          - **Review volume**: Number of documents requiring human review per day. Lower is better but must maintain quality
+          - **Review time per document**: Average time a human reviewer spends correcting extractions. Target: **<30 seconds** (vs. 3-5 minutes for manual entry)
+          - **Review rejection rate**: Percentage of auto-extracted documents that human reviewers send back for re-processing. Target: **<5%**
+
+          **Business impact metrics:**
+          - **Processing throughput**: Documents per hour per worker (human + machine combined). IDP should achieve **>200 documents/hour** vs. **15-25 for manual processing**
+          - **Time-to-extraction**: From document receipt to structured data availability. Target: **<5 minutes** for real-time, **<1 hour** for batch
+          - **Downstream error rate**: Errors that propagate to accounting systems, payment processing, or tax filing. Target: **<0.1%** for financial documents
+
+          **A/B testing framework:**
+          - Compare new extraction model vs. baseline on matched document samples
+          - Measure STP rate improvement while holding review cost constant
+          - Minimum sample size: 5000 documents per variant (account for document-type diversity)
+
+          **Why STP-focused?**
+          - Enterprises care about **cost reduction**, not abstract F1 scores. A model that achieves 96% field F1 but requires 40% human review is worse than a model with 93% field F1 but well-calibrated confidence that only needs 15% review
+          - Google Document AI pricing is based on pages processed. Their customers optimize for STP rate because it directly determines ROI
+          - Amazon Textract's enterprise customers report that **STP rate is the #1 metric** driving adoption decisions
+        next: data_collection
+
+  # ============ DATA ============
+  - id: data_collection
+    stage: data
+    type: info
+    label: "Training Data & Annotation"
+    speaker: interviewer
+    content: |
+      Let's discuss the data pipeline. Document extraction requires carefully annotated training data with both visual and textual labels.
+
+      **Data sources and volumes:**
+
+      | Source | Volume | Use Case |
+      |--------|--------|----------|
+      | **Public datasets** | CORD (11K receipts), FUNSD (199 forms), SROIE (1000 receipts), IIT-CDIP (11M pages) | Pre-training, benchmarking |
+      | **Synthetic documents** | 500K-1M generated documents | Training data augmentation |
+      | **Customer-provided samples** | 1K-10K per document type | Fine-tuning for specific use cases |
+      | **Production feedback** | Human-corrected extractions (~100K/month) | Continuous improvement |
+
+      **Annotation pipeline:**
+      - **Level 1 -- Text bounding boxes**: Draw boxes around every text region. Cost: ~$0.02/box. Tools: Label Studio, Prodigy, CVAT
+      - **Level 2 -- Field labeling**: Label each text region with its field type (vendor_name, amount, date, etc.). Cost: ~$0.05/field. Requires domain knowledge
+      - **Level 3 -- Table structure**: Annotate table rows, columns, cell boundaries, and header spans. Cost: ~$0.20/table. Most complex annotation task
+      - **Level 4 -- Relationship annotation**: Link field labels to their values (e.g., "Invoice Number:" links to "INV-2026-0042"). Cost: ~$0.03/relationship
+
+      **Annotation quality control:**
+      - Dual annotation with adjudication: Each document annotated by 2 annotators, disagreements resolved by a senior annotator
+      - Annotation agreement target: Cohen's kappa >0.85 for field labeling, >0.80 for table structure
+      - Regular calibration sessions: Annotators review and discuss edge cases weekly
+
+      **Synthetic document generation:**
+      - **Template-based**: Define 50-100 invoice/receipt templates with variable fields. Fill with realistic data from faker libraries
+      - **Style transfer**: Apply different fonts, colors, backgrounds, and noise to synthetic documents to match real-world diversity
+      - **Augmentation**:
+        - Rotation (+/-5 degrees), perspective warp, shadow overlay
+        - JPEG compression artifacts (quality 30-90)
+        - Gaussian noise, salt-and-pepper noise, blur
+        - Brightness/contrast variation
+        - Partial occlusion (simulating folds, staple marks, coffee stains)
+      - Google Document AI reports that synthetic data augmentation improves extraction F1 by **3-5%** for rare document types
+
+      **Data challenges:**
+      - **PII handling**: Documents contain SSN, bank accounts, addresses. Annotators work in secure environments. Training data is pseudonymized (replace real PII with synthetic equivalents). Comply with SOC 2, HIPAA, GDPR
+      - **Long-tail document types**: The first 10 document types (invoices, receipts, W-2) cover 60% of volume. The next 100 types cover 30%. The remaining 10% is thousands of rare formats -- this is where template-free models shine
+      - **Multi-language documents**: International invoices mix languages (header in German, line items in English). Need multilingual annotation guidelines
+    dialogue:
+      - speaker: interviewer
+        text: "What training data does an IDP system need?"
+      - speaker: candidate
+        text: "Four levels of annotation: text bounding boxes, field type labels, table structure, and label-value relationships. Public datasets for pre-training, synthetic data for augmentation, and customer samples for fine-tuning."
+      - speaker: interviewer
+        text: "How do you handle PII in training data?"
+      - speaker: candidate
+        text: "Pseudonymization -- replace real PII with synthetic equivalents while preserving document structure. Annotators work in SOC 2 compliant secure environments. Models should never memorize specific personal data."
+      - speaker: interviewer
+        text: "Good. Let's discuss features."
+    next: feat_extraction
+
+  # ============ FEATURES ============
+  - id: feat_extraction
+    stage: features
+    type: question
+    label: "Feature Engineering"
+    speaker: interviewer
+    content: |
+      What features would you use for the extraction model? Document understanding requires both **visual features** (layout, fonts, colors) and **textual features** (word semantics, patterns).
+    dialogue:
+      - speaker: interviewer
+        text: "What features matter for understanding document structure?"
+      - speaker: candidate
+        text: "The key insight is that layout is as important as content. The word 'Total' means different things depending on where it appears on the page."
+      - speaker: interviewer
+        text: "How do you encode layout information?"
+    choices:
+      - label: "2D positional embeddings + visual features (LayoutLM-style)"
+        answer: |
+          I would use **2D positional embeddings** that jointly encode text semantics and spatial layout, following the LayoutLM paradigm:
+
+          **Feature representation per token:**
+          ```
+          Token embedding (768-dim, from BERT/RoBERTa)
+          + X-position embedding (left, right normalized to [0, 1000])
+          + Y-position embedding (top, bottom normalized to [0, 1000])
+          + Width embedding (box width)
+          + Height embedding (box height)
+          + Visual patch embedding (CNN features from the image region)
+          ```
+
+          **2D positional embeddings (the key innovation):**
+          - Standard BERT uses 1D position (word 1, word 2, ...). Documents are 2D -- spatial relationships matter
+          - **X-axis position**: Encodes left-right alignment. Values in a column share similar X-positions
+          - **Y-axis position**: Encodes top-bottom ordering. Related fields (label and value) are often at the same Y-position
+          - LayoutLMv2 adds **relative 2D attention bias**: Attention weights are modulated by the spatial distance between tokens. Nearby tokens attend more strongly to each other
+
+          **Visual features:**
+          - **Document image patches**: Divide the document image into 14x14 patches (ViT-style). Each patch produces a 768-dim visual embedding
+          - **Visual-textual alignment**: Each text token is aligned with the image patch(es) it overlaps. This enables the model to "see" font size, boldness, underlines, and background colors
+          - **Segment embeddings**: Different semantic segments (header, body, footer, table) get different segment IDs. Learned during pre-training
+
+          **Pre-training objectives (LayoutLMv3):**
+          - **Masked Language Modeling**: Predict masked text tokens using surrounding text AND layout context. "Invoice [MASK]: INV-2026-0042" -> the model learns "Number" from spatial patterns
+          - **Masked Image Modeling**: Reconstruct masked image patches from surrounding visual and textual context
+          - **Word-Patch Alignment**: Predict which image patches correspond to which text tokens. Teaches visual-textual grounding
+
+          **Why 2D positional embeddings?**
+          - **Layout IS the schema**: In a form, the label "Name:" at (x=50, y=120) and the value "John Smith" at (x=200, y=120) are related because they share the same Y-position. 1D embeddings lose this spatial relationship
+          - **Cross-document transfer**: 2D positions generalize across layouts. A model trained on invoices with "Total" at the bottom-right can recognize "Grand Total" at the bottom-right of an unseen invoice layout
+          - LayoutLMv3 achieves **+7.2% F1** over text-only BERT on form understanding (FUNSD benchmark), entirely from layout features
+
+          **Trade-off**: 2D positional embeddings require OCR bounding boxes as input, creating a dependency on OCR quality. If OCR produces wrong bounding boxes (e.g., merging two adjacent fields), the positional features are incorrect. Mitigate with high-quality OCR or use OCR-free approaches (Donut) for simple documents.
+        next: mod_extraction
+      - label: "Template matching with adaptive features"
+        answer: |
+          I would use a **template matching approach** with adaptive features that learn document-type-specific extraction rules:
+
+          **Feature representation:**
+          ```
+          Document → OCR → Text + Bounding Boxes
+                                    │
+                              ┌─────┴─────┐
+                              │           │
+                    Template features    Content features
+                              │           │
+                    (layout patterns)    (text patterns)
+                              │           │
+                              └─────┬─────┘
+                                    │
+                              Matching + extraction
+          ```
+
+          **Template features (~20 features per field):**
+          - **Anchor text proximity**: Distance from known anchor words ("Total:", "Invoice #:", "Date:") to candidate value regions. The most predictive single feature for extraction
+          - **Relative position features**: Field position relative to page quadrants (top-left = logo/sender, bottom-right = totals). Normalized to [0,1] for cross-template transfer
+          - **Layout graph features**: Build a graph where nodes are text regions and edges encode spatial relationships (above, below, left-of, right-of, same-row, same-column). Graph neural network extracts structural features
+          - **Template cluster ID**: Cluster documents by visual similarity (learned embeddings). Within each cluster, extraction rules are more consistent. Intuit uses ~500 template clusters for tax documents
+
+          **Content features (~15 features per field):**
+          - **Regex pattern matches**: Dates (MM/DD/YYYY), amounts ($X,XXX.XX), phone numbers, SSN patterns, invoice number formats. High precision for structured fields
+          - **Field type classifiers**: Small classifiers that identify whether a text region is a name, address, amount, date, or other type based on text content
+          - **NER features**: Named entity recognition to identify person names, organization names, and locations. SpaCy NER provides ~90% accuracy on document text
+          - **Semantic similarity**: Embedding similarity between detected text and expected field names. "GRAND TOTAL" is semantically similar to "Total Amount Due"
+
+          **Adaptive template learning:**
+          - **Few-shot template adaptation**: Given 3-5 example documents of a new type, learn the extraction template automatically
+          - **Cluster-then-extract**: Group incoming documents into clusters by visual similarity. For each cluster, learn a specialized extraction model. New documents matched to the nearest cluster
+          - **Active learning for new templates**: When a document doesn't match any known cluster (confidence < 0.6), route to human annotation. 5 annotated examples are enough to create a new template cluster
+
+          **Why template matching?**
+          - **High accuracy on known templates**: Once a template is learned from 5-10 examples, extraction accuracy is **>98%** for that template. Higher than template-free models
+          - **Interpretable**: You can show customers exactly which anchor words triggered each extraction. Critical for compliance-heavy industries (banking, insurance, healthcare)
+          - **Fast adaptation**: Adding a new vendor's invoice format takes hours (annotate 5 documents), not days (collect training data and retrain a neural model)
+          - Intuit's document processing primarily uses template matching -- they have ~10,000 known templates for tax forms, each with hand-tuned extraction rules
+
+          **Trade-off**: Does not generalize to completely unseen layouts. If a new vendor's invoice has a radically different structure, template matching fails until examples are annotated. Template-free models (LayoutLMv3, Donut) handle this better. The long tail of rare document types is the weakness -- maintaining 10,000+ templates is operationally expensive.
+        next: mod_extraction
+
+  # ============ MODEL ============
+  - id: mod_extraction
+    stage: model
+    type: question
+    label: "Extraction Model Architecture"
+    speaker: interviewer
+    content: |
+      Now let's design the core extraction model. Given the features, how would you architecturally map from document representation to structured field extraction?
+    dialogue:
+      - speaker: interviewer
+        text: "What model architecture extracts structured data from documents?"
+      - speaker: candidate
+        text: "Two main paradigms: token classification (tag each word with its field type) or generative extraction (autoregressively produce the structured output)."
+      - speaker: interviewer
+        text: "Walk me through both and their trade-offs."
+    choices:
+      - label: "Token classification + relation extraction"
+        answer: |
+          I would use a **token classification** approach where each OCR token is labeled with its field type, followed by **relation extraction** to pair labels with values:
+
+          **Architecture:**
+          ```
+          OCR tokens + layout → LayoutLMv3 Encoder (12 layers)
+                                        │
+                                  ┌─────┴─────┐
+                                  │           │
+                            Token classifier    Relation head
+                            (BIO tagging)       (label-value pairing)
+                                  │           │
+                            Field extraction    Key-value linking
+          ```
+
+          **Token classification (Stage 1):**
+          - Each token gets a BIO tag: B-vendor_name, I-vendor_name, B-total_amount, I-total_amount, O (other)
+          - For 30 field types: 61 possible tags (B + I for each type, plus O)
+          - **CRF output layer**: Ensures valid BIO sequences. "B-vendor_name" must be followed by "I-vendor_name" or "O," never "I-total_amount"
+          - **Performance**: Token-level F1 >95% on invoices, >91% on complex forms (FUNSD)
+
+          **Relation extraction (Stage 2):**
+          - **Problem**: Token classification identifies "Invoice Number" as a label and "INV-2026-0042" as a value, but we need to link them
+          - **Bilinear attention**: Score all (label, value) pairs with a bilinear function: score(l, v) = l^T * W * v. Select highest-scoring pairs
+          - **Spatial heuristic**: Labels typically appear left-of or above their values. Use spatial constraints to prune impossible pairs
+          - **Performance**: Relation F1 >92% on FUNSD, >96% on invoices (which have cleaner layouts)
+
+          **Table extraction (specialized):**
+          - **Table detection**: Object detection model (Faster R-CNN or DETR) to locate tables on the page. mAP >0.95
+          - **Row/column detection**: Separate model to detect row and column separators (including implicit ones without lines). Use line detection + spatial clustering
+          - **Cell content mapping**: Map OCR tokens to cells using bounding box intersection
+          - **Performance**: Table F1 >88% on complex tables (SciTSR benchmark), >94% on simple grid tables
+
+          **Why token classification?**
+          - **Scalable to many field types**: Adding a new field type requires adding 2 tags (B + I) and providing ~100 training examples. No architecture change
+          - **Handles overlapping fields**: Same token can participate in multiple fields via multi-label classification. Useful for addresses that contain city, state, and zip as sub-fields
+          - **Well-calibrated confidence**: Softmax probabilities per token provide field-level confidence scores. Confidence < 0.8 triggers human review for that specific field
+          - Amazon Textract and Google Document AI both use token classification as their core extraction approach
+
+          **Trade-off**: Cannot extract values not present in the OCR output. If OCR misses a digit in "$3,487.50" -> "$3,47.50," the extraction is wrong even if the model correctly identifies the field. Also, relation extraction between distant elements (label on page 1, value on page 3) is challenging with local attention.
+        next: train_pipeline
+      - label: "Generative extraction (seq2seq structured output)"
+        answer: |
+          I would use a **generative approach** where the model autoregressively produces the structured output as a token sequence:
+
+          **Architecture (Donut-style):**
+          ```
+          Document Image → Swin Transformer Encoder (visual features)
+                                     │
+                                     ▼
+                           BART Decoder (autoregressive)
+                                     │
+                                     ▼
+          Output: <vendor>Acme Corp</vendor><invoice_num>INV-2026-0042</invoice_num>...
+          ```
+
+          **Alternative: LayoutLM encoder + GPT decoder:**
+          ```
+          OCR text + layout → LayoutLMv3 Encoder → Cross-attention → GPT-2 Decoder
+                                                                        │
+                                                                        ▼
+          Output: {"vendor": "Acme Corp", "invoice_number": "INV-2026-0042", "total": "$3,487.50"}
+          ```
+
+          **Why generative extraction?**
+          - **Structured output natively**: The model directly produces JSON or XML output. No need for separate token classification + relation extraction + post-processing. One model replaces three stages
+          - **Handles implicit information**: Can infer values not explicitly present in text. If a receipt shows item prices $10, $20, $15 but no total, the model can generate "total": "$45" by reasoning. Token classification cannot do this
+          - **Cross-page reasoning**: For multi-page contracts, the decoder can attend to information from any page. "The agreement dated [from page 1] between [from page 1] shall expire on [from page 15]" is naturally handled by cross-attention
+          - **Table serialization**: Tables are serialized as structured sequences: `<table><row><cell>Widget A</cell><cell>$25</cell></row>...</table>`. The decoder learns table structure implicitly
+
+          **Training:**
+          - **Input**: Document image (or OCR text + layout)
+          - **Target**: Structured output in a linearized format (JSON, XML, or custom markup)
+          - **Loss**: Standard autoregressive cross-entropy on target tokens
+          - **Data**: 50K annotated documents per type + 500K synthetic documents
+          - **Constrained decoding**: Use grammar-based sampling to ensure valid JSON output. LMQL or Outlines libraries enforce schema compliance
+
+          **Performance:**
+
+          | Benchmark | Token Classification | Generative (Donut) |
+          |-----------|---------------------|-------------------|
+          | CORD (receipts) | F1: 95.2% | F1: 92.4% |
+          | FUNSD (forms) | F1: 92.1% | F1: 84.0% |
+          | SROIE (receipts) | F1: 96.4% | F1: 93.1% |
+          | Multi-page contracts | Limited | Better (cross-attention) |
+
+          **Why generative might win long-term:**
+          - **LLM synergy**: As LLMs improve, generative extraction benefits directly. GPT-4V already achieves competitive document extraction with zero-shot prompting
+          - **Flexible schema**: Change the output schema by changing the prompt/target format. No architecture modification needed. Token classification requires redefining tag sets and retraining
+          - **Multimodal LLMs**: Models like GPT-4V, Gemini, and Claude can extract from documents with just a prompt. As these models get cheaper, they may replace specialized extraction models
+
+          **Trade-off**: Lower accuracy than token classification on current benchmarks (3-8% F1 gap). Autoregressive decoding is inherently slower (~500ms per page vs. ~300ms for token classification). Also prone to hallucination -- the model may generate plausible but incorrect values, especially for numerical fields. Must verify extracted numbers against OCR text as a safety check.
+        next: train_pipeline
+
+  # ============ TRAINING ============
+  - id: train_pipeline
+    stage: training
+    type: info
+    label: "Training Pipeline"
+    speaker: interviewer
+    content: |
+      Let's design the training pipeline for the document extraction system. The key challenge is achieving high accuracy across diverse document types with limited labeled data per type.
+
+      **Pre-training strategy (foundational):**
+      - **Stage 1 -- Document image pre-training** (2 weeks, 64 GPUs):
+        - Dataset: IIT-CDIP (11M scanned documents) + 5M web-scraped documents
+        - Objectives: Masked Language Modeling (MLM), Masked Image Modeling (MIM), Word-Patch Alignment (WPA)
+        - This teaches the model general document understanding: layout patterns, font semantics, spatial relationships
+      - **Stage 2 -- Document type classification** (2 days, 8 GPUs):
+        - Fine-tune on RVL-CDIP (400K documents, 16 types). Accuracy: >95%
+        - Enables automatic routing of documents to type-specific extraction models
+
+      **Fine-tuning strategy (per document type):**
+
+      | Document Type | Training Samples | Fine-tune Time | Expected F1 |
+      |--------------|-----------------|----------------|-------------|
+      | Invoices | 10K annotated | 4 hours, 8 GPUs | >96% |
+      | Receipts | 10K annotated | 3 hours | >94% |
+      | Tax forms (W-2) | 5K annotated | 2 hours | >98% (fixed layout) |
+      | Insurance claims | 8K annotated | 4 hours | >91% |
+      | Contracts | 3K annotated | 6 hours | >87% (variable structure) |
+
+      **Data augmentation for training:**
+      - **Visual augmentation**: Rotation, perspective warp, noise injection, compression artifacts, lighting variation
+      - **Content augmentation**: Replace field values with synthetic data while preserving layout. "John Smith" -> "Maria Garcia," "$3,487.50" -> "$12,234.00"
+      - **Layout augmentation**: Shift text regions slightly (+/-5 pixels) to prevent overfitting to exact positions
+      - **Cross-lingual augmentation**: For multilingual support, translate field labels while preserving layout structure
+
+      **Few-shot learning for new document types:**
+      - **Problem**: A new customer brings a document type we have never seen (e.g., Australian customs declaration forms). We have only 5-10 examples
+      - **Solution**: Meta-learning with prototypical networks
+        1. Pre-train on 50+ document types with rich data
+        2. For new type: Create a "prototype" embedding from 5 examples per field type
+        3. At inference: Classify each token by nearest prototype
+        4. **Performance**: 5-shot achieves ~80% F1, 20-shot achieves ~90% F1 (vs. ~96% with full training data)
+
+      **Active learning loop:**
+      ```
+      New documents arrive → Model extracts with confidence scores
+                                    │
+                              ┌─────┴─────┐
+                              │           │
+                    High confidence     Low confidence
+                    (>0.9: auto-process) (<0.9: human review)
+                              │           │
+                              │     Human corrects → Add to training set
+                              │           │
+                              └─────┬─────┘
+                                    │
+                              Weekly retrain on expanded dataset
+      ```
+      - This active learning loop improves accuracy by **2-3% F1 per month** as the system encounters more document variations
+      - Google Document AI uses this human-in-the-loop approach for continuous model improvement
+    dialogue:
+      - speaker: interviewer
+        text: "How do you train extraction models given limited labeled data?"
+      - speaker: candidate
+        text: "Three-stage approach: pre-train on millions of unlabeled documents for general document understanding, fine-tune on thousands of labeled examples per document type, and use few-shot learning for rapid adaptation to new types."
+      - speaker: interviewer
+        text: "How do you handle new document types from customers?"
+      - speaker: candidate
+        text: "Few-shot learning with prototypical networks. Five annotated examples achieve 80% F1. Combined with active learning, accuracy improves to 90% within the first month as the system sees more examples in production."
+      - speaker: interviewer
+        text: "Good. Let's discuss deployment."
+    next: deploy_serving
+
+  # ============ DEPLOYMENT ============
+  - id: deploy_serving
+    stage: deployment
+    type: question
+    label: "Serving Architecture"
+    speaker: interviewer
+    content: |
+      How would you deploy the document extraction system? Consider both **batch processing** (nightly processing of accumulated documents) and **real-time processing** (mobile scan-and-extract). Different use cases have different latency requirements.
+    dialogue:
+      - speaker: interviewer
+        text: "How do you deploy IDP at scale?"
+      - speaker: candidate
+        text: "The key split is between real-time API serving and batch processing pipelines. Most enterprises need both."
+      - speaker: interviewer
+        text: "Walk me through the architecture for each."
+    choices:
+      - label: "API-first with auto-scaling GPU inference"
+        answer: |
+          I would deploy as a **real-time REST/gRPC API** with auto-scaling GPU inference:
+
+          **API architecture:**
+          ```
+          Client (mobile app, web, ERP system)
+               │
+               ▼
+          API Gateway (rate limiting, auth, routing)
+               │
+               ▼
+          Document Type Classifier (CPU, ~50ms)
+               │ Routes to type-specific model
+               ▼
+          Extraction Service (GPU, ~300ms per page)
+               │
+               ▼
+          Post-processing (format validation, confidence scoring, ~50ms)
+               │
+               ▼
+          Response: Structured JSON with confidence scores
+          ```
+
+          **Infrastructure:**
+          - **GPU pool**: Auto-scaling pool of A10G instances (24GB VRAM). Each GPU handles ~3 pages/second
+          - **Auto-scaling**: Scale on queue depth. If queue exceeds 100 pending documents, add GPU instances. Scale-in after 5 minutes of low utilization
+          - **Multi-model serving**: NVIDIA Triton Inference Server hosts multiple extraction models (invoice, receipt, form, contract). Dynamic batching across request types
+          - **Global deployment**: 3 regions (US, EU, APAC) for data residency compliance. GDPR requires EU documents stay in EU
+
+          **Cost optimization:**
+          - **Spot instances**: Use spot/preemptible GPUs for batch processing (60% cost savings). Fall back to on-demand for real-time API
+          - **Model compilation**: TensorRT optimization reduces inference time from ~500ms to ~300ms per page. 40% throughput improvement
+          - **Caching**: Cache extraction results by document hash. Duplicate documents (re-uploads, same invoice template) skip inference. ~10% cache hit rate
+          - **Cost per page**: ~$0.015 for GPU inference + $0.005 for API infrastructure = **~$0.02 per page**
+
+          **API design:**
+          ```
+          POST /api/v1/extract
+          {
+            "document": "<base64_encoded_image_or_pdf>",
+            "document_type": "invoice",  // optional, auto-detected if omitted
+            "fields": ["vendor", "total", "line_items"],  // optional field filter
+            "confidence_threshold": 0.85,
+            "include_bounding_boxes": true
+          }
+          ```
+
+          **SLA targets:**
+
+          | Metric | Target |
+          |--------|--------|
+          | Latency (single page) | <500ms P95 |
+          | Latency (10-page document) | <3 seconds P95 |
+          | Throughput | >1000 pages/minute per cluster |
+          | Availability | 99.9% uptime |
+          | Error rate | <0.1% (5xx errors) |
+
+          **Why API-first?**
+          - Enables **real-time mobile scanning**: Users photograph a receipt and see extracted data in <1 second
+          - **Integration flexibility**: ERP systems (SAP, Oracle), accounting software (QuickBooks, Xero), and custom apps all consume the same API
+          - Google Document AI and Amazon Textract are both API-first services. The market expects this delivery model
+        next: mon_monitoring
+      - label: "Batch pipeline with human-in-the-loop review"
+        answer: |
+          I would deploy a **batch processing pipeline** with integrated human-in-the-loop (HITL) review for maximum accuracy:
+
+          **Pipeline architecture:**
+          ```
+          Document Ingestion (email, SFTP, cloud storage, API)
+               │
+               ▼
+          Document Queue (SQS/Kafka, prioritized by SLA)
+               │
+               ▼
+          Pre-processing Workers (CPU auto-scaling group)
+          [PDF-to-image, deskew, DPI normalization, page splitting]
+               │
+               ▼
+          Extraction Workers (GPU auto-scaling group)
+          [OCR + layout analysis + field extraction, ~500ms/page]
+               │
+               ▼
+          Confidence Router
+          ┌────────────────────────────┐
+          │ High confidence (>0.9)     │──→ Auto-approved → Output
+          │ Medium confidence (0.7-0.9)│──→ HITL Review Queue
+          │ Low confidence (<0.7)      │──→ Manual Processing Queue
+          └────────────────────────────┘
+               │
+               ▼
+          HITL Review Interface
+          [Pre-filled extraction with highlighted low-confidence fields]
+          [Reviewer corrects in ~30 seconds vs. 3 minutes for manual entry]
+               │
+               ▼
+          Approved Output → Downstream Systems (ERP, accounting, database)
+          + Correction feedback → Training data for model improvement
+          ```
+
+          **Human-in-the-loop review interface:**
+          - Side-by-side view: Original document image on left, extracted fields on right
+          - **Confidence highlighting**: Green (>0.9, auto-approved), yellow (0.7-0.9, needs glance), red (<0.7, needs correction)
+          - **Smart field suggestions**: For low-confidence fields, show top-3 extraction candidates
+          - **Keyboard-optimized**: Tab between fields, type to correct, Enter to approve. Designed for >100 documents/hour per reviewer
+          - **Reviewer accuracy tracking**: Flag and retrain on fields that reviewers frequently correct
+
+          **Batch processing throughput:**
+
+          | Tier | Daily Volume | Processing Time | Accuracy |
+          |------|-------------|-----------------|----------|
+          | Auto-approved (70%) | 70K pages/day | <5 minutes | >99% (post-confidence-filter) |
+          | HITL review (25%) | 25K pages/day | 30 min-2 hours | >99.5% (human verified) |
+          | Manual processing (5%) | 5K pages/day | 2-8 hours | >99.5% (full manual) |
+
+          **Cost model:**
+          - GPU extraction: ~$0.02/page * 100K pages/day = $2,000/day
+          - HITL review: ~$0.10/page * 25K pages = $2,500/day (at $12/hour, 100 pages/hour)
+          - Manual processing: ~$1.00/page * 5K pages = $5,000/day
+          - **Total**: ~$9,500/day for 100K pages = **$0.095/page** (vs. $20+/page for fully manual processing)
+
+          **Why batch + HITL?**
+          - **Guaranteed accuracy**: Critical for financial documents, tax filing, legal compliance. Intuit's tax document processing requires 99.9% accuracy on amounts -- only achievable with human verification
+          - **Audit trail**: Every extraction has a confidence score, and reviewed extractions have a human approver. Required for SOX compliance in financial processing
+          - **Gradual automation**: Start with 30% auto-approval, increase to 70% as model improves. Enterprises trust this incremental approach over fully automated systems
+          - **Cost effective at scale**: At $0.095/page vs. $20/page manual, the ROI is clear. Even with HITL costs, this is a 200x cost reduction
+        next: mon_monitoring
+
+  # ============ MONITORING ============
+  - id: mon_monitoring
+    stage: monitoring
+    type: info
+    label: "Monitoring & Quality Assurance"
+    speaker: interviewer
+    content: |
+      Let's design the monitoring system for document extraction. Quality monitoring is critical because extraction errors can have financial and legal consequences.
+
+      **Real-time system health:**
+
+      | Metric | Alert Threshold | Action |
+      |--------|----------------|--------|
+      | Extraction latency P95 | >2 seconds/page | Scale GPU pool |
+      | OCR character accuracy | <98% (measured on control set) | Check image quality or OCR model regression |
+      | Auto-approval rate | <60% or >85% | Model or confidence threshold may need adjustment |
+      | HITL review time | >60 seconds/document | Review UI issue or document quality issue |
+      | Queue depth | >10K pending | Scale processing workers |
+
+      **Extraction quality monitoring:**
+
+      **Daily automated quality checks:**
+      - Run extraction on a **held-out golden set** of 1000 documents (100 per major type) with expert-annotated ground truth
+      - Track field-level F1 per document type per field type. Alert on any degradation >1%
+      - **Regression detection**: Compare current model extraction against previous model on matched documents. Flag any field where new model performs >2% worse
+
+      **Weekly quality review:**
+      - Sample 500 auto-approved documents (highest risk: those with minimum confidence just above threshold)
+      - Human experts verify all extracted fields. Compute **escaped error rate**: errors that auto-approval missed
+      - Target: escaped error rate <1% for critical fields, <3% for non-critical fields
+
+      **Document-type-specific monitoring:**
+      - Track extraction quality per document type over time. If a specific type's F1 drops, it may indicate a new layout variant
+      - **New template detection**: Cluster incoming documents by visual similarity. When a new cluster appears (>50 documents that do not match existing clusters), alert for potential new template that needs training data
+      - **Seasonal patterns**: Tax season (January-April) brings volume spikes and new form variants. Pre-provision capacity and monitor closely
+
+      **Confidence calibration monitoring:**
+      - Plot **reliability diagrams** monthly: model confidence vs. actual accuracy. If the model says 95% confidence but only 88% of those are correct, recalibrate
+      - **Threshold optimization**: Continuously optimize the auto-approval confidence threshold to maximize automation rate while maintaining target accuracy. Currently at 0.9; Bayesian optimization may find 0.87 is optimal
+
+      **Feedback loop for continuous improvement:**
+      ```
+      HITL corrections → Aggregate corrections by field type and document type
+                              │
+                        Identify systematic errors (>5% error rate on a field type)
+                              │
+                        Root cause analysis:
+                        ├── OCR error? → Improve pre-processing or OCR model
+                        ├── Layout confusion? → Collect more training examples for this layout
+                        ├── New field format? → Update regex patterns and training data
+                        └── Model limitation? → Retrain with expanded dataset
+                              │
+                        Weekly model retraining on expanded dataset
+                        Monthly model release with A/B testing
+      ```
+
+      **Compliance monitoring:**
+      - **PII audit trail**: Log which fields contained PII, how they were processed, where they were stored, and who accessed them
+      - **Data retention**: Auto-delete document images after extraction per customer policy (typically 30-90 days). Retain only structured data
+      - **SOC 2 compliance**: Monthly access reviews, encryption at rest and in transit, penetration testing quarterly
+    dialogue:
+      - speaker: interviewer
+        text: "How do you monitor document extraction quality in production?"
+      - speaker: candidate
+        text: "Four layers: real-time system health monitoring, daily automated quality checks on a golden set, weekly human review of auto-approved documents to measure escaped error rate, and confidence calibration tracking."
+      - speaker: interviewer
+        text: "How do you handle new document layouts that the model hasn't seen?"
+      - speaker: candidate
+        text: "Visual clustering of incoming documents with anomaly detection. When a new cluster emerges, we flag it for annotation, use few-shot learning for rapid adaptation, and activate the active learning loop."
+      - speaker: interviewer
+        text: "Excellent. Let's wrap up."
+    next: conclusion
+
+  # ============ TERMINAL ============
+  - id: conclusion
+    stage: monitoring
+    type: terminal
+    label: "Design Complete"
+    speaker: interviewer
+    content: |
+      Excellent work! You have designed a comprehensive **Intelligent Document Processing & OCR** system.
+
+      **Your design covers:**
+      - **OCR architecture**: Traditional pipeline (detection + recognition + layout) or end-to-end multimodal (Donut/LayoutLMv3) -- trading off modularity for joint optimization
+      - **Metrics**: Field-level F1 with criticality weighting or end-to-end STP rate focusing on business impact and cost per document
+      - **Data pipeline**: Multi-level annotation (text boxes, field labels, table structure, relationships), synthetic augmentation, PII-safe handling
+      - **Features**: 2D positional embeddings + visual features (LayoutLM-style) or template matching with adaptive features -- neural generalization vs. template accuracy
+      - **Extraction model**: Token classification + relation extraction (proven, scalable) or generative seq2seq (flexible, handles cross-page reasoning)
+      - **Training**: Pre-training on millions of documents, per-type fine-tuning, few-shot learning for new types, active learning feedback loop
+      - **Deployment**: API-first with GPU auto-scaling or batch pipeline with human-in-the-loop review -- real-time vs. guaranteed accuracy
+      - **Monitoring**: Golden set regression testing, escaped error rate tracking, confidence calibration, new template detection, compliance audit trails
+
+      **Key design trade-offs highlighted:**
+      - Pipeline vs. end-to-end OCR (debuggability vs. joint optimization)
+      - Template-based vs. template-free (accuracy on known types vs. generalization)
+      - Token classification vs. generative (current accuracy vs. future flexibility)
+      - API-first vs. batch+HITL (real-time vs. guaranteed accuracy)
+
+      **Areas for further exploration:**
+      - Large multimodal models (GPT-4V, Gemini) for zero-shot document understanding
+      - Document fraud detection (altered invoices, forged signatures)
+      - Structured data validation against business rules and external databases
+      - Cross-document entity resolution (same vendor across different invoice formats)
+
+      This demonstrates deep understanding of document AI, the multimodal nature of document understanding, and the operational challenges of deploying extraction systems in compliance-heavy enterprise environments. Well done!
+    dialogue:
+      - speaker: interviewer
+        text: "Great design. You balanced accuracy, scalability, and compliance throughout. Any final thoughts?"
+      - speaker: candidate
+        text: "The most important investment is the human-in-the-loop feedback loop. Every human correction is free training data. Over months, this compounds -- the model gets better, the auto-approval rate increases, and the cost per document drops. It's a flywheel."
+      - speaker: interviewer
+        text: "That's exactly the right business insight. Excellent interview!"
