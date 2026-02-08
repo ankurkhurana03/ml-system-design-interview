@@ -11,12 +11,14 @@ import { mergeBranch, validateConvergenceRefs } from '@/utils/mergeBranch';
 import { getDownstreamSummaries } from '@/utils/treeTraversal';
 import { submitBranchForModeration } from '@/utils/branchModeration';
 import { useAuth } from '@/hooks/useAuth';
+import { useSources } from '@/hooks/useSources';
 import { StageIndicator } from './StageIndicator';
 import { PathBreadcrumb } from './PathBreadcrumb';
 import { QuestionCard } from './QuestionCard';
 import { MultiSelectCard } from './MultiSelectCard';
 import { VoiceOverControls } from './VoiceOverControls';
 import { NotesPanel } from './NotesPanel';
+import { SourcesPanel } from './SourcesPanel';
 import type { MLStage, DialogueLine, InterviewLLMResponse } from '@/types/tree';
 
 const STAGE_BORDER_COLORS: Record<string, string> = {
@@ -61,10 +63,12 @@ export function WizardPanel() {
   const { config } = useMode();
   const speechRecognition = useSpeechRecognition();
   const { addComment } = useNodeComments(problem?.id || '', currentNode?.id || '');
+  const sourcesHook = useSources(problem?.id || '');
   const previousNodeIdRef = useRef<string | null>(null);
   const previousModeRef = useRef<string>(config.mode);
   const dialogueCancelRef = useRef(false);
   const [notesOpen, setNotesOpen] = useState(false);
+  const [sourcesOpen, setSourcesOpen] = useState(false);
   const [voiceInputTranscript, setVoiceInputTranscript] = useState<string | null>(null);
   const [pauseState, setPauseState] = useState<PauseState | null>(null);
   const [pauseQuestion, setPauseQuestion] = useState('');
@@ -302,6 +306,7 @@ export function WizardPanel() {
       choices: currentNode.choices || [],
       conversationHistory,
       problemTitle: problem.title,
+      sources: sourcesHook.sources.length > 0 ? sourcesHook.sources : undefined,
     });
 
     if (!response) return;
@@ -326,7 +331,7 @@ export function WizardPanel() {
       handleNovelAnswer(response);
     }
     // clarification: stay on node, user continues chatting
-  }, [currentNode, problem, liveDialogue, interviewLLM, appendDialogue, voiceOver, selectChoice]);
+  }, [currentNode, problem, liveDialogue, interviewLLM, appendDialogue, voiceOver, selectChoice, sourcesHook.sources]);
 
   const handleNovelAnswer = useCallback(async (response: InterviewLLMResponse) => {
     if (!currentNode || !problem || !response.choiceLabel || !response.choiceAnswer) return;
@@ -338,6 +343,8 @@ export function WizardPanel() {
       // Gather downstream context for convergence
       const downstreamContext = getDownstreamSummaries(problem, currentNode.id);
 
+      const branchSources = sourcesHook.sources.length > 0 ? sourcesHook.sources : undefined;
+
       let newNodes = await interviewLLM.generateBranch({
         choiceLabel: response.choiceLabel,
         choiceAnswer: response.choiceAnswer,
@@ -346,6 +353,7 @@ export function WizardPanel() {
         problemTitle: problem.title,
         existingYaml: stringify(problem),
         downstreamContext,
+        sources: branchSources,
       });
 
       // Validate convergence references before merging
@@ -363,6 +371,7 @@ export function WizardPanel() {
           targetNodeStage: currentNode.stage,
           problemTitle: problem.title,
           existingYaml: stringify(problem),
+          sources: branchSources,
         });
       }
 
@@ -413,7 +422,7 @@ export function WizardPanel() {
     } finally {
       setBranchGenerating(false);
     }
-  }, [currentNode, problem, interviewLLM, updateProblem, selectChoice, user]);
+  }, [currentNode, problem, interviewLLM, updateProblem, selectChoice, user, sourcesHook.sources]);
 
   // Auto-save enhanced problem to localStorage
   useEffect(() => {
@@ -525,8 +534,23 @@ export function WizardPanel() {
             </div>
           )}
 
-          {/* Question / Multi-Select Card */}
-          {currentNode.type === 'multi_select' ? (
+          {/* Pending node loading state — shown when background generation hasn't filled this node yet */}
+          {(currentNode.content.startsWith('[FILL:') || currentNode.label.startsWith('[FILL:')) ? (
+            <div
+              className="bg-white rounded-xl shadow-sm border-2 p-8 text-center"
+              style={{ borderColor: getBorderColorForStage(currentNode.stage) }}
+            >
+              <div className="flex flex-col items-center gap-4">
+                <div className="w-8 h-8 border-3 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-700 mb-1">Content generating...</h3>
+                  <p className="text-sm text-gray-500">
+                    This stage is being filled in the background. It will appear automatically.
+                  </p>
+                </div>
+              </div>
+            </div>
+          ) : currentNode.type === 'multi_select' ? (
             <MultiSelectCard
               node={currentNode}
               problemTitle={problem.title}
@@ -549,6 +573,7 @@ export function WizardPanel() {
               branchGenerating={branchGenerating}
               branchError={branchError}
               onDismissError={() => { setBranchError(null); setPendingNovelChoice(null); }}
+              sources={sourcesHook.sources.length > 0 ? sourcesHook.sources : undefined}
             />
           )}
 
@@ -669,17 +694,30 @@ export function WizardPanel() {
             <div className="mt-4 p-3 bg-white border border-gray-200 rounded-lg">
               <div className="flex items-center justify-between mb-2">
                 <h4 className="text-xs font-semibold text-gray-700">Keyboard Shortcuts</h4>
-                {config.showNotes && (
+                <div className="flex items-center gap-2">
                   <button
-                    onClick={() => setNotesOpen(!notesOpen)}
-                    className="text-xs px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded transition-colors flex items-center gap-1"
+                    onClick={() => { setSourcesOpen(!sourcesOpen); if (!sourcesOpen) setNotesOpen(false); }}
+                    className={`text-xs px-2 py-1 rounded transition-colors flex items-center gap-1 ${
+                      sourcesOpen ? 'bg-purple-700 text-white' : 'bg-purple-600 hover:bg-purple-700 text-white'
+                    }`}
                   >
                     <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
                     </svg>
-                    Notes
+                    Sources{sourcesHook.sources.length > 0 ? ` (${sourcesHook.sources.length})` : ''}
                   </button>
-                )}
+                  {config.showNotes && (
+                    <button
+                      onClick={() => { setNotesOpen(!notesOpen); if (!notesOpen) setSourcesOpen(false); }}
+                      className="text-xs px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded transition-colors flex items-center gap-1"
+                    >
+                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                      </svg>
+                      Notes
+                    </button>
+                  )}
+                </div>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs text-gray-600">
                 <div><kbd className="px-1 py-0.5 bg-gray-100 border border-gray-300 rounded">1-9</kbd> Select choice</div>
@@ -691,6 +729,27 @@ export function WizardPanel() {
           )}
         </div>
       </div>
+
+      {/* Sources Panel */}
+      {problem && (
+        <SourcesPanel
+          isOpen={sourcesOpen}
+          onClose={() => setSourcesOpen(false)}
+          sources={sourcesHook.sources}
+          loading={sourcesHook.loading}
+          error={sourcesHook.error}
+          searchResults={sourcesHook.searchResults}
+          searchLoading={sourcesHook.searchLoading}
+          onAddUrl={sourcesHook.addUrl}
+          onAddText={sourcesHook.addText}
+          onRemoveSource={sourcesHook.removeSource}
+          onAutoSearch={sourcesHook.autoSearch}
+          onAddSearchResult={sourcesHook.addSearchResult}
+          onSummarizeSource={sourcesHook.summarizeSource}
+          onClearSources={sourcesHook.clearSources}
+          problemTitle={problem.title}
+        />
+      )}
 
       {/* Notes Panel */}
       {problem && (

@@ -12,7 +12,13 @@ export function DialogueView({ lines, isTyping }: DialogueViewProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    // Scroll within the nearest scrollable ancestor only — avoid scrolling the root container
+    const el = bottomRef.current;
+    if (!el) return;
+    const scrollParent = el.closest('.overflow-y-auto') as HTMLElement | null;
+    if (scrollParent) {
+      scrollParent.scrollTo({ top: scrollParent.scrollHeight, behavior: 'smooth' });
+    }
   }, [lines.length, isTyping]);
 
   return (

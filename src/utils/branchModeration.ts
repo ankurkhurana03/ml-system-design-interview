@@ -1,6 +1,7 @@
 import { stringify } from 'yaml';
 import { supabase } from '@/lib/supabase';
 import type { TreeNode } from '@/types/tree';
+import { compressText } from '@/utils/compression';
 
 interface SubmitBranchParams {
   problemId: string;
@@ -30,7 +31,7 @@ export async function submitBranchForModeration(params: SubmitBranchParams): Pro
 
   if (!authorId) return;
 
-  const yamlContent = stringify(newNodes);
+  const yamlContent = compressText(stringify(newNodes));
 
   await supabase.from('generated_branches').insert({
     problem_id: problemId,

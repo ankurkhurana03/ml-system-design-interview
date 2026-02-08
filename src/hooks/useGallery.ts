@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
 import type { Problem } from '@/types/tree';
 import { stringify } from 'yaml';
+import { compressText } from '@/utils/compression';
 
 interface GalleryProblem {
   id: string;
@@ -11,6 +12,8 @@ interface GalleryProblem {
   yaml_content: string;
   difficulty: 'beginner' | 'intermediate' | 'advanced';
   tags: string[];
+  companies: string[];
+  domains: string[];
   upvotes: number;
   author_name: string;
   created_at: string;
@@ -67,6 +70,8 @@ export function useGallery() {
       problem: Problem,
       difficulty: 'beginner' | 'intermediate' | 'advanced',
       tags: string[],
+      companies: string[] = [],
+      domains: string[] = [],
     ): Promise<{ success: boolean; error?: string }> => {
       try {
         const { data: { user } } = await supabase.auth.getUser();
@@ -74,8 +79,8 @@ export function useGallery() {
           return { success: false, error: 'You must be logged in to publish problems' };
         }
 
-        // Convert problem to YAML
-        const yamlContent = stringify(problem);
+        // Convert problem to YAML and compress
+        const yamlContent = compressText(stringify(problem));
 
         // Get author name from user metadata or email
         const authorName =
@@ -92,6 +97,8 @@ export function useGallery() {
           yaml_content: yamlContent,
           difficulty,
           tags,
+          companies,
+          domains,
           author_name: authorName,
         });
 

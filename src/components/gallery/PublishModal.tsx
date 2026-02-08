@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useGallery } from '@/hooks/useGallery';
 import { useAuth } from '@/hooks/useAuth';
 import { useWizard } from '@/context/WizardContext';
+import { COMPANY_OPTIONS, DOMAIN_OPTIONS } from '@/constants/tagOptions';
 
 interface PublishModalProps {
   isOpen: boolean;
@@ -29,9 +30,29 @@ export function PublishModal({ isOpen, onClose }: PublishModalProps) {
     'intermediate',
   );
   const [tagsInput, setTagsInput] = useState('');
+  const [selectedCompanies, setSelectedCompanies] = useState<Set<string>>(new Set());
+  const [selectedDomains, setSelectedDomains] = useState<Set<string>>(new Set());
   const [publishing, setPublishing] = useState(false);
   const [published, setPublished] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const toggleCompany = (company: string) => {
+    setSelectedCompanies((prev) => {
+      const next = new Set(prev);
+      if (next.has(company)) next.delete(company);
+      else next.add(company);
+      return next;
+    });
+  };
+
+  const toggleDomain = (domain: string) => {
+    setSelectedDomains((prev) => {
+      const next = new Set(prev);
+      if (next.has(domain)) next.delete(domain);
+      else next.add(domain);
+      return next;
+    });
+  };
 
   const handlePublish = async () => {
     if (!problem) {
@@ -54,7 +75,13 @@ export function PublishModal({ isOpen, onClose }: PublishModalProps) {
       .filter((t) => t.length > 0)
       .slice(0, 5); // Max 5 tags
 
-    const result = await publishProblem(problem, difficulty, tags);
+    const result = await publishProblem(
+      problem,
+      difficulty,
+      tags,
+      [...selectedCompanies],
+      [...selectedDomains],
+    );
 
     if (result.success) {
       setPublished(true);
@@ -70,6 +97,8 @@ export function PublishModal({ isOpen, onClose }: PublishModalProps) {
     setError(null);
     setTagsInput('');
     setDifficulty('intermediate');
+    setSelectedCompanies(new Set());
+    setSelectedDomains(new Set());
     onClose();
   };
 
@@ -147,6 +176,56 @@ export function PublishModal({ isOpen, onClose }: PublishModalProps) {
                     </button>
                   ))}
                 </div>
+              </div>
+
+              {/* Companies */}
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  Companies
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  {COMPANY_OPTIONS.map((company) => (
+                    <button
+                      key={company}
+                      onClick={() => toggleCompany(company)}
+                      className={`text-sm px-3 py-1.5 rounded-full transition-colors ${
+                        selectedCompanies.has(company)
+                          ? 'bg-teal-600 text-white'
+                          : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                      }`}
+                    >
+                      {company}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-gray-500 mt-1">
+                  Select companies where this problem is commonly asked
+                </p>
+              </div>
+
+              {/* Domains */}
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  Domains
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  {DOMAIN_OPTIONS.map((domain) => (
+                    <button
+                      key={domain}
+                      onClick={() => toggleDomain(domain)}
+                      className={`text-sm px-3 py-1.5 rounded-full transition-colors ${
+                        selectedDomains.has(domain)
+                          ? 'bg-purple-600 text-white'
+                          : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                      }`}
+                    >
+                      {domain}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-gray-500 mt-1">
+                  Select ML domains this problem covers
+                </p>
               </div>
 
               {/* Tags Input */}

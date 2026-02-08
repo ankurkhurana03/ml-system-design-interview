@@ -3,6 +3,7 @@ import { useGallery } from '@/hooks/useGallery';
 import { useAuth } from '@/hooks/useAuth';
 import { parse } from 'yaml';
 import type { Problem } from '@/types/tree';
+import { decompressTextSafe } from '@/utils/compression';
 
 interface GalleryViewProps {
   isOpen: boolean;
@@ -54,18 +55,64 @@ export function GalleryView({ isOpen, onClose, onSelectProblem }: GalleryViewPro
   const [searchQuery, setSearchQuery] = useState('');
   const [sortOption, setSortOption] = useState<SortOption>('newest');
   const [difficultyFilter, setDifficultyFilter] = useState<DifficultyFilter>('all');
+  const [selectedCompanies, setSelectedCompanies] = useState<Set<string>>(new Set());
+  const [selectedDomains, setSelectedDomains] = useState<Set<string>>(new Set());
+
+  // Compute available options from gallery data
+  const availableOptions = useMemo(() => {
+    const companies = new Set<string>();
+    const domains = new Set<string>();
+    for (const p of galleryProblems) {
+      p.companies?.forEach((c) => companies.add(c));
+      p.domains?.forEach((d) => domains.add(d));
+    }
+    return {
+      companies: [...companies].sort(),
+      domains: [...domains].sort(),
+    };
+  }, [galleryProblems]);
+
+  const toggleCompany = (company: string) => {
+    setSelectedCompanies((prev) => {
+      const next = new Set(prev);
+      if (next.has(company)) next.delete(company);
+      else next.add(company);
+      return next;
+    });
+  };
+
+  const toggleDomain = (domain: string) => {
+    setSelectedDomains((prev) => {
+      const next = new Set(prev);
+      if (next.has(domain)) next.delete(domain);
+      else next.add(domain);
+      return next;
+    });
+  };
+
+  const activeFilterCount = selectedCompanies.size + selectedDomains.size;
 
   const filteredAndSortedProblems = useMemo(() => {
     let filtered = galleryProblems.filter((p) => {
       const matchesSearch =
         p.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
         p.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        p.tags.some((tag) => tag.toLowerCase().includes(searchQuery.toLowerCase()));
+        p.tags.some((tag) => tag.toLowerCase().includes(searchQuery.toLowerCase())) ||
+        p.companies?.some((c) => c.toLowerCase().includes(searchQuery.toLowerCase())) ||
+        p.domains?.some((d) => d.toLowerCase().includes(searchQuery.toLowerCase()));
 
       const matchesDifficulty =
         difficultyFilter === 'all' || p.difficulty === difficultyFilter;
 
-      return matchesSearch && matchesDifficulty;
+      const matchesCompany =
+        selectedCompanies.size === 0 ||
+        p.companies?.some((c) => selectedCompanies.has(c));
+
+      const matchesDomain =
+        selectedDomains.size === 0 ||
+        p.domains?.some((d) => selectedDomains.has(d));
+
+      return matchesSearch && matchesDifficulty && matchesCompany && matchesDomain;
     });
 
     // Sort
@@ -82,7 +129,7 @@ export function GalleryView({ isOpen, onClose, onSelectProblem }: GalleryViewPro
     }
 
     return filtered;
-  }, [galleryProblems, searchQuery, sortOption, difficultyFilter]);
+  }, [galleryProblems, searchQuery, sortOption, difficultyFilter, selectedCompanies, selectedDomains]);
 
   const handleUpvote = async (problemId: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -100,7 +147,7 @@ export function GalleryView({ isOpen, onClose, onSelectProblem }: GalleryViewPro
 
   const handleLoadProblem = (yamlContent: string) => {
     try {
-      const problem = parse(yamlContent) as Problem;
+      const problem = parse(decompressTextSafe(yamlContent)) as Problem;
       onSelectProblem(problem);
       onClose();
     } catch (err) {
@@ -131,7 +178,7 @@ export function GalleryView({ isOpen, onClose, onSelectProblem }: GalleryViewPro
         </div>
 
         {/* Filters and Search */}
-        <div className="p-6 border-b border-gray-200 bg-gray-50">
+        <div className="p-6 border-b border-gray-200 bg-gray-50 space-y-4">
           <div className="flex flex-col lg:flex-row gap-4">
             {/* Search */}
             <div className="flex-1">
@@ -141,7 +188,7 @@ export function GalleryView({ isOpen, onClose, onSelectProblem }: GalleryViewPro
                 </div>
                 <input
                   type="text"
-                  placeholder="Search by title, description, or tags..."
+                  placeholder="Search by title, description, tags, company, or domain..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
@@ -179,6 +226,59 @@ export function GalleryView({ isOpen, onClose, onSelectProblem }: GalleryViewPro
               ))}
             </div>
           </div>
+
+          {/* Company & Domain filter chips */}
+          {(availableOptions.companies.length > 0 || availableOptions.domains.length > 0) && (
+            <div className="space-y-2">
+              {availableOptions.companies.length > 0 && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-semibold text-gray-500 uppercase">Company:</span>
+                  {availableOptions.companies.map((company) => (
+                    <button
+                      key={company}
+                      onClick={() => toggleCompany(company)}
+                      className={`text-xs px-2.5 py-1 rounded-full transition-colors ${
+                        selectedCompanies.has(company)
+                          ? 'bg-teal-600 text-white'
+                          : 'bg-white border border-gray-300 text-gray-600 hover:bg-gray-100'
+                      }`}
+                    >
+                      {company}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {availableOptions.domains.length > 0 && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-semibold text-gray-500 uppercase">Domain:</span>
+                  {availableOptions.domains.map((domain) => (
+                    <button
+                      key={domain}
+                      onClick={() => toggleDomain(domain)}
+                      className={`text-xs px-2.5 py-1 rounded-full transition-colors ${
+                        selectedDomains.has(domain)
+                          ? 'bg-purple-600 text-white'
+                          : 'bg-white border border-gray-300 text-gray-600 hover:bg-gray-100'
+                      }`}
+                    >
+                      {domain}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {activeFilterCount > 0 && (
+                <button
+                  onClick={() => {
+                    setSelectedCompanies(new Set());
+                    setSelectedDomains(new Set());
+                  }}
+                  className="text-xs text-blue-600 hover:text-blue-800"
+                >
+                  Clear company/domain filters
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Content */}
@@ -228,7 +328,7 @@ export function GalleryView({ isOpen, onClose, onSelectProblem }: GalleryViewPro
 
                   {/* Tags */}
                   {problem.tags && problem.tags.length > 0 && (
-                    <div className="flex flex-wrap gap-1 mb-3">
+                    <div className="flex flex-wrap gap-1 mb-2">
                       {problem.tags.slice(0, 3).map((tag, idx) => (
                         <span
                           key={idx}
@@ -242,6 +342,29 @@ export function GalleryView({ isOpen, onClose, onSelectProblem }: GalleryViewPro
                           +{problem.tags.length - 3}
                         </span>
                       )}
+                    </div>
+                  )}
+
+                  {/* Company & Domain badges */}
+                  {((problem.companies && problem.companies.length > 0) ||
+                    (problem.domains && problem.domains.length > 0)) && (
+                    <div className="flex flex-wrap gap-1 mb-3">
+                      {problem.companies?.slice(0, 3).map((company) => (
+                        <span
+                          key={company}
+                          className="text-xs px-2 py-0.5 bg-teal-50 text-teal-700 rounded"
+                        >
+                          {company}
+                        </span>
+                      ))}
+                      {problem.domains?.slice(0, 3).map((domain) => (
+                        <span
+                          key={domain}
+                          className="text-xs px-2 py-0.5 bg-purple-50 text-purple-700 rounded"
+                        >
+                          {domain}
+                        </span>
+                      ))}
                     </div>
                   )}
 

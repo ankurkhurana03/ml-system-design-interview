@@ -1,7 +1,8 @@
 import { useState, useCallback } from 'react';
 import { parse } from 'yaml';
-import { getLLMSettings } from '@/utils/llmKeyStore';
-import type { TreeNode, Choice, InterviewLLMResponse, DialogueLine, MLStage } from '@/types/tree';
+import { callLLM, callLLMWithCitations } from '@/utils/llmClient';
+import { injectSourcesIntoPrompt } from '@/utils/sourceInjection';
+import type { TreeNode, Choice, InterviewLLMResponse, DialogueLine, MLStage, UserSource } from '@/types/tree';
 
 interface ConversationEntry {
   role: 'user' | 'assistant';
@@ -16,6 +17,7 @@ interface ClassifyParams {
   choices: Choice[];
   conversationHistory: ConversationEntry[];
   problemTitle: string;
+  sources?: UserSource[];
 }
 
 interface GenerateBranchParams {
@@ -26,59 +28,7 @@ interface GenerateBranchParams {
   problemTitle: string;
   existingYaml: string;
   downstreamContext?: Array<{ id: string; label: string; stage: string; type: string }>;
-}
-
-// Strip <think>...</think> blocks from thinking models (Qwen 3, DeepSeek-R1, etc.)
-function stripThinkingBlocks(text: string): string {
-  return text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
-}
-
-async function callLLM(
-  systemPrompt: string,
-  userMessage: string,
-  conversationHistory?: ConversationEntry[],
-  maxTokens: number = 2000,
-): Promise<string> {
-  const settings = getLLMSettings();
-  if (!settings) {
-    throw new Error('No LLM settings configured. Please configure your API key in settings.');
-  }
-
-  const messages: { role: string; content: string }[] = [
-    { role: 'system', content: systemPrompt },
-  ];
-
-  if (conversationHistory) {
-    for (const entry of conversationHistory) {
-      messages.push({ role: entry.role, content: entry.content });
-    }
-  }
-
-  messages.push({ role: 'user', content: userMessage });
-
-  // Call LLM directly from the client — key never touches the server
-  const response = await fetch(`${settings.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${settings.apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: settings.model,
-      messages,
-      temperature: 0.7,
-      max_tokens: maxTokens,
-    }),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`LLM API error: ${errorText}`);
-  }
-
-  const data = await response.json();
-  const content = data.choices?.[0]?.message?.content || '';
-  return stripThinkingBlocks(content);
+  sources?: UserSource[];
 }
 
 function tryParseJSON(str: string): Record<string, unknown> | null {
@@ -87,12 +37,9 @@ function tryParseJSON(str: string): Record<string, unknown> | null {
     return JSON.parse(trimmed);
   } catch {
     // Try fixing truncated JSON by closing open strings/objects
-    // Common case: model ran out of tokens before closing brace
     let fixed = trimmed;
-    // Close unclosed string
     const quoteCount = (fixed.match(/(?<!\\)"/g) || []).length;
     if (quoteCount % 2 !== 0) fixed += '"';
-    // Close unclosed object
     if (!fixed.endsWith('}')) fixed += '}';
     try {
       return JSON.parse(fixed);
@@ -137,7 +84,6 @@ const VALID_STAGES: MLStage[] = [
 ];
 
 const STAGE_ALIASES: Record<string, MLStage> = {
-  // Common LLM hallucinations → correct stage
   problem_formulation: 'problem_definition',
   problem: 'problem_definition',
   definition: 'problem_definition',
@@ -182,7 +128,6 @@ export function repairStage(raw: string): MLStage {
     if (lower.includes(valid) || valid.includes(lower)) return valid;
   }
 
-  // Last resort: default to 'monitoring' (safe for generated nodes near end of tree)
   console.warn(`[repairNodes] Unknown stage "${raw}", defaulting to monitoring`);
   return 'monitoring';
 }
@@ -288,14 +233,23 @@ RESPONSE FORMAT — Return ONLY valid JSON, no markdown:
 
 Stay in character as a professional but friendly interviewer. Keep replies concise.`;
 
+        const finalSystemPrompt = params.sources && params.sources.length > 0
+          ? injectSourcesIntoPrompt(systemPrompt, params.sources)
+          : systemPrompt;
+
         // Limit conversation history to last 6 entries to fit within model context window
         const recentHistory = params.conversationHistory.slice(-6);
-        const conversationHistory: ConversationEntry[] = recentHistory.map((e) => ({
+        const conversationHistory = recentHistory.map((e) => ({
           role: e.role,
           content: e.content,
         }));
 
-        const raw = await callLLM(systemPrompt, params.userText + ' /no_think', conversationHistory);
+        const raw = await callLLM({
+          systemPrompt: finalSystemPrompt,
+          userMessage: params.userText + ' /no_think',
+          conversationHistory,
+          maxTokens: 2000,
+        });
         console.log('[InterviewLLM] Classification raw response:', raw.substring(0, 500));
         const result = parseClassifyResponse(raw);
         console.log('[InterviewLLM] Parsed intent:', result.intent);
@@ -313,11 +267,6 @@ Stay in character as a professional but friendly interviewer. Keep replies conci
 
   const generateBranch = useCallback(
     async (params: GenerateBranchParams): Promise<TreeNode[]> => {
-      const settings = getLLMSettings();
-      if (!settings) {
-        throw new Error('No LLM settings configured');
-      }
-
       let convergenceBlock = '';
       if (params.downstreamContext && params.downstreamContext.length > 0) {
         const nodeList = params.downstreamContext
@@ -378,13 +327,21 @@ Candidate's approach: ${params.choiceAnswer}
 
 Generate a branch of 3-6 nodes exploring this approach, continuing through remaining ML stages to a terminal node. Output ONLY the YAML array. /no_think`;
 
-      const raw = await callLLM(systemPrompt, userMessage, undefined, 4096);
-      console.log('[InterviewLLM] Branch generation raw response:', raw.substring(0, 1000));
+      const finalBranchPrompt = params.sources && params.sources.length > 0
+        ? injectSourcesIntoPrompt(systemPrompt, params.sources)
+        : systemPrompt;
+
+      const response = await callLLMWithCitations({
+        systemPrompt: finalBranchPrompt,
+        userMessage,
+        maxTokens: 4096,
+      });
+      console.log('[InterviewLLM] Branch generation raw response:', response.content.substring(0, 1000));
 
       // Extract YAML
-      const yamlBlockMatch = raw.match(/```ya?ml\n([\s\S]*?)\n```/);
-      const codeBlockMatch = raw.match(/```\n([\s\S]*?)\n```/);
-      const yamlStr = yamlBlockMatch?.[1] || codeBlockMatch?.[1] || raw;
+      const yamlBlockMatch = response.content.match(/```ya?ml\n([\s\S]*?)\n```/);
+      const codeBlockMatch = response.content.match(/```\n([\s\S]*?)\n```/);
+      const yamlStr = yamlBlockMatch?.[1] || codeBlockMatch?.[1] || response.content;
 
       const parsed = parse(yamlStr);
       console.log('[InterviewLLM] Parsed nodes count:', Array.isArray(parsed) ? parsed.length : 'not array');
@@ -404,6 +361,12 @@ Generate a branch of 3-6 nodes exploring this approach, continuing through remai
 
       // Repair common LLM output issues (invalid stages, missing fields, etc.)
       const repaired = repairNodes(nodes);
+
+      // Attach citations from the LLM response to the first node
+      if (response.citations && response.citations.length > 0 && repaired.length > 0) {
+        repaired[0].citations = response.citations;
+      }
+
       console.log('[InterviewLLM] Repaired nodes:', repaired.map(n => `${n.id}[${n.stage}/${n.type}]`).join(', '));
 
       return repaired;

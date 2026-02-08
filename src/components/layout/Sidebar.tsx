@@ -24,6 +24,12 @@ const ChevronRightIcon = () => (
   </svg>
 );
 
+const ChevronDownIcon = () => (
+  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+  </svg>
+);
+
 const SearchIcon = () => (
   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -64,21 +70,82 @@ export function Sidebar({
   onToggleCollapse,
 }: SidebarProps) {
   const [searchQuery, setSearchQuery] = useState('');
+  const [selectedCompanies, setSelectedCompanies] = useState<Set<string>>(new Set());
+  const [selectedDomains, setSelectedDomains] = useState<Set<string>>(new Set());
+  const [filtersExpanded, setFiltersExpanded] = useState(false);
 
-  // Group problems by source
+  // Compute available options from actual problem data
+  const availableOptions = useMemo(() => {
+    const companies = new Set<string>();
+    const domains = new Set<string>();
+    for (const p of problems) {
+      p.companies?.forEach((c) => companies.add(c));
+      p.domains?.forEach((d) => domains.add(d));
+    }
+    return {
+      companies: [...companies].sort(),
+      domains: [...domains].sort(),
+    };
+  }, [problems]);
+
+  const activeFilterCount = selectedCompanies.size + selectedDomains.size;
+
+  const toggleCompany = (company: string) => {
+    setSelectedCompanies((prev) => {
+      const next = new Set(prev);
+      if (next.has(company)) next.delete(company);
+      else next.add(company);
+      return next;
+    });
+  };
+
+  const toggleDomain = (domain: string) => {
+    setSelectedDomains((prev) => {
+      const next = new Set(prev);
+      if (next.has(domain)) next.delete(domain);
+      else next.add(domain);
+      return next;
+    });
+  };
+
+  const clearFilters = () => {
+    setSelectedCompanies(new Set());
+    setSelectedDomains(new Set());
+  };
+
+  // Group problems by source with filtering
   const groupedProblems = useMemo(() => {
-    const filtered = problems.filter(p =>
-      p.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      p.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (p.tags?.some(tag => tag.toLowerCase().includes(searchQuery.toLowerCase())))
-    );
+    const query = searchQuery.toLowerCase();
+    const filtered = problems.filter((p) => {
+      // Text search: title, description, tags, companies, domains
+      const matchesSearch =
+        !query ||
+        (p.title ?? '').toLowerCase().includes(query) ||
+        (p.description ?? '').toLowerCase().includes(query) ||
+        p.tags?.some((tag) => tag.toLowerCase().includes(query)) ||
+        p.companies?.some((c) => c.toLowerCase().includes(query)) ||
+        p.domains?.some((d) => d.toLowerCase().includes(query));
+
+      // Company filter: OR within selection
+      const matchesCompany =
+        selectedCompanies.size === 0 ||
+        p.companies?.some((c) => selectedCompanies.has(c));
+
+      // Domain filter: OR within selection
+      const matchesDomain =
+        selectedDomains.size === 0 ||
+        p.domains?.some((d) => selectedDomains.has(d));
+
+      // AND across categories
+      return matchesSearch && matchesCompany && matchesDomain;
+    });
 
     return {
-      builtin: filtered.filter(p => p.source === 'builtin'),
-      gallery: filtered.filter(p => p.source === 'gallery'),
-      draft: filtered.filter(p => p.source === 'draft'),
+      builtin: filtered.filter((p) => p.source === 'builtin'),
+      gallery: filtered.filter((p) => p.source === 'gallery'),
+      draft: filtered.filter((p) => p.source === 'draft'),
     };
-  }, [problems, searchQuery]);
+  }, [problems, searchQuery, selectedCompanies, selectedDomains]);
 
   if (isCollapsed) {
     return (
@@ -140,6 +207,88 @@ export function Sidebar({
           />
         </div>
       </div>
+
+      {/* Filters */}
+      {(availableOptions.companies.length > 0 || availableOptions.domains.length > 0) && (
+        <div className="border-b border-slate-700">
+          <button
+            onClick={() => setFiltersExpanded(!filtersExpanded)}
+            className="w-full flex items-center justify-between px-3 py-2 text-sm text-slate-300 hover:text-white hover:bg-slate-800 transition-colors"
+          >
+            <span className="font-medium">
+              Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}
+            </span>
+            <div className="flex items-center gap-2">
+              {activeFilterCount > 0 && (
+                <span
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    clearFilters();
+                  }}
+                  className="text-xs text-blue-400 hover:text-blue-300"
+                >
+                  Clear all
+                </span>
+              )}
+              <span className={`transition-transform ${filtersExpanded ? 'rotate-180' : ''}`}>
+                <ChevronDownIcon />
+              </span>
+            </div>
+          </button>
+
+          {filtersExpanded && (
+            <div className="px-3 pb-3 space-y-3">
+              {/* Company filters */}
+              {availableOptions.companies.length > 0 && (
+                <div>
+                  <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
+                    Company
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {availableOptions.companies.map((company) => (
+                      <button
+                        key={company}
+                        onClick={() => toggleCompany(company)}
+                        className={`text-xs px-2 py-1 rounded-full transition-colors ${
+                          selectedCompanies.has(company)
+                            ? 'bg-teal-600 text-white'
+                            : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                        }`}
+                      >
+                        {company}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Domain filters */}
+              {availableOptions.domains.length > 0 && (
+                <div>
+                  <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
+                    Domain
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {availableOptions.domains.map((domain) => (
+                      <button
+                        key={domain}
+                        onClick={() => toggleDomain(domain)}
+                        className={`text-xs px-2 py-1 rounded-full transition-colors ${
+                          selectedDomains.has(domain)
+                            ? 'bg-purple-600 text-white'
+                            : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                        }`}
+                      >
+                        {domain}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Problem List */}
       <div className="flex-1 overflow-y-auto">
@@ -274,6 +423,7 @@ function ProblemItem({ problem, isActive, onClick }: ProblemItemProps) {
       <p className={`text-xs leading-relaxed ${isActive ? 'text-blue-100' : 'text-slate-400'}`}>
         {truncateText(problem.description, 80)}
       </p>
+      {/* General tags */}
       {problem.tags && problem.tags.length > 0 && (
         <div className="flex flex-wrap gap-1 mt-2">
           {problem.tags.slice(0, 3).map((tag, idx) => (
@@ -286,6 +436,36 @@ function ProblemItem({ problem, isActive, onClick }: ProblemItemProps) {
               }`}
             >
               {tag}
+            </span>
+          ))}
+        </div>
+      )}
+      {/* Company & domain badges */}
+      {((problem.companies && problem.companies.length > 0) ||
+        (problem.domains && problem.domains.length > 0)) && (
+        <div className="flex flex-wrap gap-1 mt-1.5">
+          {problem.companies?.slice(0, 2).map((company) => (
+            <span
+              key={company}
+              className={`text-xs px-1.5 py-0.5 rounded ${
+                isActive
+                  ? 'bg-teal-700 text-teal-100'
+                  : 'bg-teal-900/50 text-teal-300'
+              }`}
+            >
+              {company}
+            </span>
+          ))}
+          {problem.domains?.slice(0, 2).map((domain) => (
+            <span
+              key={domain}
+              className={`text-xs px-1.5 py-0.5 rounded ${
+                isActive
+                  ? 'bg-purple-700 text-purple-100'
+                  : 'bg-purple-900/50 text-purple-300'
+              }`}
+            >
+              {domain}
             </span>
           ))}
         </div>

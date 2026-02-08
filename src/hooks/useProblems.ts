@@ -3,6 +3,7 @@ import type { Problem, ProblemMeta } from '@/types/tree';
 import { loadBuiltinProblems } from '@/data/problems';
 import { supabase } from '@/lib/supabase';
 import { parse } from 'yaml';
+import { decompressTextSafe } from '@/utils/compression';
 
 export function useProblems() {
   const [problems, setProblems] = useState<Problem[]>([]);
@@ -18,6 +19,8 @@ export function useProblems() {
           id: p.id,
           title: p.title,
           description: p.description,
+          companies: p.companies,
+          domains: p.domains,
           source: 'builtin' as const,
         }));
 
@@ -33,7 +36,7 @@ export function useProblems() {
         if (galleryData) {
           for (const gp of galleryData) {
             try {
-              const problem = parse(gp.yaml_content) as Problem;
+              const problem = parse(decompressTextSafe(gp.yaml_content)) as Problem;
               galleryProblems.push(problem);
               galleryMetas.push({
                 id: problem.id,
@@ -42,6 +45,8 @@ export function useProblems() {
                 author: gp.author_name,
                 difficulty: gp.difficulty,
                 tags: gp.tags,
+                companies: gp.companies || [],
+                domains: gp.domains || [],
                 source: 'gallery' as const,
               });
             } catch (err) {
@@ -80,6 +85,8 @@ export function useProblems() {
             id: p.id,
             title: p.title,
             description: p.description,
+            companies: p.companies,
+            domains: p.domains,
             source: 'builtin' as const,
           })),
         );
@@ -95,12 +102,14 @@ export function useProblems() {
     return problems.find(p => p.id === id);
   };
 
-  const addProblem = (problem: Problem, source: 'gallery' | 'draft' = 'draft') => {
+  const addProblem = (problem: Problem, source: 'gallery' | 'draft' = 'draft', meta?: { companies?: string[]; domains?: string[] }) => {
     setProblems(prev => [...prev, problem]);
     setProblemMetas(prev => [...prev, {
       id: problem.id,
       title: problem.title,
       description: problem.description,
+      companies: meta?.companies,
+      domains: meta?.domains,
       source,
     }]);
   };

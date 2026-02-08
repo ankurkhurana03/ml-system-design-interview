@@ -1,6 +1,7 @@
 import { useState, useCallback } from 'react';
 import type { TreeNode, DimensionGroup, Dimension } from '@/types/tree';
-import { getLLMSettings } from '@/utils/llmKeyStore';
+import { callLLM } from '@/utils/llmClient';
+import { CitationsList } from './CitationsList';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -62,20 +63,11 @@ Suggest 2-3 additional clarifying dimensions with 2-3 options each that would he
 [{"id": "unique_id", "label": "Dimension Name", "description": "Brief description", "options": [{"value": "val1", "label": "Option 1"}, {"value": "val2", "label": "Option 2"}]}]`;
 
     try {
-      let answerText = '';
-
-      const settings = getLLMSettings();
-      if (!settings) throw new Error('No LLM settings configured. Please configure your API key in settings.');
-
-      // Call LLM directly — key stays client-side
-      const response = await fetch(`${settings.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${settings.apiKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: settings.model, messages: [{ role: 'user', content: prompt }], temperature: 0.7, max_tokens: 800 }),
+      const answerText = await callLLM({
+        systemPrompt: 'You are an ML system design expert. Return ONLY valid JSON.',
+        userMessage: prompt,
+        maxTokens: 800,
       });
-      if (!response.ok) throw new Error('LLM API error');
-      const data = await response.json();
-      answerText = data.choices?.[0]?.message?.content || '';
 
       // Extract JSON from response
       const jsonMatch = answerText.match(/\[[\s\S]*\]/);
@@ -127,6 +119,7 @@ Suggest 2-3 additional clarifying dimensions with 2-3 options each that would he
           <div className="text-gray-700 leading-relaxed prose prose-sm max-w-none overflow-x-auto break-words">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{node.content}</ReactMarkdown>
           </div>
+          <CitationsList citations={node.citations} />
         </div>
 
         {/* Multi-select icon badge */}

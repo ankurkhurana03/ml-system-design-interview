@@ -1,15 +1,19 @@
 import { useState, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
 import { getLLMSettings } from '@/utils/llmKeyStore';
+import { callLLM, callLLMWithSources } from '@/utils/llmClient';
+import type { UserSource, ParsedCitation } from '@/types/tree';
 
 export interface AIAnswerResponse {
   answer: string;
   question: string;
   timestamp: string;
+  sourceCitations?: ParsedCitation[];
 }
 
 export function useAIAnswer() {
   const [answer, setAnswer] = useState<string | null>(null);
+  const [sourceCitations, setSourceCitations] = useState<ParsedCitation[] | undefined>(undefined);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -19,6 +23,7 @@ export function useAIAnswer() {
       nodeContent: string,
       nodeStage: string,
       problemTitle: string,
+      sources?: UserSource[],
     ): Promise<string | null> => {
       if (!question.trim()) {
         setError('Question cannot be empty');
@@ -28,6 +33,7 @@ export function useAIAnswer() {
       setLoading(true);
       setError(null);
       setAnswer(null);
+      setSourceCitations(undefined);
 
       try {
         const settings = getLLMSettings();
@@ -63,7 +69,7 @@ export function useAIAnswer() {
           }
         }
 
-        // Direct API call — key sent from browser to LLM provider over HTTPS
+        // Direct API call via centralized callLLM — key sent from browser to LLM provider over HTTPS
         const systemPrompt = `You are an ML system design expert and interview coach. Your role is to help candidates learn and understand ML system design concepts through clear, concise, and educational answers.
 
 When answering questions:
@@ -79,36 +85,30 @@ Current context:
 - Interview stage: ${nodeStage}
 - Node content: ${nodeContent.substring(0, 200)}${nodeContent.length > 200 ? '...' : ''}`;
 
-        const response = await fetch(`${settings.baseUrl}/chat/completions`, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${settings.apiKey}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            model: settings.model,
-            messages: [
-              { role: 'system', content: systemPrompt },
-              { role: 'user', content: question },
-            ],
-            temperature: 0.7,
-            max_tokens: 1000,
-          }),
-        });
+        let answerText: string;
+        let citations: ParsedCitation[] | undefined;
 
-        if (!response.ok) {
-          const errorText = await response.text();
-          throw new Error(`LLM API error: ${errorText}`);
+        if (sources && sources.length > 0) {
+          const response = await callLLMWithSources(
+            { systemPrompt, userMessage: question, maxTokens: 1000 },
+            sources,
+          );
+          answerText = response.content;
+          citations = response.sourceCitations;
+        } else {
+          answerText = await callLLM({
+            systemPrompt,
+            userMessage: question,
+            maxTokens: 1000,
+          });
         }
-
-        const data = await response.json();
-        const answerText = data.choices?.[0]?.message?.content || '';
 
         if (!answerText) {
           throw new Error('No answer generated');
         }
 
         setAnswer(answerText);
+        setSourceCitations(citations);
         return answerText;
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : 'Failed to get AI answer';
@@ -121,5 +121,5 @@ Current context:
     [],
   );
 
-  return { answer, loading, error, askQuestion };
+  return { answer, sourceCitations, loading, error, askQuestion };
 }

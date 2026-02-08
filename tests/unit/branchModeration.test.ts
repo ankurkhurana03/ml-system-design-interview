@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { TreeNode } from '@/types/tree';
+import { decompressTextSafe } from '@/utils/compression';
 
 // Hoisted mocks
 const { mockInsert, mockFrom } = vi.hoisted(() => {
@@ -49,7 +50,9 @@ describe('submitBranchForModeration', () => {
     expect(insertArg.status).toBe('pending');
     expect(insertArg.author_id).toBe('user-123');
     expect(insertArg.author_name).toBe('test@example.com');
-    expect(insertArg.yaml_content).toContain('gen_1');
+    // yaml_content is now compressed — decompress to verify content
+    const decompressed = decompressTextSafe(insertArg.yaml_content);
+    expect(decompressed).toContain('gen_1');
   });
 
   it('silently skips when user is not authenticated', async () => {

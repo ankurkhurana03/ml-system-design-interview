@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { TreeNode, DialogueLine } from '@/types/tree';
+import type { TreeNode, DialogueLine, UserSource } from '@/types/tree';
 import { NodeComments } from './NodeComments';
 import { ComparisonMode } from './ComparisonMode';
 import { AskAIPanel } from './AskAIPanel';
@@ -12,6 +12,7 @@ import { generateTranscript } from '../transcript/generateTranscript';
 import { DialogueView } from './DialogueView';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { CitationsList } from './CitationsList';
 
 interface QuestionCardProps {
   node: TreeNode;
@@ -27,6 +28,7 @@ interface QuestionCardProps {
   branchGenerating?: boolean;
   branchError?: string | null;
   onDismissError?: () => void;
+  sources?: UserSource[];
 }
 
 const STAGE_COLORS: Record<string, string> = {
@@ -40,7 +42,7 @@ const STAGE_COLORS: Record<string, string> = {
   monitoring: 'pink',
 };
 
-export function QuestionCard({ node, problemId, onSelectChoice, onAdvance, onReset, liveDialogue, isTyping, onFreeformSubmit, freeformLoading, pendingNovelChoice, branchGenerating, branchError, onDismissError }: QuestionCardProps) {
+export function QuestionCard({ node, problemId, onSelectChoice, onAdvance, onReset, liveDialogue, isTyping, onFreeformSubmit, freeformLoading, pendingNovelChoice, branchGenerating, branchError, onDismissError, sources }: QuestionCardProps) {
   const stageColor = STAGE_COLORS[node.stage] || 'gray';
   const isInterviewer = node.speaker === 'interviewer';
   const [showComparison, setShowComparison] = useState(false);
@@ -154,6 +156,7 @@ export function QuestionCard({ node, problemId, onSelectChoice, onAdvance, onRes
               </div>
             );
           })()}
+          <CitationsList citations={node.citations} />
         </div>
 
         {/* Actions based on node type */}
@@ -338,6 +341,7 @@ export function QuestionCard({ node, problemId, onSelectChoice, onAdvance, onRes
             problemId={problemId}
             problemTitle={problem?.title || 'ML System Design Interview'}
             onSaveAsComment={handleSaveAIAsComment}
+            sources={sources}
           />
         )}
 

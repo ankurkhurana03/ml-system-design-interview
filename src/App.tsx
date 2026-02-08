@@ -141,10 +141,16 @@ function AppContent() {
             {/* Mode Badge */}
             <button
               onClick={() => setModeSelectOpen(true)}
-              className="px-2.5 py-1 text-xs font-medium rounded-full border transition-colors hover:bg-gray-50"
+              className={`px-3 py-1 text-xs font-semibold rounded-full border transition-colors ${
+                mode === 'mock_interview'
+                  ? 'bg-red-50 text-red-700 border-red-300 hover:bg-red-100'
+                  : mode === 'tutor'
+                    ? 'bg-indigo-50 text-indigo-700 border-indigo-300 hover:bg-indigo-100'
+                    : 'bg-emerald-50 text-emerald-700 border-emerald-300 hover:bg-emerald-100'
+              }`}
               title="Change Interview Mode"
             >
-              {mode === 'mock_interview' ? 'Mock' : mode === 'tutor' ? 'Tutor' : 'Designer'}
+              {mode === 'mock_interview' ? 'Mock Interview' : mode === 'tutor' ? 'Tutor Mode' : 'Designer Mode'}
             </button>
             <PracticeTimer />
             {voiceOver.isSupported && (

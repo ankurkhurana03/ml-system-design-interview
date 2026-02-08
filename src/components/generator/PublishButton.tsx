@@ -3,6 +3,7 @@ import { stringify } from 'yaml';
 import type { Problem } from '@/types/tree';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/hooks/useAuth';
+import { compressText } from '@/utils/compression';
 
 interface PublishButtonProps {
   problem: Problem;
@@ -25,7 +26,7 @@ export function PublishButton({ problem, onPublished }: PublishButtonProps) {
     setError(null);
 
     try {
-      const yamlContent = stringify(problem);
+      const yamlContent = compressText(stringify(problem));
 
       // Check if a draft with this problem_id already exists
       const { data: existingDraft } = await supabase

@@ -57,6 +57,7 @@ export interface TreeNode {
   routes?: MultiSelectRoute[];       // For multi_select nodes
   defaultRoute?: string;             // Fallback target for multi_select
   dialogue?: DialogueLine[];         // Optional dialogue for tutor/mock modes
+  citations?: string[];              // Source URLs (e.g., from Perplexity grounded responses)
 }
 
 export interface Problem {
@@ -130,6 +131,8 @@ export interface ProblemMeta {
   author?: string;
   difficulty?: 'beginner' | 'intermediate' | 'advanced';
   tags?: string[];
+  companies?: string[];  // e.g., ["Google", "Meta"]
+  domains?: string[];    // e.g., ["NLP", "Ranking/Search"]
   source: 'builtin' | 'gallery' | 'draft';
 }
 
@@ -160,4 +163,21 @@ export interface AuditLogEntry {
   rules_applied: string[] | null;
   metadata: Record<string, any>;
   created_at: string;
+}
+
+// Source-grounded LLM responses
+export interface UserSource {
+  id: string;               // crypto.randomUUID()
+  type: 'url' | 'text';
+  url?: string;             // Original URL (type='url')
+  title: string;            // Auto-derived or user-edited
+  content: string;          // Full extracted text / user-pasted text
+  summary?: string;         // LLM-generated summary for long sources
+  addedAt: string;          // ISO timestamp
+  charCount: number;
+}
+
+export interface ParsedCitation {
+  index: number;            // 1-based [1], [2] from LLM text
+  source: UserSource;
 }

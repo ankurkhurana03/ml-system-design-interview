@@ -3,13 +3,18 @@ import dynamicPricingYaml from './dynamic-pricing.yaml?raw';
 import { parse } from 'yaml';
 import type { Problem } from '@/types/tree';
 
-export function loadBuiltinProblems(): Problem[] {
-  const problems: Problem[] = [];
+export interface BuiltinProblem extends Problem {
+  companies?: string[];
+  domains?: string[];
+}
 
-  const flightDelay = parse(flightDelayYaml) as Problem;
+export function loadBuiltinProblems(): BuiltinProblem[] {
+  const problems: BuiltinProblem[] = [];
+
+  const flightDelay = parse(flightDelayYaml) as BuiltinProblem;
   problems.push(flightDelay);
 
-  const dynamicPricing = parse(dynamicPricingYaml) as Problem;
+  const dynamicPricing = parse(dynamicPricingYaml) as BuiltinProblem;
   problems.push(dynamicPricing);
 
   return problems;

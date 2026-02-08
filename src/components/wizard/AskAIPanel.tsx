@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useAIAnswer, type AIAnswerResponse } from '@/hooks/useAIAnswer';
+import { CitationsList } from './CitationsList';
+import type { UserSource } from '@/types/tree';
 
 interface AskAIPanelProps {
   nodeId: string;
@@ -8,6 +10,7 @@ interface AskAIPanelProps {
   problemId: string;
   problemTitle: string;
   onSaveAsComment?: (question: string, answer: string) => void;
+  sources?: UserSource[];
 }
 
 export function AskAIPanel({
@@ -17,11 +20,12 @@ export function AskAIPanel({
   problemId,
   problemTitle,
   onSaveAsComment,
+  sources,
 }: AskAIPanelProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [question, setQuestion] = useState('');
   const [history, setHistory] = useState<AIAnswerResponse[]>([]);
-  const { answer, loading, error, askQuestion } = useAIAnswer();
+  const { answer, sourceCitations, loading, error, askQuestion } = useAIAnswer();
 
   // Load history from localStorage on mount
   useEffect(() => {
@@ -54,7 +58,7 @@ export function AskAIPanel({
     e.preventDefault();
     if (!question.trim() || loading) return;
 
-    await askQuestion(question.trim(), nodeContent, nodeStage, problemTitle);
+    await askQuestion(question.trim(), nodeContent, nodeStage, problemTitle, sources);
   };
 
   const handleSaveAsComment = () => {
@@ -203,6 +207,7 @@ export function AskAIPanel({
               <div className="text-sm text-gray-700 whitespace-pre-wrap leading-relaxed">
                 {answer}
               </div>
+              <CitationsList sourceCitations={sourceCitations} />
             </div>
           )}
 

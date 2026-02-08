@@ -9,6 +9,7 @@ import { ModerationSettings } from '@/components/admin/ModerationSettings';
 import { AuditLogPanel } from './AuditLogPanel';
 import { ModerationAnalytics } from './ModerationAnalytics';
 import type { NodeComment, CommentStatus } from '@/types/tree';
+import { decompressTextSafe } from '@/utils/compression';
 
 type TabType = 'pending' | 'approved' | 'rejected' | 'all' | 'branches' | 'settings' | 'audit' | 'analytics';
 
@@ -585,7 +586,7 @@ export function ModerationPanel({ isOpen, onClose }: ModerationPanelProps) {
                       {/* YAML Preview */}
                       <details className="mb-3">
                         <summary className="text-sm text-blue-600 cursor-pointer hover:text-blue-800">View YAML</summary>
-                        <pre className="mt-2 p-3 bg-gray-50 rounded-lg text-xs overflow-x-auto max-h-48 overflow-y-auto">{branch.yaml_content}</pre>
+                        <pre className="mt-2 p-3 bg-gray-50 rounded-lg text-xs overflow-x-auto max-h-48 overflow-y-auto">{decompressTextSafe(branch.yaml_content)}</pre>
                       </details>
 
                       {branch.moderation_reason && (

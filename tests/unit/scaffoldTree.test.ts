@@ -212,6 +212,81 @@ describe('buildContentFillingPrompt', () => {
     expect(prompt).toContain('"type": "question"');
     expect(prompt).toContain('"choices"');
   });
+
+  it('filters nodes by stageFilter', () => {
+    const scaffold = scaffoldTree({
+      title: 'Test',
+      description: 'Test',
+      numBranches: 1,
+    });
+
+    const prompt = buildContentFillingPrompt(scaffold, 'Test', {
+      stageFilter: ['problem_definition', 'metrics'],
+    });
+
+    // Should contain nodes from filtered stages
+    const pdNodes = scaffold.nodes.filter((n) => n.stage === 'problem_definition');
+    const metNodes = scaffold.nodes.filter((n) => n.stage === 'metrics');
+    for (const n of [...pdNodes, ...metNodes]) {
+      expect(prompt).toContain(n.id);
+    }
+
+    // Should NOT contain nodes from other stages
+    const dataNodes = scaffold.nodes.filter((n) => n.stage === 'data');
+    for (const n of dataNodes) {
+      expect(prompt).not.toContain(`"id": "${n.id}"`);
+    }
+
+    // Should include stage filter note
+    expect(prompt).toContain('NOTE: You are filling stages:');
+    expect(prompt).toContain('problem_definition');
+  });
+
+  it('uses concise guidance by default', () => {
+    const scaffold = scaffoldTree({
+      title: 'Test',
+      description: 'Test',
+      numBranches: 1,
+    });
+
+    const prompt = buildContentFillingPrompt(scaffold, 'Test');
+    expect(prompt).toContain('50-200 words');
+    expect(prompt).not.toContain('100-300 words');
+  });
+
+  it('uses detailed guidance when depth is detailed', () => {
+    const scaffold = scaffoldTree({
+      title: 'Test',
+      description: 'Test',
+      numBranches: 1,
+    });
+
+    const prompt = buildContentFillingPrompt(scaffold, 'Test', {
+      depth: 'detailed',
+    });
+    expect(prompt).toContain('100-300 words');
+    expect(prompt).toContain('Python/SQL code snippets');
+    expect(prompt).toContain('5-8 educational sentences');
+  });
+
+  it('combines depth and stageFilter', () => {
+    const scaffold = scaffoldTree({
+      title: 'Test',
+      description: 'Test',
+      numBranches: 1,
+    });
+
+    const prompt = buildContentFillingPrompt(scaffold, 'Test', {
+      depth: 'detailed',
+      stageFilter: ['model', 'training'],
+    });
+
+    // Detailed content
+    expect(prompt).toContain('100-300 words');
+    // Stage filter note
+    expect(prompt).toContain('NOTE: You are filling stages:');
+    expect(prompt).toContain('model');
+  });
 });
 
 describe('mergeContentIntoScaffold', () => {

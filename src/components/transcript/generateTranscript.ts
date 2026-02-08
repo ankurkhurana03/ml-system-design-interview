@@ -103,6 +103,15 @@ export function generateTranscript(
       // For info and terminal nodes, just show the content
       transcript += `${speakerPrefix}: ${node.content.trim()}\n\n`;
     }
+
+    // Append citations if present
+    if (node.citations && node.citations.length > 0) {
+      transcript += `**Sources**:\n`;
+      for (let i = 0; i < node.citations.length; i++) {
+        transcript += `${i + 1}. [${node.citations[i]}](${node.citations[i]})\n`;
+      }
+      transcript += `\n`;
+    }
   }
 
   // Add notes section if provided

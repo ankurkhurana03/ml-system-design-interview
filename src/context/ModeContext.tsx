@@ -69,7 +69,7 @@ export function ModeProvider({ children }: { children: ReactNode }) {
     if (stored && (stored === 'mock_interview' || stored === 'tutor' || stored === 'designer')) {
       return stored as InterviewMode;
     }
-    return 'designer';
+    return 'tutor';
   });
 
   useEffect(() => {

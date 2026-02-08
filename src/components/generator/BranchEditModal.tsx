@@ -2,7 +2,7 @@ import { useState, useMemo } from 'react';
 import { stringify, parse } from 'yaml';
 import type { Problem, TreeNode } from '@/types/tree';
 import { mergeBranch, type EditType } from '@/utils/mergeBranch';
-import { getLLMSettings } from '@/utils/llmKeyStore';
+import { callLLM } from '@/utils/llmClient';
 
 interface BranchEditModalProps {
   isOpen: boolean;
@@ -62,42 +62,32 @@ export function BranchEditModal({
   if (!isOpen) return null;
 
   const extractYaml = (text: string): string => {
-    // Try to extract YAML from markdown code blocks
     const yamlBlockMatch = text.match(/```ya?ml\n([\s\S]*?)\n```/);
-    if (yamlBlockMatch) {
-      return yamlBlockMatch[1];
-    }
-
-    // Try to extract from generic code blocks
+    if (yamlBlockMatch) return yamlBlockMatch[1];
     const codeBlockMatch = text.match(/```\n([\s\S]*?)\n```/);
-    if (codeBlockMatch) {
-      return codeBlockMatch[1];
-    }
-
-    // Return the whole text if no code blocks found
+    if (codeBlockMatch) return codeBlockMatch[1];
     return text;
   };
 
-  const callLLMDirect = async (): Promise<string> => {
-    const settings = getLLMSettings();
-    if (!settings) {
-      throw new Error('No LLM settings configured. Please configure your API key in settings.');
+  const handleGenerate = async () => {
+    if (!choiceLabel.trim() && editType !== 'continue') {
+      setError('Please enter a choice label');
+      return;
     }
 
-    const existingYaml = stringify(problem);
+    if (!userPrompt.trim() && editType === 'continue') {
+      setError('Please enter a continuation topic');
+      return;
+    }
 
-    const response = await fetch(`${settings.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${settings.apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: settings.model,
-        messages: [
-          {
-            role: 'system',
-            content: `You are an expert ML system design interviewer. Generate NEW branch nodes to extend an existing decision tree.
+    setStatus('generating');
+    setError(null);
+
+    try {
+      const existingYaml = stringify(problem);
+
+      const yamlContent = await callLLM({
+        systemPrompt: `You are an expert ML system design interviewer. Generate NEW branch nodes to extend an existing decision tree.
 
 RULES:
 1. Generate ONLY new nodes (not the entire tree)
@@ -129,48 +119,13 @@ YAML FORMAT:
       answer: "..."
       next: gen_model_1
 \`\`\``,
-          },
-          {
-            role: 'user',
-            content: `Existing tree YAML:\n\`\`\`yaml\n${existingYaml}\n\`\`\`\n\nTarget node ID: ${targetNodeId}\nTarget node stage: ${targetNode?.stage}\nUser request: ${choiceLabel || userPrompt}\n\nGenerate ONLY the new branch nodes as a YAML array.`,
-          },
-        ],
-        temperature: 0.7,
-        max_tokens: 8000,
-      }),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`LLM API error: ${errorText}`);
-    }
-
-    const data = await response.json();
-    return data.choices?.[0]?.message?.content || '';
-  };
-
-  const handleGenerate = async () => {
-    if (!choiceLabel.trim() && editType !== 'continue') {
-      setError('Please enter a choice label');
-      return;
-    }
-
-    if (!userPrompt.trim() && editType === 'continue') {
-      setError('Please enter a continuation topic');
-      return;
-    }
-
-    setStatus('generating');
-    setError(null);
-
-    try {
-      // Call LLM directly — key stays client-side
-      const yamlContent = await callLLMDirect();
+        userMessage: `Existing tree YAML:\n\`\`\`yaml\n${existingYaml}\n\`\`\`\n\nTarget node ID: ${targetNodeId}\nTarget node stage: ${targetNode?.stage}\nUser request: ${choiceLabel || userPrompt}\n\nGenerate ONLY the new branch nodes as a YAML array.`,
+        maxTokens: 8000,
+      });
 
       setStatus('parsing');
       const extractedYaml = extractYaml(yamlContent);
 
-      // Parse as array or object with nodes property
       let parsedNodes: TreeNode[];
       try {
         const parsed = parse(extractedYaml);
