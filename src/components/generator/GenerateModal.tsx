@@ -85,8 +85,6 @@ export function GenerateModal({
         numBranches,
       });
 
-      console.log('[GenerateModal] Scaffold created:', scaffold.nodes.length, 'nodes');
-
       if (mode === 'extensive') {
         await handleExtensiveGenerate(scaffold);
       } else {
@@ -112,8 +110,6 @@ export function GenerateModal({
       maxTokens: 6000,
     });
 
-    console.log('[GenerateModal] LLM response length:', raw.length);
-
     const filledContent = tryParseJSON(raw);
     if (!filledContent) {
       throw new Error('LLM returned invalid JSON. Please try again.');
@@ -129,9 +125,6 @@ export function GenerateModal({
     // Gap-filling: if some nodes still have placeholders, do a second pass
     const unfilled = findUnfilledNodes(problem);
     if (unfilled.length > 0) {
-      console.log(
-        `[GenerateModal] ${unfilled.length} nodes still have placeholders, running gap-fill...`,
-      );
       setStep('filling');
       try {
         const gapPrompt = buildGapFillingPrompt(unfilled, description.trim());
@@ -144,9 +137,6 @@ export function GenerateModal({
         const gapContent = tryParseJSON(gapRaw);
         if (gapContent) {
           problem = mergeGapContent(problem, gapContent as FilledContentItem[]);
-          console.log(
-            `[GenerateModal] Gap-fill merged. Remaining placeholders: ${findUnfilledNodes(problem).length}`,
-          );
         }
       } catch (gapErr) {
         console.warn('[GenerateModal] Gap-fill failed, continuing with partial content:', gapErr);

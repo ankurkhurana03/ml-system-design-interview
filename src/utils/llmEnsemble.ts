@@ -88,7 +88,6 @@ async function callAllProviders(
       const name = provider?.name || id;
 
       const response = await callLLMWithSettings({ ...params, settings });
-      console.log(`[Ensemble] Provider ${name}: success (${response.content.length} chars)`);
       return { providerId: id, providerName: name, response };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

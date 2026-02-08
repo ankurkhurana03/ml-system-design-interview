@@ -53,7 +53,6 @@ export function useAutoRespond(userId: string | null): UseAutoRespondReturn {
       }
 
       if (processedIdsRef.current.has(commentId)) {
-        console.log('Comment already processed:', commentId);
         return;
       }
 

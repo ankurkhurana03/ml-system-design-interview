@@ -190,8 +190,6 @@ export function ModerationPanel({ isOpen, onClose }: ModerationPanelProps) {
 
       // Log AI moderation actions
       if (data?.results) {
-        console.log('Auto-moderation results:', data.results);
-
         // Log each result
         for (const result of data.results) {
           await logAction({

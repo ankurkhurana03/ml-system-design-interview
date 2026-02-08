@@ -36,7 +36,6 @@ function tryParseJSON(str: string): Record<string, unknown> | null {
   try {
     return JSON.parse(trimmed);
   } catch {
-    // Try fixing truncated JSON by closing open strings/objects
     let fixed = trimmed;
     const quoteCount = (fixed.match(/(?<!\\)"/g) || []).length;
     if (quoteCount % 2 !== 0) fixed += '"';
@@ -250,9 +249,7 @@ Stay in character as a professional but friendly interviewer. Keep replies conci
           conversationHistory,
           maxTokens: 2000,
         });
-        console.log('[InterviewLLM] Classification raw response:', raw.substring(0, 500));
         const result = parseClassifyResponse(raw);
-        console.log('[InterviewLLM] Parsed intent:', result.intent);
         return result;
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Failed to classify response';
@@ -336,15 +333,12 @@ Generate a branch of 3-6 nodes exploring this approach, continuing through remai
         userMessage,
         maxTokens: 4096,
       });
-      console.log('[InterviewLLM] Branch generation raw response:', response.content.substring(0, 1000));
-
       // Extract YAML
       const yamlBlockMatch = response.content.match(/```ya?ml\n([\s\S]*?)\n```/);
       const codeBlockMatch = response.content.match(/```\n([\s\S]*?)\n```/);
       const yamlStr = yamlBlockMatch?.[1] || codeBlockMatch?.[1] || response.content;
 
       const parsed = parse(yamlStr);
-      console.log('[InterviewLLM] Parsed nodes count:', Array.isArray(parsed) ? parsed.length : 'not array');
       let nodes: TreeNode[];
 
       if (Array.isArray(parsed)) {
@@ -366,8 +360,6 @@ Generate a branch of 3-6 nodes exploring this approach, continuing through remai
       if (response.citations && response.citations.length > 0 && repaired.length > 0) {
         repaired[0].citations = response.citations;
       }
-
-      console.log('[InterviewLLM] Repaired nodes:', repaired.map(n => `${n.id}[${n.stage}/${n.type}]`).join(', '));
 
       return repaired;
     },

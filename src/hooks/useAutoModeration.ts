@@ -90,15 +90,12 @@ export function useAutoModeration({ config, enabled }: UseAutoModerationOptions)
           table: 'node_comments',
           filter: 'status=eq.pending',
         },
-        (payload) => {
-          console.log('New pending comment detected:', payload.new);
-          // Process immediately
+        () => {
           processPendingComments();
         },
       )
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') {
-          console.log('Auto-moderation realtime active');
         } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
           console.warn('Realtime subscription failed, falling back to polling');
         }
