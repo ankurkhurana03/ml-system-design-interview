@@ -91,7 +91,7 @@ Suggest 2-3 additional clarifying dimensions with 2-3 options each that would he
       className="bg-white rounded-lg shadow-lg border-l-4 overflow-hidden"
       style={{ borderLeftColor: borderColor }}
     >
-      <div className="p-6">
+      <div className="p-3 sm:p-4 md:p-6">
         {/* Speaker Label */}
         <div className="mb-4">
           <span

@@ -119,6 +119,7 @@ export function VoiceOverProvider({ children }: { children: ReactNode }) {
 
   const playbackRef = useRef<TTSPlaybackHandle | null>(null);
   const onEndCallbackRef = useRef<(() => void) | null>(null);
+  const speakGenRef = useRef(0); // generation counter to prevent async TTS overlap
 
   // Load browser voices
   useEffect(() => {
@@ -165,6 +166,8 @@ export function VoiceOverProvider({ children }: { children: ReactNode }) {
   }, [isSupported, interviewerVoice, candidateVoice]);
 
   const stop = useCallback(() => {
+    // Invalidate any in-flight async TTS creation
+    speakGenRef.current++;
     if (playbackRef.current) {
       playbackRef.current.stop();
       playbackRef.current = null;
@@ -222,17 +225,22 @@ export function VoiceOverProvider({ children }: { children: ReactNode }) {
 
       stop();
 
+      // Increment generation counter so any in-flight async TTS is discarded
+      const gen = ++speakGenRef.current;
+
       if (onEnd) {
         onEndCallbackRef.current = onEnd;
       }
 
       const callbacks = {
         onStart: () => {
+          if (speakGenRef.current !== gen) return; // stale
           setIsPlaying(true);
           setIsPaused(false);
           setCurrentSpeaker(speaker);
         },
         onEnd: () => {
+          if (speakGenRef.current !== gen) return; // stale
           setIsPlaying(false);
           setIsPaused(false);
           setCurrentSpeaker(null);
@@ -243,6 +251,7 @@ export function VoiceOverProvider({ children }: { children: ReactNode }) {
           }
         },
         onError: (err: unknown) => {
+          if (speakGenRef.current !== gen) return; // stale
           console.error('TTS error:', err);
           setIsPlaying(false);
           setIsPaused(false);
@@ -259,8 +268,14 @@ export function VoiceOverProvider({ children }: { children: ReactNode }) {
           setModelStatus(status);
           if (progress >= 100) setModelReady(true);
         }).then((handle) => {
+          if (speakGenRef.current !== gen) {
+            // A newer speak() was called while this was being created — discard
+            handle.stop();
+            return;
+          }
           playbackRef.current = handle;
         }).catch((err) => {
+          if (speakGenRef.current !== gen) return; // stale
           callbacks.onError(err);
         });
       } else {

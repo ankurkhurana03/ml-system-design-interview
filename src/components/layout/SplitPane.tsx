@@ -6,6 +6,7 @@ interface SplitPaneProps {
   defaultSplit?: number; // percentage, default 50
   minLeft?: number;      // min percentage, default 25
   minRight?: number;     // min percentage, default 25
+  isMobile?: boolean;
 }
 
 type ViewMode = 'graph' | 'split' | 'wizard';
@@ -49,10 +50,11 @@ export function SplitPane({
   defaultSplit = 50,
   minLeft = 25,
   minRight = 25,
+  isMobile,
 }: SplitPaneProps) {
   const [splitPercent, setSplitPercent] = useState(defaultSplit);
   const [isDragging, setIsDragging] = useState(false);
-  const [viewMode, setViewMode] = useState<ViewMode>('split');
+  const [viewMode, setViewMode] = useState<ViewMode>(isMobile ? 'wizard' : 'split');
   const containerRef = useRef<HTMLDivElement>(null);
   const dragStartX = useRef(0);
   const dragStartPercent = useRef(0);
@@ -113,7 +115,7 @@ export function SplitPane({
         <div className="inline-flex bg-gray-100 rounded-lg p-1">
           <button
             onClick={() => setViewMode('graph')}
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+            className={`flex items-center gap-1.5 md:gap-2 px-2 md:px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
               viewMode === 'graph'
                 ? 'bg-white text-gray-900 shadow-sm'
                 : 'text-gray-600 hover:text-gray-900'
@@ -121,23 +123,25 @@ export function SplitPane({
             title="Graph Only"
           >
             <NetworkIcon />
-            <span>Graph Only</span>
+            <span className="hidden sm:inline">Graph Only</span>
           </button>
-          <button
-            onClick={() => setViewMode('split')}
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
-              viewMode === 'split'
-                ? 'bg-white text-gray-900 shadow-sm'
-                : 'text-gray-600 hover:text-gray-900'
-            }`}
-            title="Split View"
-          >
-            <LayoutIcon />
-            <span>Split</span>
-          </button>
+          {!isMobile && (
+            <button
+              onClick={() => setViewMode('split')}
+              className={`flex items-center gap-1.5 md:gap-2 px-2 md:px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                viewMode === 'split'
+                  ? 'bg-white text-gray-900 shadow-sm'
+                  : 'text-gray-600 hover:text-gray-900'
+              }`}
+              title="Split View"
+            >
+              <LayoutIcon />
+              <span className="hidden sm:inline">Split</span>
+            </button>
+          )}
           <button
             onClick={() => setViewMode('wizard')}
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+            className={`flex items-center gap-1.5 md:gap-2 px-2 md:px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
               viewMode === 'wizard'
                 ? 'bg-white text-gray-900 shadow-sm'
                 : 'text-gray-600 hover:text-gray-900'
@@ -145,7 +149,7 @@ export function SplitPane({
             title="Wizard Only"
           >
             <ListIcon />
-            <span>Wizard Only</span>
+            <span className="hidden sm:inline">Wizard Only</span>
           </button>
         </div>
       </div>

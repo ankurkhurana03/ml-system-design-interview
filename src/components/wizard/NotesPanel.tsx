@@ -70,7 +70,7 @@ export function NotesPanel({ problemId, isOpen, onClose }: NotesPanelProps) {
           </button>
         </div>
       </div>
-      <div className="p-4">
+      <div className="p-3 sm:p-4">
         <textarea
           value={notes}
           onChange={handleNotesChange}

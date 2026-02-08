@@ -32,8 +32,8 @@ export function ModeSelector({ currentMode, onSelectMode, isOpen, onClose }: Mod
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
-      <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full mx-4 p-6" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-black/50" onClick={onClose}>
+      <div className="bg-white rounded-t-xl md:rounded-xl shadow-2xl w-full md:max-w-2xl md:mx-4 p-4 md:p-6" onClick={(e) => e.stopPropagation()}>
         <div className="mb-6">
           <h2 className="text-xl font-bold text-gray-900">Choose Interview Mode</h2>
           <p className="text-sm text-gray-500 mt-1">Select how you want to practice</p>

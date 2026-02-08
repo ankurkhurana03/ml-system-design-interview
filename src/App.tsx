@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useSyncExternalStore } from 'react';
 import { WizardProvider, useWizard } from '@/context/WizardContext';
 import { ModeProvider } from '@/context/ModeContext';
 import { VoiceOverProvider } from '@/context/VoiceOverContext';
@@ -28,6 +28,15 @@ import { HandsFreeProvider, useHandsFree } from '@/context/HandsFreeContext';
 import { getActiveProblemId, saveActiveProblemId, saveDraftProblem, isDraft } from '@/utils/draftStore';
 import type { Problem } from '@/types/tree';
 
+const mobileQuery = typeof window !== 'undefined' ? window.matchMedia('(max-width: 767px)') : null;
+function useMobile() {
+  return useSyncExternalStore(
+    (cb) => { mobileQuery?.addEventListener('change', cb); return () => mobileQuery?.removeEventListener('change', cb); },
+    () => mobileQuery?.matches ?? false,
+    () => false,
+  );
+}
+
 function AppContent() {
   const { problemMetas, loading, getProblemById, addProblem, updateProblemInState, deleteProblem } = useProblems();
   const { setProblem, updateProblem, problem } = useWizard();
@@ -47,6 +56,7 @@ function AppContent() {
   const [activeProblemId, setActiveProblemId] = useState<string | null>(null);
   const { mode, config, setMode } = useMode();
 
+  const isMobile = useMobile();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [generateOpen, setGenerateOpen] = useState(false);
@@ -89,8 +99,11 @@ function AppContent() {
       // Persist active problem selection
       const meta = problemMetas.find((m) => m.id === id);
       saveActiveProblemId(id, meta?.source || 'builtin');
+
+      // Close sidebar overlay on mobile
+      if (isMobile) setSidebarCollapsed(true);
     },
-    [getProblemById, setProblem, progressiveGen, problemMetas],
+    [getProblemById, setProblem, progressiveGen, problemMetas, isMobile],
   );
 
   const handleGenerateNew = useCallback(() => {
@@ -187,23 +200,37 @@ function AppContent() {
         onBrowseGallery={handleBrowseGallery}
         onDeleteProblem={handleDeleteProblem}
         onEditDraft={handleEditDraft}
-        isCollapsed={sidebarCollapsed}
+        isCollapsed={isMobile ? sidebarCollapsed : sidebarCollapsed}
         onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
+        isMobile={isMobile}
+        onOverlayClose={() => setSidebarCollapsed(true)}
       />
 
       <div className="flex-1 flex flex-col min-w-0">
         {/* Top bar */}
-        <div className="h-10 bg-white border-b border-gray-200 flex items-center justify-between px-4">
-          <div className="flex items-center gap-2">
+        <div className="h-10 bg-white border-b border-gray-200 flex items-center justify-between px-2 md:px-4">
+          <div className="flex items-center gap-2 min-w-0">
+            {/* Hamburger — mobile only */}
+            {isMobile && (
+              <button
+                onClick={() => setSidebarCollapsed(false)}
+                className="p-1.5 hover:bg-gray-100 rounded-lg text-gray-600 md:hidden flex-shrink-0"
+                title="Open sidebar"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                </svg>
+              </button>
+            )}
             {problem && (
               <>
-                <h2 className="text-sm font-semibold text-gray-700 truncate">
+                <h2 className="text-sm font-semibold text-gray-700 truncate max-w-[150px] sm:max-w-none">
                   {problem.title}
                 </h2>
                 {isDraft(problem.id) && (
                   <button
                     onClick={() => handleEditDraft(problem.id)}
-                    className="p-1 hover:bg-gray-100 rounded text-gray-400 hover:text-gray-600 transition-colors"
+                    className="p-1 hover:bg-gray-100 rounded text-gray-400 hover:text-gray-600 transition-colors flex-shrink-0"
                     title="Edit draft"
                   >
                     <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -214,11 +241,11 @@ function AppContent() {
               </>
             )}
           </div>
-          <div className="flex items-center gap-2">
-            {/* Mode Badge */}
+          <div className="flex items-center gap-1 md:gap-2 flex-shrink-0">
+            {/* Mode Badge — abbreviation on mobile */}
             <button
               onClick={() => setModeSelectOpen(true)}
-              className={`px-3 py-1 text-xs font-semibold rounded-full border transition-colors ${
+              className={`px-2 md:px-3 py-1 text-xs font-semibold rounded-full border transition-colors ${
                 mode === 'mock_interview'
                   ? 'bg-red-50 text-red-700 border-red-300 hover:bg-red-100'
                   : mode === 'tutor'
@@ -227,7 +254,8 @@ function AppContent() {
               }`}
               title="Change Interview Mode"
             >
-              {mode === 'mock_interview' ? 'Mock Interview' : mode === 'tutor' ? 'Tutor Mode' : 'Designer Mode'}
+              <span className="md:hidden">{mode === 'mock_interview' ? 'M' : mode === 'tutor' ? 'T' : 'D'}</span>
+              <span className="hidden md:inline">{mode === 'mock_interview' ? 'Mock Interview' : mode === 'tutor' ? 'Tutor Mode' : 'Designer Mode'}</span>
             </button>
             <PracticeTimer />
             {voiceOver.isSupported && (
@@ -272,7 +300,7 @@ function AppContent() {
             {isAdmin && (
               <button
                 onClick={() => setModerationOpen(true)}
-                className="p-1.5 hover:bg-gray-100 rounded-lg text-amber-600 hover:text-amber-700 transition-colors"
+                className="hidden md:flex p-1.5 hover:bg-gray-100 rounded-lg text-amber-600 hover:text-amber-700 transition-colors"
                 title="Moderation Panel"
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -283,7 +311,7 @@ function AppContent() {
             {user && problem && (
               <button
                 onClick={() => setPublishOpen(true)}
-                className="p-1.5 hover:bg-gray-100 rounded-lg text-blue-600 hover:text-blue-700 transition-colors"
+                className="hidden md:flex p-1.5 hover:bg-gray-100 rounded-lg text-blue-600 hover:text-blue-700 transition-colors"
                 title="Publish to Gallery"
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -331,7 +359,7 @@ function AppContent() {
                   alt=""
                   className="w-6 h-6 rounded-full"
                 />
-                <span className="text-sm text-gray-600">
+                <span className="hidden md:inline text-sm text-gray-600">
                   {user.user_metadata?.user_name || user.email}
                 </span>
               </div>
@@ -359,8 +387,8 @@ function AppContent() {
               </>
             ) : voiceOver.isPlaying ? (
               <>
-                <span className="w-2 h-2 bg-amber-500 rounded-full" />
-                <span>Paused (voice-over speaking)</span>
+                <span className="w-2 h-2 bg-amber-500 rounded-full animate-pulse" />
+                <span>Speaking... (say &quot;pause&quot; or &quot;stop&quot; to interrupt)</span>
               </>
             ) : handsFree.isListening ? (
               <>
@@ -388,6 +416,7 @@ function AppContent() {
               left={<TreeGraph />}
               right={<WizardPanel />}
               defaultSplit={50}
+              isMobile={isMobile}
             />
           ) : (
             <WizardPanel />

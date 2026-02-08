@@ -102,7 +102,7 @@ export function QuestionCard({ node, problemId, onSelectChoice, onAdvance, onRes
       className="bg-white rounded-lg shadow-lg border-l-4 overflow-hidden"
       style={{ borderLeftColor: getBorderColor() }}
     >
-      <div className="p-6">
+      <div className="p-3 sm:p-4 md:p-6">
         {/* Speaker Label — hidden when showing dialogue (bubbles have their own labels) */}
         {!(config.useDialogue && node.dialogue && node.dialogue.length > 0) && (
           <div className="mb-4">
@@ -191,7 +191,7 @@ export function QuestionCard({ node, problemId, onSelectChoice, onAdvance, onRes
                 data-testid="choice-button"
                 onClick={() => onSelectChoice(index)}
                 className={`w-full text-left bg-gray-50 hover:bg-gray-100 border border-gray-200 hover:border-gray-300 rounded-lg transition-all duration-200 group ${
-                  config.drivingFriendly ? 'p-6 min-h-16' : 'p-4'
+                  config.drivingFriendly ? 'p-6 min-h-16' : 'p-3 sm:p-4 min-h-[44px]'
                 }`}
               >
                 <div className="flex items-start gap-3">

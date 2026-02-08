@@ -375,10 +375,15 @@ export function WizardPanel() {
           handleReset();
           break;
         case 'pause':
-          voiceOver.pause();
+          // Stop all speech + cancel dialogue sequence
+          // (recognition can only capture "pause" after TTS ends, so this
+          //  prevents the next auto-advance and any pending speech)
+          dialogueCancelRef.current = true;
+          voiceOver.stop();
           break;
         case 'resume':
-          voiceOver.resume();
+          // Re-speak current node from the beginning
+          respeakCurrentNode();
           break;
       }
     },
@@ -568,7 +573,7 @@ export function WizardPanel() {
 
       {/* Main Content Area */}
       <div className="flex-1 overflow-y-auto">
-        <div className="max-w-4xl mx-auto p-6">
+        <div className="max-w-4xl mx-auto p-3 sm:p-4 md:p-6">
           {/* Back Button */}
           {path.length > 0 && (
             <div className="mb-4">
@@ -750,7 +755,7 @@ export function WizardPanel() {
 
           {/* Keyboard Shortcuts Hint */}
           {config.showKeyboardHints && (
-            <div className="mt-4 p-3 bg-white border border-gray-200 rounded-lg">
+            <div className="mt-4 p-3 bg-white border border-gray-200 rounded-lg hidden md:block">
               <div className="flex items-center justify-between mb-2">
                 <h4 className="text-xs font-semibold text-gray-700">Keyboard Shortcuts</h4>
                 <div className="flex items-center gap-2">

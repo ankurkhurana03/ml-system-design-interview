@@ -7,7 +7,7 @@ import {
   useCallback,
   type ReactNode,
 } from 'react';
-import { parseVoiceCommand, type VoiceCommand } from '@/utils/voiceCommands';
+import { parseVoiceCommand, parseInterruptCommand, type VoiceCommand } from '@/utils/voiceCommands';
 import { useVoiceOver } from '@/hooks/useVoiceOver';
 
 // --- Types ---
@@ -105,6 +105,7 @@ export function HandsFreeProvider({ children }: { children: ReactNode }) {
   const freeformBufferRef = useRef('');
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastCommandTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const interruptFiredRef = useRef(false); // debounce: only fire one interrupt per TTS session
 
   // Keep enabledRef in sync
   useEffect(() => {
@@ -135,7 +136,23 @@ export function HandsFreeProvider({ children }: { children: ReactNode }) {
         }
       }
 
-      setInterimTranscript(interim);
+      // During TTS playback, check interim results for interrupt commands
+      // (isFinal won't fire until the TTS sentence ends, but interim is fast)
+      if (ttsPausedRef.current && interim && !interruptFiredRef.current) {
+        const interrupt = parseInterruptCommand(interim);
+        if (interrupt) {
+          interruptFiredRef.current = true; // only fire once per TTS session
+          setLastCommand(interrupt);
+          if (lastCommandTimerRef.current) clearTimeout(lastCommandTimerRef.current);
+          lastCommandTimerRef.current = setTimeout(() => setLastCommand(null), 2000);
+          callbackRef?.onCommand(interrupt);
+          return; // don't process further
+        }
+      }
+
+      if (!ttsPausedRef.current) {
+        setInterimTranscript(interim);
+      }
 
       if (finalText) {
         const trimmed = finalText.trim();
@@ -155,9 +172,12 @@ export function HandsFreeProvider({ children }: { children: ReactNode }) {
           if (lastCommandTimerRef.current) clearTimeout(lastCommandTimerRef.current);
           lastCommandTimerRef.current = setTimeout(() => setLastCommand(null), 2000);
 
+          // Commands are always dispatched — even during TTS playback
+          // (allows "pause", "stop", "repeat" to work mid-speech)
           callbackRef?.onCommand(command);
-        } else {
-          // Accumulate freeform text with silence debounce
+        } else if (!ttsPausedRef.current) {
+          // Freeform text is only processed when TTS is NOT playing
+          // (avoids echo from speakers being treated as user speech)
           freeformBufferRef.current = freeformBufferRef.current
             ? freeformBufferRef.current + ' ' + trimmed
             : trimmed;
@@ -171,13 +191,14 @@ export function HandsFreeProvider({ children }: { children: ReactNode }) {
             }
           }, 1500);
         }
+        // else: freeform during TTS → discard (echo suppression)
       }
     };
 
     recognition.onerror = (event: any) => {
       const errorType = event.error as string;
-      if (errorType === 'no-speech') {
-        // Benign — just no speech detected, will auto-restart
+      if (errorType === 'no-speech' || errorType === 'aborted') {
+        // Benign — no speech detected or aborted by TTS coordination
         return;
       }
       if (errorType === 'audio-capture' || errorType === 'not-allowed') {
@@ -198,10 +219,10 @@ export function HandsFreeProvider({ children }: { children: ReactNode }) {
     recognition.onend = () => {
       setIsListening(false);
       setInterimTranscript('');
-      // Auto-restart if still enabled and not paused by TTS
-      if (enabledRef.current && !ttsPausedRef.current) {
+      // Auto-restart if still enabled (recognition always stays on, even during TTS)
+      if (enabledRef.current) {
         restartTimerRef.current = setTimeout(() => {
-          if (enabledRef.current && !ttsPausedRef.current && recognitionRef.current) {
+          if (enabledRef.current && recognitionRef.current) {
             try {
               recognitionRef.current.start();
               setIsListening(true);
@@ -248,38 +269,32 @@ export function HandsFreeProvider({ children }: { children: ReactNode }) {
   }, [enabled]);
 
   // --- TTS/STT coordination ---
-  // When voice-over starts playing, pause recognition; resume after it ends
+  // Recognition stays running during TTS (so "pause"/"stop" commands work),
+  // but freeform text is suppressed to avoid echo from speakers.
   const voiceOverIsPlaying = voiceOver.isPlaying;
 
   useEffect(() => {
-    if (!enabled || !recognitionRef.current) return;
-
+    if (!enabled) return;
+    ttsPausedRef.current = voiceOverIsPlaying;
     if (voiceOverIsPlaying) {
-      // TTS started — pause recognition to avoid echo
-      ttsPausedRef.current = true;
-      try {
-        recognitionRef.current.abort();
-      } catch {
-        // not running
-      }
-      setIsListening(false);
+      // TTS started — reset interrupt debounce so user can interrupt this session
+      interruptFiredRef.current = false;
+    } else {
+      // TTS ended — clear any echo artifacts from interim display
       setInterimTranscript('');
-    } else if (ttsPausedRef.current) {
-      // TTS ended — resume after a short delay
-      ttsPausedRef.current = false;
-      const timer = setTimeout(() => {
-        if (enabledRef.current && recognitionRef.current && !voiceOver.isPlaying) {
-          try {
-            recognitionRef.current.start();
-            setIsListening(true);
-          } catch {
-            // Already running
-          }
-        }
-      }, 600);
-      return () => clearTimeout(timer);
     }
-  }, [voiceOverIsPlaying, enabled, voiceOver.isPlaying]);
+  }, [voiceOverIsPlaying, enabled]);
+
+  // Auto-enable voice-over + autoAdvance when hands-free is turned on
+  // (deferred to useEffect to avoid updating VoiceOverProvider during HandsFreeProvider render)
+  const pendingEnableRef = useRef(false);
+  useEffect(() => {
+    if (pendingEnableRef.current) {
+      pendingEnableRef.current = false;
+      if (!voiceOver.enabled) voiceOver.setEnabled(true);
+      if (!voiceOver.autoAdvance) voiceOver.setAutoAdvance(true);
+    }
+  }, [enabled, voiceOver]);
 
   // --- Toggle ---
   const toggle = useCallback(() => {
@@ -287,14 +302,12 @@ export function HandsFreeProvider({ children }: { children: ReactNode }) {
       const next = !prev;
       saveEnabled(next);
       if (next) {
-        // Auto-enable voice-over + autoAdvance
-        if (!voiceOver.enabled) voiceOver.setEnabled(true);
-        if (!voiceOver.autoAdvance) voiceOver.setAutoAdvance(true);
+        pendingEnableRef.current = true;
         setError(null);
       }
       return next;
     });
-  }, [voiceOver]);
+  }, []);
 
   const value: HandsFreeContextValue = {
     enabled,

@@ -236,13 +236,13 @@ export function GenerateModal({
   const stepIndex = ['scaffolding', 'filling', 'validating', 'success'].indexOf(step);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-0 md:p-4">
       <div
         className="absolute inset-0 bg-black/50 backdrop-blur-sm"
         onClick={handleClose}
       />
 
-      <div className="relative bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-hidden">
+      <div className="relative bg-white dark:bg-gray-800 shadow-xl w-full h-full md:max-w-2xl md:max-h-[90vh] md:rounded-lg md:h-auto flex flex-col overflow-hidden">
         {/* Header */}
         <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
           <h2 className="text-2xl font-bold text-gray-900 dark:text-white">

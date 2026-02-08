@@ -101,6 +101,36 @@ const STANDALONE_NUMBER_MAP: Record<string, number> = {
 };
 
 /**
+ * Interrupt commands that can be detected from interim (partial) transcripts.
+ * Used during TTS playback so the user can say "pause" or "stop" mid-sentence.
+ * Intentionally limited to unambiguous interrupt words to avoid false positives
+ * from TTS echo being misrecognized.
+ */
+const INTERRUPT_PATTERNS: { type: VoiceCommandType; pattern: RegExp }[] = [
+  { type: 'pause', pattern: /\bpause\b/i },
+  { type: 'pause', pattern: /\bstop\b/i },
+  { type: 'pause', pattern: /\bhold\s+on\b/i },
+  { type: 'pause', pattern: /\bwait\b/i },
+];
+
+/**
+ * Check interim/partial transcript for interrupt commands only.
+ * Returns a pause command if an interrupt word is found, null otherwise.
+ * This is used during TTS playback where we can't wait for isFinal.
+ */
+export function parseInterruptCommand(text: string): VoiceCommand | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+
+  for (const { type, pattern } of INTERRUPT_PATTERNS) {
+    if (pattern.test(trimmed)) {
+      return { type };
+    }
+  }
+  return null;
+}
+
+/**
  * Parse a speech transcript into a voice command, or null if it's freeform text.
  */
 export function parseVoiceCommand(text: string): VoiceCommand | null {

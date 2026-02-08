@@ -127,7 +127,7 @@ export function SourcesPanel({
         </div>
       </div>
 
-      <div className="p-4 space-y-3 max-h-96 overflow-y-auto">
+      <div className="p-3 sm:p-4 space-y-3 max-h-96 overflow-y-auto">
         {/* Action Buttons */}
         <div className="flex gap-2 flex-wrap">
           <button

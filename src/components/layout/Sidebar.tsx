@@ -11,6 +11,8 @@ interface SidebarProps {
   onEditDraft: (id: string) => void;
   isCollapsed: boolean;
   onToggleCollapse: () => void;
+  isMobile?: boolean;
+  onOverlayClose?: () => void;
 }
 
 // Simple SVG Icons
@@ -72,6 +74,8 @@ export function Sidebar({
   onEditDraft,
   isCollapsed,
   onToggleCollapse,
+  isMobile,
+  onOverlayClose,
 }: SidebarProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCompanies, setSelectedCompanies] = useState<Set<string>>(new Set());
@@ -152,6 +156,8 @@ export function Sidebar({
   }, [problems, searchQuery, selectedCompanies, selectedDomains]);
 
   if (isCollapsed) {
+    // On mobile, render nothing when collapsed — hamburger in top bar opens it
+    if (isMobile) return null;
     return (
       <div className="w-12 h-screen bg-slate-900 border-r border-slate-700 flex flex-col items-center py-4 transition-all duration-300">
         <button
@@ -179,8 +185,8 @@ export function Sidebar({
     );
   }
 
-  return (
-    <div className="w-70 h-screen bg-slate-900 border-r border-slate-700 flex flex-col transition-all duration-300">
+  const sidebarContent = (
+    <div className={`${isMobile ? 'w-72' : 'w-70'} h-screen bg-slate-900 border-r border-slate-700 flex flex-col transition-all duration-300`}>
       {/* Header */}
       <div className="p-4 border-b border-slate-700 flex items-center justify-between">
         <div className="flex items-center gap-2">
@@ -188,9 +194,9 @@ export function Sidebar({
           <h1 className="text-lg font-bold text-white">ML System Design</h1>
         </div>
         <button
-          onClick={onToggleCollapse}
+          onClick={isMobile ? onOverlayClose : onToggleCollapse}
           className="p-1.5 hover:bg-slate-800 rounded-lg text-slate-300 hover:text-white transition-colors"
-          title="Collapse sidebar"
+          title={isMobile ? 'Close sidebar' : 'Collapse sidebar'}
         >
           <ChevronLeftIcon />
         </button>
@@ -390,6 +396,18 @@ export function Sidebar({
       </div>
     </div>
   );
+
+  // On mobile, render as a fixed overlay with backdrop
+  if (isMobile) {
+    return (
+      <div className="fixed inset-0 z-40">
+        <div className="absolute inset-0 bg-black/50" onClick={onOverlayClose} />
+        <div className="relative h-full">{sidebarContent}</div>
+      </div>
+    );
+  }
+
+  return sidebarContent;
 }
 
 interface ProblemItemProps {

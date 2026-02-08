@@ -169,7 +169,7 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
       ></div>
 
       {/* Panel */}
-      <div className="absolute inset-y-0 right-0 max-w-lg w-full bg-white shadow-2xl flex flex-col">
+      <div className="absolute inset-0 md:inset-y-0 md:left-auto md:right-0 md:max-w-lg w-full bg-white shadow-2xl flex flex-col">
         {/* Header */}
         <div className="px-6 py-4 border-b border-gray-200">
           <div className="flex items-center justify-between">

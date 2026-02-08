@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseVoiceCommand } from '@/utils/voiceCommands';
+import { parseVoiceCommand, parseInterruptCommand } from '@/utils/voiceCommands';
 
 describe('parseVoiceCommand', () => {
   describe('continue commands', () => {
@@ -139,5 +139,41 @@ describe('parseVoiceCommand', () => {
       // Word boundary prevents matching "continue" inside "discontinue"
       expect(parseVoiceCommand('discontinue')).toBeNull();
     });
+  });
+});
+
+describe('parseInterruptCommand', () => {
+  it.each(['pause', 'Pause', 'PAUSE'])('detects "%s" in isolation', (text) => {
+    expect(parseInterruptCommand(text)).toEqual({ type: 'pause' });
+  });
+
+  it.each(['stop', 'Stop'])('detects "%s" as pause interrupt', (text) => {
+    expect(parseInterruptCommand(text)).toEqual({ type: 'pause' });
+  });
+
+  it('detects "hold on"', () => {
+    expect(parseInterruptCommand('hold on')).toEqual({ type: 'pause' });
+  });
+
+  it('detects "wait"', () => {
+    expect(parseInterruptCommand('wait')).toEqual({ type: 'pause' });
+  });
+
+  it('detects interrupt word inside partial interim transcript', () => {
+    // Interim results often have extra words around the command
+    expect(parseInterruptCommand('please stop')).toEqual({ type: 'pause' });
+    expect(parseInterruptCommand('pause please')).toEqual({ type: 'pause' });
+    expect(parseInterruptCommand('can you wait')).toEqual({ type: 'pause' });
+  });
+
+  it('returns null for non-interrupt text', () => {
+    expect(parseInterruptCommand('continue')).toBeNull();
+    expect(parseInterruptCommand('option one')).toBeNull();
+    expect(parseInterruptCommand('I think we should use gradient boosting')).toBeNull();
+  });
+
+  it('returns null for empty/whitespace', () => {
+    expect(parseInterruptCommand('')).toBeNull();
+    expect(parseInterruptCommand('   ')).toBeNull();
   });
 });
