@@ -1,6 +1,7 @@
 id: credit-risk
 title: "Credit Risk Assessment & Loan Approval"
 description: "Design an ML system for automated credit risk assessment and loan decisioning."
+difficulty: "intermediate"
 companies: ["Stripe", "Square", "Goldman Sachs"]
 domains: ["Tabular/Structured", "Time Series"]
 root: pd_start

@@ -537,7 +537,7 @@ export function WizardPanel() {
   return (
     <div data-testid="wizard-panel" className="flex flex-col h-full bg-gray-100">
       {/* Stage Indicator */}
-      <div className="bg-white border-b border-gray-200">
+      <div className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700">
         <StageIndicator currentStage={currentNode.stage} visitedStages={visitedStages} />
       </div>
 
@@ -572,7 +572,7 @@ export function WizardPanel() {
       <PathBreadcrumb path={path} nodeMap={nodeMap} />
 
       {/* Main Content Area */}
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 overflow-y-auto bg-slate-50 dark:bg-gray-950">
         <div className="max-w-4xl mx-auto p-3 sm:p-4 md:p-6">
           {/* Back Button */}
           {path.length > 0 && (

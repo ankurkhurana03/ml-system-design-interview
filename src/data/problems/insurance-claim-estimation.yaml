@@ -1,6 +1,7 @@
 id: insurance-claim-estimation
 title: "Insurance Claim Estimation from Photos"
 description: "Design a system to evaluate insurance claim sizes from photos of damaged objects."
+difficulty: "beginner"
 companies: ["Lemonade", "Allstate", "Progressive"]
 domains: ["Computer Vision", "Tabular/Structured"]
 root: pd_start

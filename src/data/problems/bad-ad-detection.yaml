@@ -1,6 +1,7 @@
 id: bad-ad-detection
 title: "Bad Ad Detection"
 description: "Create a system to detect 'bad' or policy-violating ads before they serve."
+difficulty: "beginner"
 companies: ["Google", "Meta", "TikTok"]
 domains: ["NLP", "Computer Vision", "Classification"]
 root: pd_start

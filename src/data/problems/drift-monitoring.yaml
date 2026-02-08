@@ -1,6 +1,7 @@
 id: drift-monitoring
 title: "Data & Concept Drift Monitor"
 description: "Build a monitoring system to detect data and concept drift in production models."
+difficulty: "intermediate"
 companies: ["Google", "Netflix", "Uber"]
 domains: ["MLOps/Infrastructure", "Anomaly Detection"]
 root: pd_start

@@ -1,5 +1,7 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
 @layer base {
   body {
     margin: 0;
@@ -63,6 +65,16 @@
   .animate-fade-in {
     animation: fade-in 0.2s ease-out;
   }
+
+  /* Blinking cursor for streaming text */
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
+  }
+
+  .animate-blink {
+    animation: blink 0.8s step-end infinite;
+  }
 }
 
 /* ReactFlow overrides */
@@ -93,4 +105,68 @@
 
 ::-webkit-scrollbar-thumb:hover {
   background: #64748b;
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: #475569;
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
+}
+
+/* ReactFlow dark mode overrides */
+.dark .react-flow__controls button {
+  background: #1e293b;
+  color: #e2e8f0;
+  border-color: #334155;
+}
+
+.dark .react-flow__controls button:hover {
+  background: #334155;
+}
+
+.dark .react-flow__minimap {
+  background: #1e293b !important;
+  border-color: #475569 !important;
+}
+
+/* Prose dark mode */
+.dark .prose {
+  color: #d1d5db;
+}
+
+.dark .prose h1,
+.dark .prose h2,
+.dark .prose h3,
+.dark .prose h4,
+.dark .prose strong {
+  color: #f3f4f6;
+}
+
+.dark .prose a {
+  color: #60a5fa;
+}
+
+.dark .prose code {
+  color: #e5e7eb;
+  background: #374151;
+}
+
+.dark .prose pre {
+  background: #1f2937;
+  border: 1px solid #374151;
+}
+
+.dark .prose blockquote {
+  color: #9ca3af;
+  border-color: #4b5563;
+}
+
+.dark .prose th {
+  color: #e5e7eb;
+}
+
+.dark .prose td {
+  border-color: #4b5563;
 }

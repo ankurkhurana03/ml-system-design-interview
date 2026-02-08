@@ -1,7 +1,7 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
 import { getLLMSettings } from '@/utils/llmKeyStore';
-import { callLLM, callLLMWithSources } from '@/utils/llmClient';
+import { callLLMStreaming, callLLMWithSources } from '@/utils/llmClient';
 import type { UserSource, ParsedCitation } from '@/types/tree';
 
 export interface AIAnswerResponse {
@@ -13,9 +13,12 @@ export interface AIAnswerResponse {
 
 export function useAIAnswer() {
   const [answer, setAnswer] = useState<string | null>(null);
+  const [streamingText, setStreamingText] = useState<string | null>(null);
+  const [isStreaming, setIsStreaming] = useState(false);
   const [sourceCitations, setSourceCitations] = useState<ParsedCitation[] | undefined>(undefined);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const askQuestion = useCallback(
     async (
@@ -30,7 +33,16 @@ export function useAIAnswer() {
         return null;
       }
 
+      // Abort any in-flight request
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      const abortController = new AbortController();
+      abortControllerRef.current = abortController;
+
       setLoading(true);
+      setIsStreaming(false);
+      setStreamingText(null);
       setError(null);
       setAnswer(null);
       setSourceCitations(undefined);
@@ -62,6 +74,7 @@ export function useAIAnswer() {
 
             if (!funcError && data?.answer) {
               setAnswer(data.answer);
+              setLoading(false);
               return data.answer;
             }
           } catch {
@@ -69,7 +82,6 @@ export function useAIAnswer() {
           }
         }
 
-        // Direct API call via centralized callLLM — key sent from browser to LLM provider over HTTPS
         const systemPrompt = `You are an ML system design expert and interview coach. Your role is to help candidates learn and understand ML system design concepts through clear, concise, and educational answers.
 
 When answering questions:
@@ -89,17 +101,24 @@ Current context:
         let citations: ParsedCitation[] | undefined;
 
         if (sources && sources.length > 0) {
+          // Source grounding uses non-streaming path (needs citation extraction)
           const response = await callLLMWithSources(
-            { systemPrompt, userMessage: question, maxTokens: 1000 },
+            { systemPrompt, userMessage: question, maxTokens: 1000, signal: abortController.signal },
             sources,
           );
           answerText = response.content;
           citations = response.sourceCitations;
         } else {
-          answerText = await callLLM({
+          // Use streaming for direct LLM calls
+          setIsStreaming(true);
+          answerText = await callLLMStreaming({
             systemPrompt,
             userMessage: question,
             maxTokens: 1000,
+            signal: abortController.signal,
+            onChunk: (text) => {
+              setStreamingText(text);
+            },
           });
         }
 
@@ -107,19 +126,30 @@ Current context:
           throw new Error('No answer generated');
         }
 
+        // Streaming complete: set final answer and clear streaming state
+        setIsStreaming(false);
+        setStreamingText(null);
         setAnswer(answerText);
         setSourceCitations(citations);
         return answerText;
       } catch (err) {
+        if (abortController.signal.aborted) {
+          // Request was cancelled, not an error
+          return null;
+        }
         const errorMessage = err instanceof Error ? err.message : 'Failed to get AI answer';
         setError(errorMessage);
         return null;
       } finally {
+        setIsStreaming(false);
         setLoading(false);
+        if (abortControllerRef.current === abortController) {
+          abortControllerRef.current = null;
+        }
       }
     },
     [],
   );
 
-  return { answer, sourceCitations, loading, error, askQuestion };
+  return { answer, streamingText, isStreaming, sourceCitations, loading, error, askQuestion };
 }

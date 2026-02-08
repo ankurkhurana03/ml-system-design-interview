@@ -1,6 +1,7 @@
 id: amazon-autocomplete
 title: "Amazon Search Autocomplete"
 description: "Design a search query autocomplete (type-ahead) system for Amazon."
+difficulty: "intermediate"
 companies: ["Amazon", "Google", "Microsoft"]
 domains: ["NLP", "Ranking/Search"]
 root: pd_start

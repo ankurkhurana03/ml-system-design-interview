@@ -1,6 +1,7 @@
 id: landmark-recognition
 title: "Landmark Recognition"
 description: "Build a landmark recognition system for a travel application."
+difficulty: "beginner"
 companies: ["Google", "TripAdvisor", "Apple"]
 domains: ["Computer Vision", "Classification"]
 root: pd_start

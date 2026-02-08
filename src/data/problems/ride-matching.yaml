@@ -1,6 +1,7 @@
 id: ride-matching
 title: "Ride-Sharing Driver-Rider Matching"
 description: "Design the matching system that pairs riders with drivers in a ride-sharing platform."
+difficulty: "intermediate"
 companies: ["Uber", "Lyft", "DiDi"]
 domains: ["Tabular/Structured", "Graph/Network", "RL"]
 root: pd_start

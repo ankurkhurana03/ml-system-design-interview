@@ -1,6 +1,7 @@
 id: distributed-training
 title: "Distributed Training System"
 description: "Design a distributed training system for models with billions of parameters."
+difficulty: "advanced"
 companies: ["Google", "Meta", "OpenAI"]
 domains: ["MLOps/Infrastructure"]
 root: pd_start

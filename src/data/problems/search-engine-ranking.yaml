@@ -1,6 +1,7 @@
 id: search-engine-ranking
 title: "Global Search Engine Ranking"
 description: "Build a document retrieval and ranking system for a global search engine."
+difficulty: "advanced"
 companies: ["Google", "Microsoft", "Baidu"]
 domains: ["NLP", "Ranking/Search"]
 root: pd_start

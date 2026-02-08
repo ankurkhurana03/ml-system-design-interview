@@ -46,4 +46,23 @@ describe('loadBuiltinProblems', () => {
       expect(p.nodes.length).toBeGreaterThan(0);
     }
   });
+
+  it('should load exactly 53 built-in problems', () => {
+    expect(problems.length).toBe(53);
+  });
+
+  it('all 53 built-in problems should have a valid difficulty field', () => {
+    const validDifficulties = ['beginner', 'intermediate', 'advanced'];
+
+    for (const p of problems) {
+      expect(
+        p.difficulty,
+        `Problem "${p.id}" is missing the difficulty field`,
+      ).toBeDefined();
+      expect(
+        validDifficulties,
+        `Problem "${p.id}" has invalid difficulty "${p.difficulty}". Must be one of: ${validDifficulties.join(', ')}`,
+      ).toContain(p.difficulty);
+    }
+  });
 });

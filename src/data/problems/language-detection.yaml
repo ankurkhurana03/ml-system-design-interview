@@ -1,6 +1,7 @@
 id: language-detection
 title: "Language Detection System"
 description: "Design a language detection system for multilingual text inputs."
+difficulty: "beginner"
 companies: ["Google", "Meta", "DeepL"]
 domains: ["NLP", "Classification"]
 root: pd_start

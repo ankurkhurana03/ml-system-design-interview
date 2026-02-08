@@ -199,3 +199,156 @@ export async function callLLMForProvider(
   }
   return callLLMWithSettings({ ...params, settings });
 }
+
+/** Parameters for streaming LLM calls. */
+export interface CallLLMStreamingParams extends CallLLMParams {
+  /** Called with each incremental text chunk as it arrives. */
+  onChunk: (text: string) => void;
+}
+
+/**
+ * Call an OpenAI-compatible chat completion API with streaming.
+ *
+ * Uses the primary provider's settings. Parses SSE (Server-Sent Events) format
+ * and calls `onChunk` with each incremental text piece. Returns the full
+ * accumulated text when the stream completes.
+ *
+ * Falls back to non-streaming `callLLM` if the streaming request fails.
+ */
+export async function callLLMStreaming(params: CallLLMStreamingParams): Promise<string> {
+  const { systemPrompt, userMessage, maxTokens = 6000, signal, conversationHistory, onChunk } =
+    params;
+
+  const settings = getLLMSettings();
+  if (!settings) {
+    throw new Error('No LLM settings configured. Please configure your API key in settings.');
+  }
+
+  const messages: Array<{ role: string; content: string }> = [
+    { role: 'system', content: systemPrompt },
+  ];
+
+  if (conversationHistory) {
+    for (const entry of conversationHistory) {
+      messages.push({ role: entry.role, content: entry.content });
+    }
+  }
+
+  messages.push({ role: 'user', content: userMessage });
+
+  let response: Response;
+  try {
+    response = await fetch(`${settings.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${settings.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: settings.model,
+        messages,
+        temperature: 0.7,
+        max_tokens: maxTokens,
+        stream: true,
+      }),
+      signal,
+    });
+  } catch (err) {
+    // Network error — fall back to non-streaming
+    console.warn('[LLM Streaming] Fetch failed, falling back to non-streaming:', err);
+    return callLLM({ systemPrompt, userMessage, maxTokens, signal, conversationHistory });
+  }
+
+  if (!response.ok) {
+    // API error — fall back to non-streaming
+    const errorText = await response.text();
+    console.warn('[LLM Streaming] API error, falling back to non-streaming:', errorText);
+    return callLLM({ systemPrompt, userMessage, maxTokens, signal, conversationHistory });
+  }
+
+  if (!response.body) {
+    // No streaming body — fall back to non-streaming
+    console.warn('[LLM Streaming] No response body, falling back to non-streaming');
+    return callLLM({ systemPrompt, userMessage, maxTokens, signal, conversationHistory });
+  }
+
+  // Parse SSE stream
+  let accumulated = '';
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      // Process complete lines from the buffer
+      const lines = buffer.split('\n');
+      // Keep the last potentially incomplete line in the buffer
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+
+        // Skip empty lines and comments
+        if (!trimmed || trimmed.startsWith(':')) continue;
+
+        // Handle data lines
+        if (trimmed.startsWith('data: ')) {
+          const data = trimmed.slice(6);
+
+          // Stream complete
+          if (data === '[DONE]') continue;
+
+          try {
+            const parsed = JSON.parse(data);
+            const content = parsed.choices?.[0]?.delta?.content;
+            if (content) {
+              accumulated += content;
+              onChunk(accumulated);
+            }
+          } catch {
+            // Skip malformed JSON chunks
+          }
+        }
+      }
+    }
+
+    // Process any remaining buffer
+    if (buffer.trim()) {
+      const trimmed = buffer.trim();
+      if (trimmed.startsWith('data: ') && trimmed.slice(6) !== '[DONE]') {
+        try {
+          const parsed = JSON.parse(trimmed.slice(6));
+          const content = parsed.choices?.[0]?.delta?.content;
+          if (content) {
+            accumulated += content;
+            onChunk(accumulated);
+          }
+        } catch {
+          // Skip malformed JSON
+        }
+      }
+    }
+  } catch (err) {
+    // If we got partial content before the error, return what we have
+    if (accumulated.length > 0) {
+      console.warn('[LLM Streaming] Stream interrupted, returning partial content:', err);
+      return stripThinkingBlocks(accumulated);
+    }
+    // Otherwise fall back to non-streaming
+    console.warn('[LLM Streaming] Stream failed, falling back to non-streaming:', err);
+    return callLLM({ systemPrompt, userMessage, maxTokens, signal, conversationHistory });
+  }
+
+  if (!accumulated) {
+    // No content received via stream — fall back to non-streaming
+    console.warn('[LLM Streaming] Empty stream, falling back to non-streaming');
+    return callLLM({ systemPrompt, userMessage, maxTokens, signal, conversationHistory });
+  }
+
+  return stripThinkingBlocks(accumulated);
+}

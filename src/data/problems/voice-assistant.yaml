@@ -1,6 +1,7 @@
 id: voice-assistant
 title: "Voice Assistant & Wake Word Detection"
 description: "Design the speech pipeline for a voice assistant: wake word detection, ASR, and NLU."
+difficulty: "advanced"
 companies: ["Amazon", "Apple", "Google"]
 domains: ["Audio/Speech", "NLP", "Edge ML"]
 root: pd_start

@@ -1,6 +1,7 @@
 id: sentiment-analysis
 title: "Social Media Sentiment Analysis"
 description: "Build a sentiment analysis system for real-time monitoring of social media trends."
+difficulty: "intermediate"
 companies: ["X/Twitter", "Meta", "Brandwatch"]
 domains: ["NLP", "Real-time", "Classification"]
 root: pd_start

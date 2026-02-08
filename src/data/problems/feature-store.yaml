@@ -1,6 +1,7 @@
 id: feature-store
 title: "Centralized Feature Store"
 description: "Design a centralized Feature Store for a large-scale ML organization."
+difficulty: "advanced"
 companies: ["Uber", "Airbnb", "Spotify"]
 domains: ["MLOps/Infrastructure"]
 root: pd_start

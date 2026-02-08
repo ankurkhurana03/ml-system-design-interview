@@ -1,6 +1,7 @@
 id: demand-forecasting
 title: "E-commerce Demand Forecasting"
 description: "Create a demand forecasting system for an e-commerce supply chain."
+difficulty: "intermediate"
 companies: ["Amazon", "Walmart", "Shopify"]
 domains: ["Time Series", "Tabular/Structured"]
 root: pd_start

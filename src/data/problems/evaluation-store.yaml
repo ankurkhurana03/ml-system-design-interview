@@ -1,6 +1,7 @@
 id: evaluation-store
 title: "Evaluation Store"
 description: "Create an evaluation store to track and compare model performance across experiments."
+difficulty: "advanced"
 companies: ["Google", "Netflix", "Airbnb"]
 domains: ["MLOps/Infrastructure"]
 root: pd_start

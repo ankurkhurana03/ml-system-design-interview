@@ -1,6 +1,7 @@
 id: instagram-explore-ranking
 title: "Instagram Explore Ranking"
 description: "Design the ranking model for the Instagram Explore page."
+difficulty: "intermediate"
 companies: ["Meta", "TikTok", "Pinterest"]
 domains: ["Ranking/Search", "Recommendation"]
 root: pd_start

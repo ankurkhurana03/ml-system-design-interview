@@ -88,7 +88,7 @@ Suggest 2-3 additional clarifying dimensions with 2-3 options each that would he
 
   return (
     <div
-      className="bg-white rounded-lg shadow-lg border-l-4 overflow-hidden"
+      className="bg-white dark:bg-gray-800 rounded-lg shadow-lg dark:shadow-gray-900/50 border-l-4 overflow-hidden"
       style={{ borderLeftColor: borderColor }}
     >
       <div className="p-3 sm:p-4 md:p-6">
@@ -97,7 +97,7 @@ Suggest 2-3 additional clarifying dimensions with 2-3 options each that would he
           <span
             className={`
               inline-flex items-center px-3 py-1 rounded-full text-sm font-medium
-              ${isInterviewer ? 'bg-blue-100 text-blue-800' : 'bg-green-100 text-green-800'}
+              ${isInterviewer ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300' : 'bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300'}
             `}
           >
             {isInterviewer ? (
@@ -115,8 +115,8 @@ Suggest 2-3 additional clarifying dimensions with 2-3 options each that would he
 
         {/* Content */}
         <div className="mb-6">
-          <h3 className="text-lg font-semibold text-gray-900 mb-3">{node.label}</h3>
-          <div className="text-gray-700 leading-relaxed prose prose-sm max-w-none overflow-x-auto break-words">
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-3">{node.label}</h3>
+          <div className="text-gray-700 dark:text-gray-300 leading-relaxed prose prose-sm max-w-none overflow-x-auto break-words">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{node.content}</ReactMarkdown>
           </div>
           <CitationsList citations={node.citations} />
@@ -124,10 +124,10 @@ Suggest 2-3 additional clarifying dimensions with 2-3 options each that would he
 
         {/* Multi-select icon badge */}
         <div className="mb-4 flex items-center gap-2">
-          <svg className="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <svg className="w-5 h-5 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
           </svg>
-          <span className="text-sm text-gray-600 font-medium">
+          <span className="text-sm text-gray-600 dark:text-gray-400 font-medium">
             Select one option for each dimension ({selectedCount}/{allRequired})
           </span>
         </div>
@@ -155,7 +155,7 @@ Suggest 2-3 additional clarifying dimensions with 2-3 options each that would he
           {/* Extra LLM-suggested dimensions (informational only) */}
           {extraDimensions.length > 0 && (
             <div>
-              <h4 className="text-sm font-bold uppercase tracking-wider mb-3 text-gray-500">
+              <h4 className="text-sm font-bold uppercase tracking-wider mb-3 text-gray-500 dark:text-gray-400">
                 Additional Considerations (Informational)
               </h4>
               <div className="space-y-4">
@@ -232,14 +232,14 @@ interface DimensionSelectorProps {
 
 function DimensionSelector({ dimension, selected, onSelect, informational }: DimensionSelectorProps) {
   return (
-    <div className={`rounded-lg border p-4 ${informational ? 'border-dashed border-gray-300 bg-gray-50' : 'border-gray-200'}`}>
+    <div className={`rounded-lg border p-4 ${informational ? 'border-dashed border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-900' : 'border-gray-200 dark:border-gray-700'}`}>
       <div className="mb-2">
-        <span className="text-sm font-semibold text-gray-800">{dimension.label}</span>
+        <span className="text-sm font-semibold text-gray-800 dark:text-gray-200">{dimension.label}</span>
         {dimension.description && (
-          <p className="text-xs text-gray-500 mt-0.5">{dimension.description}</p>
+          <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">{dimension.description}</p>
         )}
         {informational && (
-          <span className="text-xs text-gray-400 italic ml-2">(does not affect routing)</span>
+          <span className="text-xs text-gray-400 dark:text-gray-500 italic ml-2">(does not affect routing)</span>
         )}
       </div>
       <div className="flex flex-wrap gap-2">
@@ -252,7 +252,7 @@ function DimensionSelector({ dimension, selected, onSelect, informational }: Dim
               min-h-11
               ${selected === opt.value
                 ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
-                : 'bg-white text-gray-700 border-gray-300 hover:border-blue-400 hover:bg-blue-50'}
+                : 'bg-white dark:bg-gray-700 text-gray-700 dark:text-gray-300 border-gray-300 dark:border-gray-600 hover:border-blue-400 hover:bg-blue-50 dark:hover:bg-gray-600'}
             `}
           >
             {opt.label}

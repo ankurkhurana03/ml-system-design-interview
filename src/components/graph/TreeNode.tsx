@@ -116,7 +116,7 @@ export const TreeNode = memo(({ data }: TreeNodeProps) => {
             ${
               data.isVisited && !data.isActive
                 ? 'bg-blue-500 text-white'
-                : 'bg-white text-gray-800'
+                : 'bg-white dark:bg-gray-800 text-gray-800 dark:text-white'
             }
           `}
         >
@@ -128,7 +128,7 @@ export const TreeNode = memo(({ data }: TreeNodeProps) => {
                 ${
                   data.isVisited && !data.isActive
                     ? 'bg-blue-400 text-white'
-                    : 'bg-gray-100 text-gray-600'
+                    : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300'
                 }
               `}
               style={
@@ -149,7 +149,7 @@ export const TreeNode = memo(({ data }: TreeNodeProps) => {
               ${
                 data.isVisited && !data.isActive
                   ? 'text-white'
-                  : 'text-gray-900'
+                  : 'text-gray-900 dark:text-white'
               }
             `}
           >
@@ -164,7 +164,7 @@ export const TreeNode = memo(({ data }: TreeNodeProps) => {
                 ${
                   data.isVisited && !data.isActive
                     ? 'text-blue-100'
-                    : 'text-gray-500'
+                    : 'text-gray-500 dark:text-gray-400'
                 }
               `}
             >
@@ -178,7 +178,7 @@ export const TreeNode = memo(({ data }: TreeNodeProps) => {
                 ${
                   data.isVisited && !data.isActive
                     ? 'text-blue-100'
-                    : 'text-gray-500'
+                    : 'text-gray-500 dark:text-gray-400'
                 }
               `}
             >

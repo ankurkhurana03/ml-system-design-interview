@@ -33,10 +33,10 @@ export function ModeSelector({ currentMode, onSelectMode, isOpen, onClose }: Mod
 
   return (
     <div className="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-black/50" onClick={onClose}>
-      <div className="bg-white rounded-t-xl md:rounded-xl shadow-2xl w-full md:max-w-2xl md:mx-4 p-4 md:p-6" onClick={(e) => e.stopPropagation()}>
+      <div className="bg-white dark:bg-gray-800 rounded-t-xl md:rounded-xl shadow-2xl dark:shadow-gray-900/50 w-full md:max-w-2xl md:mx-4 p-4 md:p-6" onClick={(e) => e.stopPropagation()}>
         <div className="mb-6">
-          <h2 className="text-xl font-bold text-gray-900">Choose Interview Mode</h2>
-          <p className="text-sm text-gray-500 mt-1">Select how you want to practice</p>
+          <h2 className="text-xl font-bold text-gray-900 dark:text-white">Choose Interview Mode</h2>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Select how you want to practice</p>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -47,8 +47,8 @@ export function ModeSelector({ currentMode, onSelectMode, isOpen, onClose }: Mod
               className={`
                 p-5 rounded-xl border-2 text-left transition-all duration-200 group
                 ${currentMode === mode
-                  ? 'border-blue-500 bg-blue-50 shadow-md'
-                  : 'border-gray-200 hover:border-blue-300 hover:bg-gray-50'}
+                  ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/30 shadow-md'
+                  : 'border-gray-200 dark:border-gray-700 hover:border-blue-300 hover:bg-gray-50 dark:hover:bg-gray-700'}
               `}
             >
               <div className="mb-3">
@@ -69,10 +69,10 @@ export function ModeSelector({ currentMode, onSelectMode, isOpen, onClose }: Mod
                   </svg>
                 )}
               </div>
-              <h3 className={`font-semibold mb-1 ${currentMode === mode ? 'text-blue-900' : 'text-gray-900'}`}>
+              <h3 className={`font-semibold mb-1 ${currentMode === mode ? 'text-blue-900 dark:text-blue-300' : 'text-gray-900 dark:text-white'}`}>
                 {label}
               </h3>
-              <p className="text-xs text-gray-500 leading-relaxed">{description}</p>
+              <p className="text-xs text-gray-500 dark:text-gray-400 leading-relaxed">{description}</p>
               {currentMode === mode && (
                 <div className="mt-3 text-xs font-medium text-blue-600">Current mode</div>
               )}

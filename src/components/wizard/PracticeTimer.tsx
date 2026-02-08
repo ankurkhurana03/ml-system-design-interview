@@ -61,7 +61,7 @@ export function PracticeTimer() {
     return (
       <button
         onClick={handleToggleTimer}
-        className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors flex items-center gap-2"
+        className="px-3 py-1.5 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors flex items-center gap-2"
         title="Enable Practice Timer"
       >
         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -75,12 +75,12 @@ export function PracticeTimer() {
 
   const getColorClass = () => {
     if (timeRemaining <= CRITICAL_THRESHOLD) {
-      return 'text-red-600 bg-red-50 border-red-200';
+      return 'text-red-600 bg-red-50 dark:bg-red-900/30 border-red-200 dark:border-red-800';
     }
     if (timeRemaining <= WARNING_THRESHOLD) {
-      return 'text-amber-600 bg-amber-50 border-amber-200';
+      return 'text-amber-600 bg-amber-50 dark:bg-yellow-900/30 border-amber-200 dark:border-yellow-800';
     }
-    return 'text-blue-600 bg-blue-50 border-blue-200';
+    return 'text-blue-600 bg-blue-50 dark:bg-blue-900/30 border-blue-200 dark:border-blue-800';
   };
 
   return (
@@ -90,7 +90,7 @@ export function PracticeTimer() {
       </div>
       <button
         onClick={handleStartPause}
-        className="p-1.5 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
+        className="p-1.5 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
         title={isRunning ? 'Pause Timer' : 'Start Timer'}
       >
         {isRunning ? (
@@ -105,7 +105,7 @@ export function PracticeTimer() {
       </button>
       <button
         onClick={handleReset}
-        className="p-1.5 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
+        className="p-1.5 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
         title="Reset Timer"
       >
         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -114,7 +114,7 @@ export function PracticeTimer() {
       </button>
       <button
         onClick={handleToggleTimer}
-        className="p-1.5 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
+        className="p-1.5 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
         title="Disable Timer"
       >
         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

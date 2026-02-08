@@ -1,6 +1,7 @@
 id: pinterest-home-feed
 title: "Pinterest Home Feed Ranker"
 description: "Build a real-time home feed ranker for a content platform like Pinterest."
+difficulty: "intermediate"
 companies: ["Pinterest", "Instagram", "TikTok"]
 domains: ["Ranking/Search", "Recommendation"]
 root: pd_start

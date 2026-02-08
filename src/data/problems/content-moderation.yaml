@@ -1,6 +1,7 @@
 id: content-moderation
 title: "Content Moderation"
 description: "Build an automated content moderation system to filter offensive comments."
+difficulty: "intermediate"
 companies: ["Meta", "YouTube", "TikTok"]
 domains: ["NLP", "Computer Vision", "Classification"]
 category: "Security, Safety & Fraud"

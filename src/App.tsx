@@ -2,6 +2,9 @@ import { useState, useEffect, useCallback, useSyncExternalStore } from 'react';
 import { WizardProvider, useWizard } from '@/context/WizardContext';
 import { ModeProvider } from '@/context/ModeContext';
 import { VoiceOverProvider } from '@/context/VoiceOverContext';
+import { ThemeProvider, useTheme } from '@/context/ThemeContext';
+import { ProgressPanel } from '@/components/wizard/ProgressPanel';
+import { StudyPlanPanel } from '@/components/wizard/StudyPlanPanel';
 import { useProblems } from '@/hooks/useProblems';
 import { useAuth } from '@/hooks/useAuth';
 import { useAdmin } from '@/hooks/useAdmin';
@@ -25,6 +28,7 @@ import { PracticeTimer } from '@/components/wizard/PracticeTimer';
 import { ModeSelector } from '@/components/wizard/ModeSelector';
 import { EditDraftModal } from '@/components/draft/EditDraftModal';
 import { HandsFreeProvider, useHandsFree } from '@/context/HandsFreeContext';
+import { useProgress } from '@/hooks/useProgress';
 import { getActiveProblemId, saveActiveProblemId, saveDraftProblem, isDraft } from '@/utils/draftStore';
 import type { Problem } from '@/types/tree';
 
@@ -47,6 +51,8 @@ function AppContent() {
   const handsFree = useHandsFree();
   const { config: moderationConfig } = useModerationConfig();
 
+  useProgress(); // Auto-track study progress
+
   // Auto-moderation is active when admin is using the app
   useAutoModeration({
     config: moderationConfig,
@@ -66,6 +72,9 @@ function AppContent() {
   const [showLogin, setShowLogin] = useState(false);
   const [modeSelectOpen, setModeSelectOpen] = useState(false);
   const [editDraftId, setEditDraftId] = useState<string | null>(null);
+  const [progressOpen, setProgressOpen] = useState(false);
+  const [studyPlanOpen, setStudyPlanOpen] = useState(false);
+  const { setTheme, isDark } = useTheme();
 
   // Restore active problem from localStorage, or fall back to first builtin
   useEffect(() => {
@@ -181,17 +190,17 @@ function AppContent() {
 
   if (loading) {
     return (
-      <div className="h-screen flex items-center justify-center bg-slate-50">
+      <div className="h-screen flex items-center justify-center bg-slate-50 dark:bg-gray-950">
         <div className="text-center">
           <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-slate-600">Loading problems...</p>
+          <p className="text-slate-600 dark:text-slate-400">Loading problems...</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="flex h-screen overflow-hidden bg-slate-50">
+    <div className="flex h-screen overflow-hidden bg-slate-50 dark:bg-gray-950">
       <Sidebar
         problems={problemMetas}
         activeProblemId={activeProblemId}
@@ -208,13 +217,13 @@ function AppContent() {
 
       <div className="flex-1 flex flex-col min-w-0">
         {/* Top bar */}
-        <div className="h-10 bg-white border-b border-gray-200 flex items-center justify-between px-2 md:px-4">
+        <div className="h-10 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between px-2 md:px-4">
           <div className="flex items-center gap-2 min-w-0">
             {/* Hamburger — mobile only */}
             {isMobile && (
               <button
                 onClick={() => setSidebarCollapsed(false)}
-                className="p-1.5 hover:bg-gray-100 rounded-lg text-gray-600 md:hidden flex-shrink-0"
+                className="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg text-gray-600 dark:text-gray-400 md:hidden flex-shrink-0"
                 title="Open sidebar"
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -224,13 +233,13 @@ function AppContent() {
             )}
             {problem && (
               <>
-                <h2 className="text-sm font-semibold text-gray-700 truncate max-w-[150px] sm:max-w-none">
+                <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-200 truncate max-w-[150px] sm:max-w-none">
                   {problem.title}
                 </h2>
                 {isDraft(problem.id) && (
                   <button
                     onClick={() => handleEditDraft(problem.id)}
-                    className="p-1 hover:bg-gray-100 rounded text-gray-400 hover:text-gray-600 transition-colors flex-shrink-0"
+                    className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors flex-shrink-0"
                     title="Edit draft"
                   >
                     <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -261,8 +270,8 @@ function AppContent() {
             {voiceOver.isSupported && (
               <button
                 onClick={() => voiceOver.setEnabled(!voiceOver.enabled)}
-                className={`p-1.5 hover:bg-gray-100 rounded-lg transition-colors ${
-                  voiceOver.enabled ? 'text-indigo-600' : 'text-gray-500'
+                className={`p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors ${
+                  voiceOver.enabled ? 'text-indigo-600 dark:text-indigo-400' : 'text-gray-500 dark:text-gray-400'
                 }`}
                 title={voiceOver.enabled ? 'Disable Voice-Over' : 'Enable Voice-Over'}
               >
@@ -319,9 +328,45 @@ function AppContent() {
                 </svg>
               </button>
             )}
+            {/* Study Plans */}
+            <button
+              onClick={() => setStudyPlanOpen(true)}
+              className="hidden md:flex p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
+              title="Study Plans"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
+              </svg>
+            </button>
+            {/* Progress */}
+            <button
+              onClick={() => setProgressOpen(true)}
+              className="hidden md:flex p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
+              title="Study Progress"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+              </svg>
+            </button>
+            {/* Theme toggle */}
+            <button
+              onClick={() => setTheme(isDark ? 'light' : 'dark')}
+              className="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
+              title={isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+            >
+              {isDark ? (
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+                </svg>
+              ) : (
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+                </svg>
+              )}
+            </button>
             <button
               onClick={() => setSettingsOpen(true)}
-              className="p-1.5 hover:bg-gray-100 rounded-lg text-gray-500 hover:text-gray-700 transition-colors"
+              className="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
               title="LLM Settings"
             >
               <svg
@@ -475,20 +520,30 @@ function AppContent() {
           }}
         />
       )}
+
+      <ProgressPanel isOpen={progressOpen} onClose={() => setProgressOpen(false)} />
+      <StudyPlanPanel
+        isOpen={studyPlanOpen}
+        onClose={() => setStudyPlanOpen(false)}
+        onSelectProblem={handleSelectProblem}
+        problemMetas={problemMetas}
+      />
     </div>
   );
 }
 
 export default function App() {
   return (
-    <ModeProvider>
-      <VoiceOverProvider>
-        <WizardProvider>
-          <HandsFreeProvider>
-            <AppContent />
-          </HandsFreeProvider>
-        </WizardProvider>
-      </VoiceOverProvider>
-    </ModeProvider>
+    <ThemeProvider>
+      <ModeProvider>
+        <VoiceOverProvider>
+          <WizardProvider>
+            <HandsFreeProvider>
+              <AppContent />
+            </HandsFreeProvider>
+          </WizardProvider>
+        </VoiceOverProvider>
+      </ModeProvider>
+    </ThemeProvider>
   );
 }

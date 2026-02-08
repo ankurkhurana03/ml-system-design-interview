@@ -1,6 +1,7 @@
 id: food-delivery-ranking
 title: "Food Delivery Restaurant & Item Ranking"
 description: "Design the ranking system for a food delivery app like DoorDash or UberEats."
+difficulty: "intermediate"
 companies: ["DoorDash", "UberEats", "Instacart"]
 domains: ["Ranking/Search", "Recommendation", "Tabular/Structured"]
 root: pd_start

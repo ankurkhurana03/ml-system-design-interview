@@ -1,6 +1,7 @@
 id: fake-news-detection
 title: "Fake News Detection"
 description: "Create a fake news detection system for a high-traffic news aggregator."
+difficulty: "intermediate"
 companies: ["Google", "Meta", "X/Twitter"]
 domains: ["NLP", "Graph/Network", "Classification"]
 category: "Security, Safety & Fraud"

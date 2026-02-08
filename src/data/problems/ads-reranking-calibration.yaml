@@ -1,6 +1,7 @@
 id: ads-reranking-calibration
 title: "Ads Re-ranking with Calibration"
 description: "Build an ads re-ranking system with probability calibration."
+difficulty: "advanced"
 companies: ["Google", "Meta", "Microsoft"]
 domains: ["Ranking/Search", "Tabular/Structured"]
 root: pd_start

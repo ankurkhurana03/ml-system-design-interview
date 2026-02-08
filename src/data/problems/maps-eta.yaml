@@ -1,6 +1,7 @@
 id: maps-eta
 title: "Google Maps ETA Prediction"
 description: "Design an ETA (Estimated Time of Arrival) system for a maps application like Google Maps."
+difficulty: "intermediate"
 companies: ["Google", "Uber", "Apple"]
 domains: ["Time Series", "Tabular/Structured", "Graph/Network"]
 root: pd_start

@@ -1,6 +1,7 @@
 id: youtube-video-search
 title: "YouTube Video Search"
 description: "Create a search ranking system for YouTube videos based on relevance and freshness."
+difficulty: "intermediate"
 companies: ["YouTube/Google", "TikTok", "Netflix"]
 domains: ["NLP", "Ranking/Search", "Recommendation"]
 root: pd_start

@@ -1,6 +1,7 @@
 id: twitter-news-feed
 title: "Twitter/X News Feed"
 description: "Design a personalized news feed for a social media app like X (Twitter)."
+difficulty: "intermediate"
 companies: ["X/Twitter", "Meta", "LinkedIn"]
 domains: ["Ranking/Search", "Recommendation", "NLP"]
 root: pd_start

@@ -1,6 +1,7 @@
 id: realtime-ad-auction
 title: "Real-time Ad Auction"
 description: "Design a framework for evaluating and selecting ads in a real-time auction."
+difficulty: "advanced"
 companies: ["Google", "Meta", "Amazon"]
 domains: ["Ranking/Search", "Tabular/Structured", "Real-time"]
 root: pd_start

@@ -99,7 +99,7 @@ export function QuestionCard({ node, problemId, onSelectChoice, onAdvance, onRes
 
   return (
     <div
-      className="bg-white rounded-lg shadow-lg border-l-4 overflow-hidden"
+      className="bg-white dark:bg-gray-800 rounded-lg shadow-lg dark:shadow-gray-900/50 border-l-4 overflow-hidden"
       style={{ borderLeftColor: getBorderColor() }}
     >
       <div className="p-3 sm:p-4 md:p-6">

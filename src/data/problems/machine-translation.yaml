@@ -1,6 +1,7 @@
 id: machine-translation
 title: "Neural Machine Translation System"
 description: "Design a machine translation system supporting 100+ languages at production scale."
+difficulty: "advanced"
 companies: ["Google", "Meta", "Apple"]
 domains: ["NLP", "Generative AI"]
 category: "NLP & Language"

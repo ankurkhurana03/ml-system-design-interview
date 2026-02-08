@@ -1,4 +1,6 @@
 import { useState, useEffect } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { useAIAnswer, type AIAnswerResponse } from '@/hooks/useAIAnswer';
 import { CitationsList } from './CitationsList';
 import type { UserSource } from '@/types/tree';
@@ -25,7 +27,8 @@ export function AskAIPanel({
   const [isExpanded, setIsExpanded] = useState(false);
   const [question, setQuestion] = useState('');
   const [history, setHistory] = useState<AIAnswerResponse[]>([]);
-  const { answer, sourceCitations, loading, error, askQuestion } = useAIAnswer();
+  const { answer, streamingText, isStreaming, sourceCitations, loading, error, askQuestion } =
+    useAIAnswer();
 
   // Load history from localStorage on mount
   useEffect(() => {
@@ -81,10 +84,10 @@ export function AskAIPanel({
   };
 
   return (
-    <div className="mt-4 border-t border-gray-200 pt-3">
+    <div className="mt-4 border-t border-gray-200 dark:border-gray-700 pt-3">
       <button
         onClick={() => setIsExpanded(!isExpanded)}
-        className="flex items-center gap-2 text-sm font-medium text-purple-600 hover:text-purple-700 transition-colors"
+        className="flex items-center gap-2 text-sm font-medium text-purple-600 dark:text-purple-400 hover:text-purple-700 dark:hover:text-purple-300 transition-colors"
       >
         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path
@@ -116,7 +119,7 @@ export function AskAIPanel({
                 value={question}
                 onChange={(e) => setQuestion(e.target.value)}
                 disabled={loading}
-                className="flex-1 px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed"
+                className="flex-1 px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent disabled:bg-gray-100 dark:disabled:bg-gray-700 disabled:cursor-not-allowed bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
               />
               <button
                 type="submit"
@@ -161,8 +164,8 @@ export function AskAIPanel({
 
           {/* Error message */}
           {error && (
-            <div className="p-3 bg-red-50 border border-red-200 rounded-lg">
-              <div className="flex items-start gap-2 text-red-800">
+            <div className="p-3 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-lg">
+              <div className="flex items-start gap-2 text-red-800 dark:text-red-300">
                 <svg className="w-5 h-5 flex-shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
                   <path
                     fillRule="evenodd"
@@ -175,12 +178,31 @@ export function AskAIPanel({
             </div>
           )}
 
-          {/* Current answer */}
-          {answer && (
-            <div className="p-4 bg-gradient-to-br from-purple-50 to-blue-50 border border-purple-200 rounded-lg space-y-3">
+          {/* Streaming answer */}
+          {isStreaming && streamingText && (
+            <div className="p-4 bg-gradient-to-br from-purple-50 to-blue-50 dark:from-purple-900/20 dark:to-blue-900/20 border border-purple-200 dark:border-purple-800 rounded-lg space-y-3">
+              <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1.5 px-2 py-1 bg-purple-100 dark:bg-purple-900/30 text-purple-800 dark:text-purple-300 rounded-full text-xs font-medium">
+                  <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20">
+                    <path d="M9 4.804A7.968 7.968 0 005.5 4c-1.255 0-2.443.29-3.5.804v10A7.969 7.969 0 015.5 14c1.669 0 3.218.51 4.5 1.385A7.962 7.962 0 0114.5 14c1.255 0 2.443.29 3.5.804v-10A7.968 7.968 0 0014.5 4c-1.255 0-2.443.29-3.5.804V12a1 1 0 11-2 0V4.804z" />
+                  </svg>
+                  AI Assistant
+                </div>
+                <span className="text-xs text-purple-500 dark:text-purple-400 animate-pulse">Streaming...</span>
+              </div>
+              <div className="text-sm text-gray-700 dark:text-gray-300 leading-relaxed prose prose-sm max-w-none">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingText}</ReactMarkdown>
+                <span className="inline-block w-2 h-4 ml-0.5 bg-purple-500 animate-blink align-text-bottom" />
+              </div>
+            </div>
+          )}
+
+          {/* Current answer (final) */}
+          {answer && !isStreaming && (
+            <div className="p-4 bg-gradient-to-br from-purple-50 to-blue-50 dark:from-purple-900/20 dark:to-blue-900/20 border border-purple-200 dark:border-purple-800 rounded-lg space-y-3">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <div className="flex items-center gap-1.5 px-2 py-1 bg-purple-100 text-purple-800 rounded-full text-xs font-medium">
+                  <div className="flex items-center gap-1.5 px-2 py-1 bg-purple-100 dark:bg-purple-900/30 text-purple-800 dark:text-purple-300 rounded-full text-xs font-medium">
                     <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20">
                       <path d="M9 4.804A7.968 7.968 0 005.5 4c-1.255 0-2.443.29-3.5.804v10A7.969 7.969 0 015.5 14c1.669 0 3.218.51 4.5 1.385A7.962 7.962 0 0114.5 14c1.255 0 2.443.29 3.5.804v-10A7.968 7.968 0 0014.5 4c-1.255 0-2.443.29-3.5.804V12a1 1 0 11-2 0V4.804z" />
                     </svg>
@@ -190,7 +212,7 @@ export function AskAIPanel({
                 {onSaveAsComment && (
                   <button
                     onClick={handleSaveAsComment}
-                    className="text-xs text-purple-600 hover:text-purple-700 font-medium flex items-center gap-1"
+                    className="text-xs text-purple-600 dark:text-purple-400 hover:text-purple-700 dark:hover:text-purple-300 font-medium flex items-center gap-1"
                   >
                     <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path
@@ -204,8 +226,8 @@ export function AskAIPanel({
                   </button>
                 )}
               </div>
-              <div className="text-sm text-gray-700 whitespace-pre-wrap leading-relaxed">
-                {answer}
+              <div className="text-sm text-gray-700 dark:text-gray-300 leading-relaxed prose prose-sm max-w-none">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{answer}</ReactMarkdown>
               </div>
               <CitationsList sourceCitations={sourceCitations} />
             </div>
@@ -215,7 +237,7 @@ export function AskAIPanel({
           {history.length > 0 && (
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <h4 className="text-xs font-medium text-gray-500 uppercase tracking-wider">
+                <h4 className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                   Previous Questions
                 </h4>
                 <button
@@ -223,7 +245,7 @@ export function AskAIPanel({
                     setHistory([]);
                     localStorage.removeItem(`ai_history_${problemId}_${nodeId}`);
                   }}
-                  className="text-xs text-gray-400 hover:text-gray-600"
+                  className="text-xs text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300"
                 >
                   Clear history
                 </button>
@@ -232,19 +254,21 @@ export function AskAIPanel({
                 {history.map((entry, index) => (
                   <div
                     key={index}
-                    className="p-3 bg-gray-50 border border-gray-200 rounded-lg space-y-2"
+                    className="p-3 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg space-y-2"
                   >
                     <div className="flex items-start justify-between gap-2">
-                      <p className="text-sm font-medium text-gray-700">{entry.question}</p>
-                      <span className="text-xs text-gray-400 flex-shrink-0">
+                      <p className="text-sm font-medium text-gray-700 dark:text-gray-300">{entry.question}</p>
+                      <span className="text-xs text-gray-400 dark:text-gray-500 flex-shrink-0">
                         {timeAgo(entry.timestamp)}
                       </span>
                     </div>
-                    <p className="text-sm text-gray-600 whitespace-pre-wrap">
-                      {entry.answer.length > 200
-                        ? `${entry.answer.substring(0, 200)}...`
-                        : entry.answer}
-                    </p>
+                    <div className="text-sm text-gray-600 dark:text-gray-400 prose prose-sm max-w-none">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {entry.answer.length > 200
+                          ? `${entry.answer.substring(0, 200)}...`
+                          : entry.answer}
+                      </ReactMarkdown>
+                    </div>
                   </div>
                 ))}
               </div>

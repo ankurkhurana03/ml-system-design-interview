@@ -1,6 +1,7 @@
 id: linkedin-pymk
 title: "LinkedIn People You May Know"
 description: "Design a 'People You May Know' recommendation system for LinkedIn."
+difficulty: "intermediate"
 companies: ["LinkedIn", "Meta", "Twitter"]
 domains: ["Recommendation", "Graph/Network"]
 root: pd_start

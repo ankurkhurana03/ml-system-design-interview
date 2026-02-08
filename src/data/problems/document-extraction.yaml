@@ -1,6 +1,7 @@
 id: document-extraction
 title: "Intelligent Document Processing & OCR"
 description: "Design a system to extract structured data from documents: forms, invoices, receipts, and contracts."
+difficulty: "intermediate"
 companies: ["Google", "Amazon", "Intuit"]
 domains: ["Computer Vision", "NLP", "Tabular/Structured"]
 root: pd_start

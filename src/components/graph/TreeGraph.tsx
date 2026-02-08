@@ -5,6 +5,7 @@ import {
   useReactFlow,
   Controls,
   Background,
+  MiniMap,
   type Node,
   type NodeTypes,
   type EdgeTypes,
@@ -193,7 +194,7 @@ function TreeGraphInner() {
   }
 
   return (
-    <div className="w-full h-full bg-gray-50">
+    <div className="w-full h-full bg-gray-50 dark:bg-gray-900">
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -210,6 +211,12 @@ function TreeGraphInner() {
       >
         <Background variant={BackgroundVariant.Dots} gap={16} size={1} />
         <Controls />
+        <MiniMap
+          nodeStrokeWidth={3}
+          zoomable
+          pannable
+          className="!bg-gray-100 !border-gray-300"
+        />
       </ReactFlow>
 
       {/* Branch Edit Modal */}

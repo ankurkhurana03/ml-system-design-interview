@@ -1,6 +1,7 @@
 id: duplicate-listing-detection
 title: "Duplicate Listing Detection"
 description: "Design a system to identify and remove duplicate listings in an e-commerce marketplace."
+difficulty: "intermediate"
 companies: ["Amazon", "eBay", "Etsy"]
 domains: ["NLP", "Computer Vision", "Tabular/Structured"]
 category: "Security, Safety & Fraud"

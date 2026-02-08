@@ -77,7 +77,7 @@ export const TreeEdge = memo(
                 ${
                   isOnPath
                     ? 'bg-blue-500 text-white shadow-md'
-                    : 'bg-white text-gray-600 border border-gray-300'
+                    : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-300 border border-gray-300 dark:border-gray-600'
                 }
               `}
             >

@@ -346,30 +346,30 @@ export function ModerationPanel({ isOpen, onClose }: ModerationPanelProps) {
 
   return (
     <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-0 md:p-4">
-      <div className="bg-white shadow-2xl w-full h-full md:rounded-xl md:max-w-7xl md:h-[90vh] flex flex-col">
+      <div className="bg-white dark:bg-gray-800 shadow-2xl dark:shadow-gray-900/50 w-full h-full md:rounded-xl md:max-w-7xl md:h-[90vh] flex flex-col">
         {/* Header */}
-        <div className="border-b border-gray-200 p-6 flex items-center justify-between">
+        <div className="border-b border-gray-200 dark:border-gray-700 p-6 flex items-center justify-between">
           <div className="flex-1">
             <div className="flex items-center gap-3">
-              <h2 className="text-2xl font-bold text-gray-900">Comment Moderation</h2>
+              <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Comment Moderation</h2>
               {config && config.mode === 'full_auto' && (
-                <span className="px-2 py-1 bg-green-100 text-green-700 text-xs font-medium rounded-full flex items-center gap-1">
+                <span className="px-2 py-1 bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 text-xs font-medium rounded-full flex items-center gap-1">
                   <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
                   Auto-moderation active
                 </span>
               )}
               {config && config.mode === 'ai_assisted' && (
-                <span className="px-2 py-1 bg-blue-100 text-blue-700 text-xs font-medium rounded-full">
+                <span className="px-2 py-1 bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 text-xs font-medium rounded-full">
                   AI-Assisted
                 </span>
               )}
               {config && config.mode === 'manual' && (
-                <span className="px-2 py-1 bg-purple-100 text-purple-700 text-xs font-medium rounded-full">
+                <span className="px-2 py-1 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 text-xs font-medium rounded-full">
                   Manual
                 </span>
               )}
             </div>
-            <p className="text-sm text-gray-500 mt-1">
+            <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
               Review and moderate user comments across all problems
             </p>
           </div>
@@ -411,7 +411,7 @@ export function ModerationPanel({ isOpen, onClose }: ModerationPanelProps) {
             </div>
             <button
               onClick={onClose}
-              className="p-2 hover:bg-gray-100 rounded-lg text-gray-500 hover:text-gray-700 transition-colors"
+              className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
             >
               <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path
@@ -426,7 +426,7 @@ export function ModerationPanel({ isOpen, onClose }: ModerationPanelProps) {
         </div>
 
         {/* Tabs */}
-        <div className="border-b border-gray-200 px-6">
+        <div className="border-b border-gray-200 dark:border-gray-700 px-6">
           <div className="flex gap-4">
             {(['pending', 'approved', 'rejected', 'all', 'branches', 'audit', 'analytics', 'settings'] as const).map((tab) => (
               <button
@@ -434,13 +434,13 @@ export function ModerationPanel({ isOpen, onClose }: ModerationPanelProps) {
                 onClick={() => setActiveTab(tab)}
                 className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
                   activeTab === tab
-                    ? 'border-blue-500 text-blue-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700'
+                    ? 'border-blue-500 text-blue-600 dark:text-blue-400'
+                    : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'
                 }`}
               >
                 {tab === 'audit' ? 'Audit Log' : tab === 'analytics' ? 'Analytics' : tab === 'branches' ? 'Branches' : tab.charAt(0).toUpperCase() + tab.slice(1)}
                 {tab !== 'all' && tab !== 'settings' && tab !== 'audit' && tab !== 'analytics' && tab !== 'branches' && (
-                  <span className="ml-2 px-2 py-0.5 bg-gray-100 rounded-full text-xs">
+                  <span className="ml-2 px-2 py-0.5 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-full text-xs">
                     {comments.filter((c) => c.status === tab).length}
                   </span>
                 )}
@@ -451,14 +451,14 @@ export function ModerationPanel({ isOpen, onClose }: ModerationPanelProps) {
 
         {/* Actions & Search - only show for comment tabs */}
         {activeTab !== 'settings' && activeTab !== 'audit' && activeTab !== 'analytics' && activeTab !== 'branches' && (
-        <div className="p-4 border-b border-gray-200 flex items-center justify-between gap-4">
+        <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between gap-4">
           <div className="flex-1 max-w-md">
             <input
               type="text"
               placeholder="Search by content, author, problem, or node..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
           <div className="flex items-center gap-2">
@@ -473,7 +473,7 @@ export function ModerationPanel({ isOpen, onClose }: ModerationPanelProps) {
                 </button>
                 <button
                   onClick={() => setSelectedComments(new Set())}
-                  className="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors text-sm font-medium"
+                  className="px-4 py-2 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors text-sm font-medium"
                 >
                   Clear
                 </button>
@@ -554,14 +554,14 @@ export function ModerationPanel({ isOpen, onClose }: ModerationPanelProps) {
                   <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
                 </div>
               ) : branches.length === 0 ? (
-                <p className="text-gray-500 text-center py-12">No branches found</p>
+                <p className="text-gray-500 dark:text-gray-400 text-center py-12">No branches found</p>
               ) : (
                 <div className="space-y-4">
                   {branches.map((branch) => (
-                    <div key={branch.id} className="bg-white border border-gray-200 rounded-lg p-4 hover:shadow-md transition-shadow">
+                    <div key={branch.id} className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg p-4 hover:shadow-md dark:hover:shadow-gray-900/50 transition-shadow">
                       <div className="flex items-start justify-between mb-2">
                         <div className="flex items-center gap-2 flex-wrap">
-                          <span className="font-semibold text-gray-900">{branch.choice_label}</span>
+                          <span className="font-semibold text-gray-900 dark:text-white">{branch.choice_label}</span>
                           <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${
                             branch.status === 'approved' ? 'bg-green-100 text-green-700'
                               : branch.status === 'rejected' ? 'bg-red-100 text-red-700'
@@ -570,12 +570,12 @@ export function ModerationPanel({ isOpen, onClose }: ModerationPanelProps) {
                             {branch.status}
                           </span>
                         </div>
-                        <span className="text-xs text-gray-500">{new Date(branch.created_at).toLocaleString()}</span>
+                        <span className="text-xs text-gray-500 dark:text-gray-400">{new Date(branch.created_at).toLocaleString()}</span>
                       </div>
 
-                      <p className="text-sm text-gray-700 mb-2">{branch.choice_answer}</p>
+                      <p className="text-sm text-gray-700 dark:text-gray-300 mb-2">{branch.choice_answer}</p>
 
-                      <div className="flex items-center gap-4 text-xs text-gray-500 mb-3">
+                      <div className="flex items-center gap-4 text-xs text-gray-500 dark:text-gray-400 mb-3">
                         <span>Problem: {branch.problem_id}</span>
                         <span>Target: {branch.target_node_id}</span>
                         <span>Author: {branch.author_name}</span>
@@ -583,12 +583,12 @@ export function ModerationPanel({ isOpen, onClose }: ModerationPanelProps) {
 
                       {/* YAML Preview */}
                       <details className="mb-3">
-                        <summary className="text-sm text-blue-600 cursor-pointer hover:text-blue-800">View YAML</summary>
-                        <pre className="mt-2 p-3 bg-gray-50 rounded-lg text-xs overflow-x-auto max-h-48 overflow-y-auto">{decompressTextSafe(branch.yaml_content)}</pre>
+                        <summary className="text-sm text-blue-600 dark:text-blue-400 cursor-pointer hover:text-blue-800 dark:hover:text-blue-300">View YAML</summary>
+                        <pre className="mt-2 p-3 bg-gray-50 dark:bg-gray-900/50 rounded-lg text-xs overflow-x-auto max-h-48 overflow-y-auto text-gray-900 dark:text-gray-300">{decompressTextSafe(branch.yaml_content)}</pre>
                       </details>
 
                       {branch.moderation_reason && (
-                        <p className="text-xs text-gray-500 mb-2 italic">Reason: {branch.moderation_reason}</p>
+                        <p className="text-xs text-gray-500 dark:text-gray-400 mb-2 italic">Reason: {branch.moderation_reason}</p>
                       )}
 
                       {/* Actions */}
@@ -628,19 +628,19 @@ export function ModerationPanel({ isOpen, onClose }: ModerationPanelProps) {
             <div className="flex items-center justify-center h-full">
               <div className="text-center">
                 <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-                <p className="text-gray-600">Loading comments...</p>
+                <p className="text-gray-600 dark:text-gray-400">Loading comments...</p>
               </div>
             </div>
           ) : filteredComments.length === 0 ? (
             <div className="flex items-center justify-center h-full">
-              <p className="text-gray-500">No comments found</p>
+              <p className="text-gray-500 dark:text-gray-400">No comments found</p>
             </div>
           ) : (
             <div className="space-y-4">
               {filteredComments.map((comment) => (
                 <div
                   key={comment.id}
-                  className="bg-white border border-gray-200 rounded-lg p-4 hover:shadow-md transition-shadow"
+                  className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg p-4 hover:shadow-md dark:hover:shadow-gray-900/50 transition-shadow"
                 >
                   <div className="flex items-start gap-4">
                     {/* Selection Checkbox */}
@@ -655,7 +655,7 @@ export function ModerationPanel({ isOpen, onClose }: ModerationPanelProps) {
                       {/* Header */}
                       <div className="flex items-start justify-between mb-2">
                         <div className="flex items-center gap-2 flex-wrap">
-                          <span className="font-semibold text-gray-900">{comment.author_name}</span>
+                          <span className="font-semibold text-gray-900 dark:text-white">{comment.author_name}</span>
                           <span
                             className={`px-2 py-0.5 text-xs font-medium rounded-full ${
                               comment.comment_type === 'question'
@@ -683,16 +683,16 @@ export function ModerationPanel({ isOpen, onClose }: ModerationPanelProps) {
                             {comment.status}
                           </span>
                         </div>
-                        <span className="text-xs text-gray-500">
+                        <span className="text-xs text-gray-500 dark:text-gray-400">
                           {new Date(comment.created_at).toLocaleString()}
                         </span>
                       </div>
 
                       {/* Content */}
-                      <p className="text-gray-700 mb-2">{comment.content}</p>
+                      <p className="text-gray-700 dark:text-gray-300 mb-2">{comment.content}</p>
 
                       {/* Metadata */}
-                      <div className="flex items-center gap-4 text-xs text-gray-500 mb-3">
+                      <div className="flex items-center gap-4 text-xs text-gray-500 dark:text-gray-400 mb-3">
                         <span>Problem: {comment.problem_id}</span>
                         <span>Node: {comment.node_id}</span>
                         {comment.parent_id && <span>Reply to: {comment.parent_id.slice(0, 8)}</span>}
@@ -700,12 +700,12 @@ export function ModerationPanel({ isOpen, onClose }: ModerationPanelProps) {
 
                       {/* Reply Form */}
                       {replyingTo === comment.id && (
-                        <div className="mb-3 bg-gray-50 p-3 rounded-lg">
+                        <div className="mb-3 bg-gray-50 dark:bg-gray-900/50 p-3 rounded-lg">
                           <textarea
                             value={replyContent}
                             onChange={(e) => setReplyContent(e.target.value)}
                             placeholder="Write your reply..."
-                            className="w-full px-3 py-2 border border-gray-300 rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
                             rows={3}
                           />
                           <div className="flex gap-2 mt-2">
@@ -722,7 +722,7 @@ export function ModerationPanel({ isOpen, onClose }: ModerationPanelProps) {
                                 setReplyingTo(null);
                                 setReplyContent('');
                               }}
-                              className="px-3 py-1 bg-gray-200 text-gray-700 rounded hover:bg-gray-300 text-sm"
+                              className="px-3 py-1 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded hover:bg-gray-300 dark:hover:bg-gray-600 text-sm"
                             >
                               Cancel
                             </button>

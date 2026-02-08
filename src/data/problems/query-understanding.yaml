@@ -1,6 +1,7 @@
 id: query-understanding
 title: "Search Query Understanding"
 description: "Design a query understanding system that interprets user search intent, extracts entities, and rewrites queries."
+difficulty: "intermediate"
 companies: ["Google", "Amazon", "Airbnb"]
 domains: ["NLP", "Ranking/Search"]
 root: pd_start

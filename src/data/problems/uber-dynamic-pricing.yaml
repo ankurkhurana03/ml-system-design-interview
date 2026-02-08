@@ -1,6 +1,7 @@
 id: uber-dynamic-pricing
 title: "Uber Surge Pricing & Supply-Demand Balancing"
 description: "Build a dynamic pricing system for a ride-sharing service like Uber."
+difficulty: "intermediate"
 companies: ["Uber", "Lyft", "DoorDash"]
 domains: ["RL", "Time Series", "Tabular/Structured"]
 root: pd_start

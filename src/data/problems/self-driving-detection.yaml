@@ -1,6 +1,7 @@
 id: self-driving-detection
 title: "Self-Driving Object Detection"
 description: "Design an object detection pipeline for a self-driving car's perception layer."
+difficulty: "advanced"
 companies: ["Waymo", "Tesla", "Cruise"]
 domains: ["Computer Vision", "Real-time"]
 root: pd_start

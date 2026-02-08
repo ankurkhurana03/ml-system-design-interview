@@ -31,8 +31,8 @@ export function CitationsList({ citations, sourceCitations }: CitationsListProps
   const COLLAPSE_THRESHOLD = 5;
 
   return (
-    <div className="mt-4 pt-3 border-t border-gray-200">
-      <h4 className="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-2">
+    <div className="mt-4 pt-3 border-t border-gray-200 dark:border-gray-700">
+      <h4 className="text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-2">
         Sources
       </h4>
 
@@ -40,21 +40,21 @@ export function CitationsList({ citations, sourceCitations }: CitationsListProps
       {hasSourceCitations && (
         <ol className="list-none space-y-1 mb-2">
           {sourceCitations.map((citation) => (
-            <li key={citation.index} className="text-xs text-gray-600 flex items-start gap-1.5">
-              <span className="font-bold text-gray-500 flex-shrink-0">[{citation.index}]</span>
+            <li key={citation.index} className="text-xs text-gray-600 dark:text-gray-400 flex items-start gap-1.5">
+              <span className="font-bold text-gray-500 dark:text-gray-500 flex-shrink-0">[{citation.index}]</span>
               <span>
                 {citation.source.url ? (
                   <a
                     href={citation.source.url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-blue-600 hover:text-blue-800 hover:underline"
+                    className="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 hover:underline"
                     title={citation.source.url}
                   >
                     {citation.source.title}
                   </a>
                 ) : (
-                  <span className="text-gray-700">{citation.source.title}</span>
+                  <span className="text-gray-700 dark:text-gray-300">{citation.source.title}</span>
                 )}
               </span>
             </li>
@@ -66,7 +66,7 @@ export function CitationsList({ citations, sourceCitations }: CitationsListProps
       {hasUrlCitations && (
         <>
           {hasSourceCitations && (
-            <h5 className="text-xs text-gray-400 mt-2 mb-1">Additional References</h5>
+            <h5 className="text-xs text-gray-400 dark:text-gray-500 mt-2 mb-1">Additional References</h5>
           )}
           <ol className="list-decimal list-inside space-y-1">
             {((() => {
@@ -76,12 +76,12 @@ export function CitationsList({ citations, sourceCitations }: CitationsListProps
                 : citations;
               return visible;
             })()).map((url, index) => (
-              <li key={index} className="text-xs text-gray-600">
+              <li key={index} className="text-xs text-gray-600 dark:text-gray-400">
                 <a
                   href={url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-blue-600 hover:text-blue-800 hover:underline"
+                  className="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 hover:underline"
                   title={url}
                 >
                   {truncateUrl(url)}
@@ -92,7 +92,7 @@ export function CitationsList({ citations, sourceCitations }: CitationsListProps
           {citations.length > COLLAPSE_THRESHOLD && (
             <button
               onClick={() => setExpanded(!expanded)}
-              className="mt-1 text-xs text-gray-500 hover:text-gray-700"
+              className="mt-1 text-xs text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300"
             >
               {expanded
                 ? 'Show fewer'

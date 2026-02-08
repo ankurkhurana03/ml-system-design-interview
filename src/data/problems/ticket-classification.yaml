@@ -1,6 +1,7 @@
 id: ticket-classification
 title: "Jira Bug Ticket Classification"
 description: "Create a system to automatically classify Jira bug tickets to the correct engineering team."
+difficulty: "beginner"
 companies: ["Atlassian", "Google", "Microsoft"]
 domains: ["NLP", "Classification"]
 root: pd_start

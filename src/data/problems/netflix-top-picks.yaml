@@ -1,6 +1,7 @@
 id: netflix-top-picks
 title: "Netflix Top Picks"
 description: "Design a 'Top Picks' recommendation engine for Netflix."
+difficulty: "intermediate"
 companies: ["Netflix", "Disney+", "Amazon"]
 domains: ["Recommendation", "Ranking/Search"]
 root: pd_start

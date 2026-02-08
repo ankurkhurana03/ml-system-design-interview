@@ -1,6 +1,7 @@
 id: bot-detection
 title: "Bot Detection"
 description: "Design a system to detect and block bots on a social media platform."
+difficulty: "intermediate"
 companies: ["X/Twitter", "Meta", "Reddit"]
 domains: ["Tabular/Structured", "Anomaly Detection", "Graph/Network"]
 category: "Security, Safety & Fraud"

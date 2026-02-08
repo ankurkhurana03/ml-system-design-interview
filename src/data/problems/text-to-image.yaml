@@ -1,6 +1,7 @@
 id: text-to-image
 title: "Text-to-Image Generation System"
 description: "Design a text-to-image generation system like DALL-E or Midjourney for production use."
+difficulty: "advanced"
 companies: ["OpenAI", "Google", "Stability AI"]
 domains: ["Computer Vision", "Generative AI", "NLP"]
 category: "Generative AI"

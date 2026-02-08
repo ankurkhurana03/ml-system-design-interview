@@ -1,6 +1,7 @@
 id: fraud-detection
 title: "Financial Fraud Detection"
 description: "Design a real-time fraud detection system for financial transactions."
+difficulty: "intermediate"
 companies: ["Stripe", "PayPal", "Square"]
 domains: ["Tabular/Structured", "Real-time", "Anomaly Detection"]
 category: "Security, Safety & Fraud"

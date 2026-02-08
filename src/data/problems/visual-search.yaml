@@ -1,6 +1,7 @@
 id: visual-search
 title: "Visual Search (Pinterest Lens)"
 description: "Design a visual search system that uses images as queries."
+difficulty: "advanced"
 companies: ["Pinterest", "Google", "Amazon"]
 domains: ["Computer Vision", "Ranking/Search"]
 root: pd_start

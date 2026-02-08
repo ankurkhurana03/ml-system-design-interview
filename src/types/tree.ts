@@ -64,6 +64,7 @@ export interface Problem {
   id: string;
   title: string;
   description: string;
+  difficulty?: 'beginner' | 'intermediate' | 'advanced';
   root: string;
   nodes: TreeNode[];
 }

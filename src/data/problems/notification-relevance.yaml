@@ -1,6 +1,7 @@
 id: notification-relevance
 title: "Smart Notification Ranking"
 description: "Design a system to decide which notifications to send, when to send them, and how to rank them."
+difficulty: "intermediate"
 companies: ["Meta", "LinkedIn", "Pinterest"]
 domains: ["Ranking/Search", "Recommendation", "Tabular/Structured"]
 root: pd_start

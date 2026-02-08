@@ -109,16 +109,16 @@ export function SplitPane({
   const rightWidth = viewMode === 'split' ? 100 - splitPercent : 100;
 
   return (
-    <div className="flex flex-col h-screen bg-slate-50">
+    <div className="flex flex-col h-screen bg-slate-50 dark:bg-gray-950">
       {/* Toolbar */}
-      <div className="h-12 bg-white border-b border-gray-200 flex items-center justify-center gap-1 px-4">
-        <div className="inline-flex bg-gray-100 rounded-lg p-1">
+      <div className="h-12 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 flex items-center justify-center gap-1 px-4">
+        <div className="inline-flex bg-gray-100 dark:bg-gray-800 rounded-lg p-1">
           <button
             onClick={() => setViewMode('graph')}
             className={`flex items-center gap-1.5 md:gap-2 px-2 md:px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
               viewMode === 'graph'
-                ? 'bg-white text-gray-900 shadow-sm'
-                : 'text-gray-600 hover:text-gray-900'
+                ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-sm dark:shadow-gray-900/50'
+                : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
             }`}
             title="Graph Only"
           >
@@ -130,8 +130,8 @@ export function SplitPane({
               onClick={() => setViewMode('split')}
               className={`flex items-center gap-1.5 md:gap-2 px-2 md:px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
                 viewMode === 'split'
-                  ? 'bg-white text-gray-900 shadow-sm'
-                  : 'text-gray-600 hover:text-gray-900'
+                  ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-sm dark:shadow-gray-900/50'
+                  : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
               }`}
               title="Split View"
             >
@@ -143,8 +143,8 @@ export function SplitPane({
             onClick={() => setViewMode('wizard')}
             className={`flex items-center gap-1.5 md:gap-2 px-2 md:px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
               viewMode === 'wizard'
-                ? 'bg-white text-gray-900 shadow-sm'
-                : 'text-gray-600 hover:text-gray-900'
+                ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-sm dark:shadow-gray-900/50'
+                : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
             }`}
             title="Wizard Only"
           >
@@ -172,14 +172,14 @@ export function SplitPane({
         {/* Divider */}
         {showDivider && (
           <div
-            className={`relative w-1 bg-gray-300 hover:bg-blue-500 cursor-col-resize transition-colors flex-shrink-0 ${
-              isDragging ? 'bg-blue-500' : ''
+            className={`relative w-1 bg-gray-300 dark:bg-gray-600 hover:bg-blue-500 dark:hover:bg-blue-500 cursor-col-resize transition-colors flex-shrink-0 ${
+              isDragging ? 'bg-blue-500 dark:bg-blue-500' : ''
             }`}
             onMouseDown={handleMouseDown}
           >
             {/* Drag Handle */}
             <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-4 flex items-center justify-center">
-              <div className="w-1 h-12 bg-gray-400 rounded-full opacity-0 hover:opacity-100 transition-opacity" />
+              <div className="w-1 h-12 bg-gray-400 dark:bg-gray-500 rounded-full opacity-0 hover:opacity-100 transition-opacity" />
             </div>
           </div>
         )}

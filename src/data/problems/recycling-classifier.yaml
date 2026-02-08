@@ -1,6 +1,7 @@
 id: recycling-classifier
 title: "Recycling Waste Classifier"
 description: "Create an automatic recycling bin system that classifies waste via a camera."
+difficulty: "beginner"
 companies: ["Google", "AMP Robotics", "ZenRobotics"]
 domains: ["Computer Vision", "Classification"]
 root: pd_start

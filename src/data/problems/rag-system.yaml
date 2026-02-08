@@ -1,6 +1,7 @@
 id: rag-system
 title: "RAG System for Company Documents"
 description: "Design a Retrieval-Augmented Generation (RAG) system for internal company documents."
+difficulty: "advanced"
 companies: ["Google", "Microsoft", "Anthropic"]
 domains: ["NLP", "Ranking/Search", "GenAI"]
 root: pd_start

@@ -1,6 +1,7 @@
 id: flight-delay
 title: "Flight Delay Prediction"
 description: "Design an ML system to predict flight delays for a major airline, covering problem formulation through production monitoring."
+difficulty: "intermediate"
 companies: ["Google", "Amazon", "Uber", "United Airlines", "Delta"]
 domains: ["Time Series", "Tabular/Structured", "Prediction"]
 root: pd_start

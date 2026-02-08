@@ -1,6 +1,7 @@
 id: tiktok-for-you
 title: "TikTok For You Page"
 description: "Design the recommendation system behind TikTok's For You feed for short-form video."
+difficulty: "intermediate"
 companies: ["TikTok", "Meta", "YouTube"]
 domains: ["Recommendation", "Computer Vision", "Ranking/Search"]
 root: pd_start

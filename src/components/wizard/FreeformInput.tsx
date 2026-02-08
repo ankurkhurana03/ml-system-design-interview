@@ -45,7 +45,7 @@ export function FreeformInput({ onSubmit, loading, disabled, placeholder, handsF
   };
 
   return (
-    <div className="flex items-center gap-2 mt-4 p-3 bg-gray-50 border border-gray-200 rounded-xl">
+    <div className="flex items-center gap-2 mt-4 p-3 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl">
       <input
         ref={inputRef}
         type="text"
@@ -54,7 +54,7 @@ export function FreeformInput({ onSubmit, loading, disabled, placeholder, handsF
         onKeyDown={handleKeyDown}
         placeholder={placeholder || 'Type your answer or ask a question...'}
         disabled={loading || disabled}
-        className="flex-1 text-sm border-0 bg-transparent focus:outline-none focus:ring-0 placeholder-gray-400 text-gray-800 disabled:opacity-50"
+        className="flex-1 text-sm border-0 bg-transparent dark:text-white focus:outline-none focus:ring-0 placeholder-gray-400 dark:placeholder-gray-500 text-gray-800 disabled:opacity-50"
       />
 
       {/* Mic button — hidden when hands-free mode owns the mic */}
@@ -65,7 +65,7 @@ export function FreeformInput({ onSubmit, loading, disabled, placeholder, handsF
           className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-all ${
             speechRecognition.isListening
               ? 'bg-red-500 text-white animate-pulse'
-              : 'text-gray-400 hover:text-gray-600 hover:bg-gray-200'
+              : 'text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700'
           } disabled:opacity-50 disabled:cursor-not-allowed`}
           title={speechRecognition.isListening ? 'Stop recording' : 'Voice input'}
         >

@@ -1,6 +1,7 @@
 id: support-chatbot
 title: "Customer Support Chatbot"
 description: "Design a customer support chatbot that uses a large language model (LLM)."
+difficulty: "intermediate"
 companies: ["Intercom", "Zendesk", "Salesforce"]
 domains: ["NLP", "GenAI"]
 root: pd_start

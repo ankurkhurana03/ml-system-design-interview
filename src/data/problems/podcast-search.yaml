@@ -1,6 +1,7 @@
 id: podcast-search
 title: "Podcast Search Engine"
 description: "Design a podcast search engine that indexes audio content."
+difficulty: "intermediate"
 companies: ["Spotify", "Apple", "Google"]
 domains: ["NLP", "Audio/Speech", "Ranking/Search"]
 root: pd_start

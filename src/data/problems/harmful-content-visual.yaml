@@ -1,6 +1,7 @@
 id: harmful-content-visual
 title: "Harmful Image & Video Detection"
 description: "Design a system to detect NSFW, violent, and policy-violating visual content at scale."
+difficulty: "intermediate"
 companies: ["Meta", "Google", "TikTok"]
 domains: ["Computer Vision", "Classification"]
 category: "Security, Safety & Fraud"

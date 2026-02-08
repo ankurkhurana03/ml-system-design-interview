@@ -1,6 +1,7 @@
 id: spotify-discover-weekly
 title: "Spotify Discover Weekly"
 description: "Build a recommendation system for Spotify's 'Discover Weekly' playlist."
+difficulty: "intermediate"
 companies: ["Spotify", "Apple", "YouTube"]
 domains: ["Recommendation", "NLP"]
 root: pd_start

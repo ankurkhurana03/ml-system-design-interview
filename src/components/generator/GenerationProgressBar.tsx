@@ -57,7 +57,7 @@ export function GenerationProgressBar({
   const hasFailures = failedStages.length > 0;
 
   return (
-    <div className="border-t border-gray-200 bg-white px-4 py-3">
+    <div className="border-t border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-4 py-3">
       <div className="flex items-center gap-3">
         {/* Stage pills */}
         <div className="flex items-center gap-1.5 flex-1 min-w-0">
@@ -66,7 +66,7 @@ export function GenerationProgressBar({
             const isPending = pendingSet.has(stage);
             const isFailed = failedSet.has(stage);
 
-            let pillClass = 'bg-gray-100 text-gray-400';
+            let pillClass = 'bg-gray-100 dark:bg-gray-700 text-gray-400 dark:text-gray-500';
             let icon = null;
 
             if (isCompleted) {
@@ -77,12 +77,12 @@ export function GenerationProgressBar({
                 </svg>
               );
             } else if (isPending) {
-              pillClass = 'bg-blue-100 text-blue-700 border border-blue-300';
+              pillClass = 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 border border-blue-300 dark:border-blue-700';
               icon = (
                 <div className="w-3 h-3 mr-0.5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin flex-shrink-0" />
               );
             } else if (isFailed) {
-              pillClass = 'bg-red-100 text-red-700 border border-red-300';
+              pillClass = 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400 border border-red-300 dark:border-red-700';
               icon = (
                 <svg className="w-3 h-3 mr-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12" />
@@ -104,7 +104,7 @@ export function GenerationProgressBar({
         </div>
 
         {/* Status text */}
-        <span className="text-xs text-gray-500 whitespace-nowrap">
+        <span className="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
           {isGenerating
             ? `Generating... (${completedCount}/8)`
             : hasFailures
@@ -117,7 +117,7 @@ export function GenerationProgressBar({
           {hasFailures && !isGenerating && (
             <button
               onClick={onRetryFailed}
-              className="px-2 py-1 text-xs font-medium text-red-700 bg-red-50 hover:bg-red-100 rounded transition-colors"
+              className="px-2 py-1 text-xs font-medium text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-900/30 hover:bg-red-100 dark:hover:bg-red-900/50 rounded transition-colors"
               title="Retry failed stages"
             >
               Retry
@@ -126,7 +126,7 @@ export function GenerationProgressBar({
           {isGenerating && (
             <button
               onClick={onCancel}
-              className="p-1 text-gray-400 hover:text-gray-600 rounded transition-colors"
+              className="p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-400 rounded transition-colors"
               title="Cancel generation"
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">

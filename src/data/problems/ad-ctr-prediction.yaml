@@ -1,6 +1,7 @@
 id: ad-ctr-prediction
 title: "Ad CTR Prediction"
 description: "Design a system to predict Ad Click-Through Rate (CTR)."
+difficulty: "intermediate"
 companies: ["Google", "Meta", "Amazon"]
 domains: ["Ranking/Search", "Tabular/Structured"]
 root: pd_start

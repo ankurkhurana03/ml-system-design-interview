@@ -62,18 +62,18 @@ export function ComparisonMode({ isOpen, onClose, path, nodeMap }: ComparisonMod
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-lg shadow-2xl max-w-4xl w-full max-h-[90vh] flex flex-col">
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-2xl dark:shadow-gray-900/50 max-w-4xl w-full max-h-[90vh] flex flex-col">
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 dark:border-gray-700">
           <div className="flex items-center gap-3">
             <svg className="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
             </svg>
-            <h2 className="text-xl font-bold text-gray-900">Compare Paths</h2>
+            <h2 className="text-xl font-bold text-gray-900 dark:text-white">Compare Paths</h2>
           </div>
           <button
             onClick={onClose}
-            className="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
+            className="p-2 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
             title="Close"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -85,8 +85,8 @@ export function ComparisonMode({ isOpen, onClose, path, nodeMap }: ComparisonMod
         {/* Content */}
         <div className="flex-1 overflow-y-auto px-6 py-4">
           {alternatePaths.length === 0 ? (
-            <div className="text-center py-12 text-gray-500">
-              <svg className="w-16 h-16 mx-auto mb-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div className="text-center py-12 text-gray-500 dark:text-gray-400">
+              <svg className="w-16 h-16 mx-auto mb-4 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
               </svg>
               <p>No decision points found in this path.</p>
@@ -94,13 +94,13 @@ export function ComparisonMode({ isOpen, onClose, path, nodeMap }: ComparisonMod
           ) : (
             <div className="space-y-6">
               {alternatePaths.map((altPath, idx) => (
-                <div key={idx} className="border border-gray-200 rounded-lg overflow-hidden">
+                <div key={idx} className="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
                   {/* Decision Node */}
-                  <div className="bg-blue-50 px-4 py-3 border-b border-blue-100">
-                    <h3 className="font-semibold text-blue-900 mb-1">
+                  <div className="bg-blue-50 dark:bg-blue-900/30 px-4 py-3 border-b border-blue-100 dark:border-blue-800">
+                    <h3 className="font-semibold text-blue-900 dark:text-blue-300 mb-1">
                       Decision Point {idx + 1}
                     </h3>
-                    <div className="text-sm text-blue-700">
+                    <div className="text-sm text-blue-700 dark:text-blue-300">
                       <ReactMarkdown remarkPlugins={[remarkGfm]}>
                         {altPath.decisionNode.content}
                       </ReactMarkdown>
@@ -108,18 +108,18 @@ export function ComparisonMode({ isOpen, onClose, path, nodeMap }: ComparisonMod
                   </div>
 
                   {/* Chosen Path */}
-                  <div className="bg-green-50 px-4 py-3 border-b border-green-100">
+                  <div className="bg-green-50 dark:bg-green-900/30 px-4 py-3 border-b border-green-100 dark:border-green-800">
                     <div className="flex items-center gap-2 mb-2">
                       <svg className="w-4 h-4 text-green-600" fill="currentColor" viewBox="0 0 20 20">
                         <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
                       </svg>
-                      <h4 className="text-sm font-semibold text-green-900">Your Choice</h4>
+                      <h4 className="text-sm font-semibold text-green-900 dark:text-green-300">Your Choice</h4>
                     </div>
-                    <p className="text-sm text-green-800 font-medium mb-1">
+                    <p className="text-sm text-green-800 dark:text-green-300 font-medium mb-1">
                       {altPath.decisionNode.choices![altPath.chosenIndex].label}
                     </p>
                     {altPath.decisionNode.choices![altPath.chosenIndex].answer && (
-                      <div className="text-sm text-green-700 mt-2">
+                      <div className="text-sm text-green-700 dark:text-green-300 mt-2">
                         <ReactMarkdown remarkPlugins={[remarkGfm]}>
                           {altPath.decisionNode.choices![altPath.chosenIndex].answer}
                         </ReactMarkdown>
@@ -128,30 +128,30 @@ export function ComparisonMode({ isOpen, onClose, path, nodeMap }: ComparisonMod
                   </div>
 
                   {/* Alternate Paths */}
-                  <div className="bg-gray-50 px-4 py-3">
-                    <h4 className="text-sm font-semibold text-gray-700 mb-3">
+                  <div className="bg-gray-50 dark:bg-gray-900 px-4 py-3">
+                    <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">
                       Alternate Paths Not Taken
                     </h4>
                     <div className="space-y-3">
                       {altPath.alternateChoices.map((alt) => (
                         <div
                           key={alt.index}
-                          className="bg-white border border-gray-200 rounded-lg p-3"
+                          className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-3"
                         >
-                          <p className="text-sm font-medium text-gray-900 mb-1">
+                          <p className="text-sm font-medium text-gray-900 dark:text-white mb-1">
                             {alt.label}
                           </p>
                           {alt.answer && (
-                            <div className="text-sm text-gray-700 mb-2">
+                            <div className="text-sm text-gray-700 dark:text-gray-300 mb-2">
                               <ReactMarkdown remarkPlugins={[remarkGfm]}>
                                 {alt.answer}
                               </ReactMarkdown>
                             </div>
                           )}
                           {alt.previewNode && (
-                            <div className="mt-2 pt-2 border-t border-gray-200">
-                              <p className="text-xs text-gray-500 mb-1">Next step:</p>
-                              <div className="text-xs text-gray-600 bg-gray-50 rounded p-2">
+                            <div className="mt-2 pt-2 border-t border-gray-200 dark:border-gray-700">
+                              <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">Next step:</p>
+                              <div className="text-xs text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-900 rounded p-2">
                                 <ReactMarkdown remarkPlugins={[remarkGfm]}>
                                   {alt.previewNode.content.substring(0, 150) +
                                     (alt.previewNode.content.length > 150 ? '...' : '')}
@@ -170,7 +170,7 @@ export function ComparisonMode({ isOpen, onClose, path, nodeMap }: ComparisonMod
         </div>
 
         {/* Footer */}
-        <div className="px-6 py-4 border-t border-gray-200 bg-gray-50">
+        <div className="px-6 py-4 border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900">
           <button
             onClick={onClose}
             className="w-full px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg transition-colors"

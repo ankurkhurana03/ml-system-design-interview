@@ -109,7 +109,7 @@ export function ModerationAnalytics() {
       <div className="flex items-center justify-center h-full">
         <div className="text-center">
           <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-gray-600">Loading analytics...</p>
+          <p className="text-gray-600 dark:text-gray-400">Loading analytics...</p>
         </div>
       </div>
     );
@@ -118,7 +118,7 @@ export function ModerationAnalytics() {
   if (!data) {
     return (
       <div className="flex items-center justify-center h-full">
-        <p className="text-gray-500">No analytics data available</p>
+        <p className="text-gray-500 dark:text-gray-400">No analytics data available</p>
       </div>
     );
   }
@@ -129,40 +129,40 @@ export function ModerationAnalytics() {
     <div className="h-full overflow-y-auto p-6 space-y-6">
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
-        <div className="bg-white border border-gray-200 rounded-lg p-4">
-          <div className="text-sm text-gray-500 mb-1">Total Moderated</div>
-          <div className="text-3xl font-bold text-gray-900">{data.totalComments}</div>
+        <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+          <div className="text-sm text-gray-500 dark:text-gray-400 mb-1">Total Moderated</div>
+          <div className="text-3xl font-bold text-gray-900 dark:text-white">{data.totalComments}</div>
         </div>
-        <div className="bg-white border border-gray-200 rounded-lg p-4">
-          <div className="text-sm text-gray-500 mb-1">Today</div>
-          <div className="text-3xl font-bold text-blue-600">{data.commentsToday}</div>
+        <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+          <div className="text-sm text-gray-500 dark:text-gray-400 mb-1">Today</div>
+          <div className="text-3xl font-bold text-blue-600 dark:text-blue-400">{data.commentsToday}</div>
         </div>
-        <div className="bg-white border border-gray-200 rounded-lg p-4">
-          <div className="text-sm text-gray-500 mb-1">AI vs Human</div>
-          <div className="text-xl font-bold text-gray-900">
+        <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+          <div className="text-sm text-gray-500 dark:text-gray-400 mb-1">AI vs Human</div>
+          <div className="text-xl font-bold text-gray-900 dark:text-white">
             {data.aiCount} / {data.humanCount}
           </div>
-          <div className="text-xs text-gray-500 mt-1">
+          <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">
             {data.totalComments > 0 ? ((data.aiCount / data.totalComments) * 100).toFixed(0) : 0}% AI
           </div>
         </div>
-        <div className="bg-white border border-gray-200 rounded-lg p-4">
-          <div className="text-sm text-gray-500 mb-1">Avg AI Confidence</div>
-          <div className="text-3xl font-bold text-purple-600">
+        <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+          <div className="text-sm text-gray-500 dark:text-gray-400 mb-1">Avg AI Confidence</div>
+          <div className="text-3xl font-bold text-purple-600 dark:text-purple-400">
             {(data.avgConfidence * 100).toFixed(0)}%
           </div>
         </div>
-        <div className="bg-white border border-gray-200 rounded-lg p-4">
-          <div className="text-sm text-gray-500 mb-1">Approval Rate</div>
-          <div className="text-3xl font-bold text-green-600">{data.approvalRate.toFixed(0)}%</div>
+        <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+          <div className="text-sm text-gray-500 dark:text-gray-400 mb-1">Approval Rate</div>
+          <div className="text-3xl font-bold text-green-600 dark:text-green-400">{data.approvalRate.toFixed(0)}%</div>
         </div>
       </div>
 
       {/* Charts Row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Actions by Type */}
-        <div className="bg-white border border-gray-200 rounded-lg p-6">
-          <h3 className="text-lg font-semibold text-gray-900 mb-4">Actions by Type</h3>
+        <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-6">
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Actions by Type</h3>
           <div className="space-y-3">
             {Object.entries(data.actionCounts).map(([action, count]) => {
               const percentage = (count / data.totalComments) * 100;
@@ -176,10 +176,10 @@ export function ModerationAnalytics() {
               return (
                 <div key={action}>
                   <div className="flex items-center justify-between mb-1">
-                    <span className="text-sm font-medium text-gray-700 capitalize">{action}</span>
-                    <span className="text-sm text-gray-600">{count} ({percentage.toFixed(0)}%)</span>
+                    <span className="text-sm font-medium text-gray-700 dark:text-gray-300 capitalize">{action}</span>
+                    <span className="text-sm text-gray-600 dark:text-gray-400">{count} ({percentage.toFixed(0)}%)</span>
                   </div>
-                  <div className="w-full bg-gray-200 rounded-full h-2">
+                  <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
                     <div
                       className={`h-2 rounded-full ${bgColor}`}
                       style={{ width: `${percentage}%` }}
@@ -192,15 +192,15 @@ export function ModerationAnalytics() {
         </div>
 
         {/* AI vs Human */}
-        <div className="bg-white border border-gray-200 rounded-lg p-6">
-          <h3 className="text-lg font-semibold text-gray-900 mb-4">AI vs Human Decisions</h3>
+        <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-6">
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">AI vs Human Decisions</h3>
           <div className="space-y-3">
             <div>
               <div className="flex items-center justify-between mb-1">
-                <span className="text-sm font-medium text-gray-700">AI Moderation</span>
-                <span className="text-sm text-gray-600">{data.aiCount} ({data.totalComments > 0 ? ((data.aiCount / data.totalComments) * 100).toFixed(0) : 0}%)</span>
+                <span className="text-sm font-medium text-gray-700 dark:text-gray-300">AI Moderation</span>
+                <span className="text-sm text-gray-600 dark:text-gray-400">{data.aiCount} ({data.totalComments > 0 ? ((data.aiCount / data.totalComments) * 100).toFixed(0) : 0}%)</span>
               </div>
-              <div className="w-full bg-gray-200 rounded-full h-3">
+              <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-3">
                 <div
                   className="h-3 rounded-full bg-purple-500"
                   style={{ width: `${data.totalComments > 0 ? (data.aiCount / data.totalComments) * 100 : 0}%` }}
@@ -209,10 +209,10 @@ export function ModerationAnalytics() {
             </div>
             <div>
               <div className="flex items-center justify-between mb-1">
-                <span className="text-sm font-medium text-gray-700">Human Moderation</span>
-                <span className="text-sm text-gray-600">{data.humanCount} ({data.totalComments > 0 ? ((data.humanCount / data.totalComments) * 100).toFixed(0) : 0}%)</span>
+                <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Human Moderation</span>
+                <span className="text-sm text-gray-600 dark:text-gray-400">{data.humanCount} ({data.totalComments > 0 ? ((data.humanCount / data.totalComments) * 100).toFixed(0) : 0}%)</span>
               </div>
-              <div className="w-full bg-gray-200 rounded-full h-3">
+              <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-3">
                 <div
                   className="h-3 rounded-full bg-indigo-500"
                   style={{ width: `${data.totalComments > 0 ? (data.humanCount / data.totalComments) * 100 : 0}%` }}
@@ -224,8 +224,8 @@ export function ModerationAnalytics() {
       </div>
 
       {/* Activity Timeline */}
-      <div className="bg-white border border-gray-200 rounded-lg p-6">
-        <h3 className="text-lg font-semibold text-gray-900 mb-4">Activity Timeline (Last 7 Days)</h3>
+      <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-6">
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Activity Timeline (Last 7 Days)</h3>
         <div className="flex items-end justify-between gap-2 h-48">
           {data.last7Days.map((day) => {
             const height = (day.count / maxDayCount) * 100;
@@ -238,8 +238,8 @@ export function ModerationAnalytics() {
                     title={`${day.count} actions`}
                   />
                 </div>
-                <div className="text-xs text-gray-600 text-center">{day.date}</div>
-                <div className="text-xs font-medium text-gray-900">{day.count}</div>
+                <div className="text-xs text-gray-600 dark:text-gray-400 text-center">{day.date}</div>
+                <div className="text-xs font-medium text-gray-900 dark:text-white">{day.count}</div>
               </div>
             );
           })}
@@ -247,20 +247,20 @@ export function ModerationAnalytics() {
       </div>
 
       {/* Recent Activity */}
-      <div className="bg-white border border-gray-200 rounded-lg p-6">
-        <h3 className="text-lg font-semibold text-gray-900 mb-4">Recent Activity</h3>
+      <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-6">
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Recent Activity</h3>
         <div className="space-y-2">
           {data.recentActivity.map((entry) => {
             const actionColor =
-              entry.action === 'approved' ? 'text-green-600' :
-              entry.action === 'rejected' ? 'text-red-600' :
-              entry.action === 'flagged' ? 'text-yellow-600' :
-              entry.action === 'answered' ? 'text-blue-600' :
-              'text-gray-600';
+              entry.action === 'approved' ? 'text-green-600 dark:text-green-400' :
+              entry.action === 'rejected' ? 'text-red-600 dark:text-red-400' :
+              entry.action === 'flagged' ? 'text-yellow-600 dark:text-yellow-400' :
+              entry.action === 'answered' ? 'text-blue-600 dark:text-blue-400' :
+              'text-gray-600 dark:text-gray-400';
 
             return (
-              <div key={entry.id} className="flex items-center gap-3 py-2 border-b border-gray-100 last:border-0">
-                <span className="text-xs text-gray-500 w-32">
+              <div key={entry.id} className="flex items-center gap-3 py-2 border-b border-gray-100 dark:border-gray-700 last:border-0">
+                <span className="text-xs text-gray-500 dark:text-gray-400 w-32">
                   {new Date(entry.created_at).toLocaleString('en-US', {
                     month: 'short',
                     day: 'numeric',
@@ -271,14 +271,14 @@ export function ModerationAnalytics() {
                 <span className={`text-sm font-medium ${actionColor} w-20 capitalize`}>
                   {entry.action}
                 </span>
-                <span className="text-sm text-gray-600">
+                <span className="text-sm text-gray-600 dark:text-gray-400">
                   by <span className="font-medium">{entry.actor_name}</span>
                 </span>
-                <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">
+                <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400">
                   {entry.actor_type === 'ai' ? 'AI' : 'Human'}
                 </span>
                 {entry.reason && (
-                  <span className="text-xs text-gray-500 flex-1 truncate">
+                  <span className="text-xs text-gray-500 dark:text-gray-400 flex-1 truncate">
                     {entry.reason}
                   </span>
                 )}

@@ -75,7 +75,7 @@ export function StageIndicator({ currentStage, visitedStages }: StageIndicatorPr
                 <span
                   className={`
                     mt-2 text-xs font-medium whitespace-nowrap
-                    ${isActive ? 'text-gray-900 font-semibold' : 'text-gray-600'}
+                    ${isActive ? 'text-gray-900 dark:text-white font-semibold' : 'text-gray-600 dark:text-gray-400'}
                   `}
                 >
                   {stage.label}

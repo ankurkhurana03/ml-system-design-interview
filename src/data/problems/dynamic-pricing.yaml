@@ -1,6 +1,7 @@
 id: dynamic-pricing
 title: "Dynamic Pricing Engine for Uber (RL-Based)"
 description: "Design an RL-based dynamic pricing engine (surge pricing) that optimizes ride prices to balance supply and demand across geographic regions."
+difficulty: "intermediate"
 companies: ["Uber", "Airbnb", "Lyft"]
 domains: ["RL", "Recommendation"]
 root: start

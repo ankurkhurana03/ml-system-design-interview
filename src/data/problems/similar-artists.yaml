@@ -1,6 +1,7 @@
 id: similar-artists
 title: "Similar Artists Recommendation"
 description: "Create a system to recommend 'Similar Artists' on a music platform."
+difficulty: "beginner"
 companies: ["Spotify", "Apple", "SoundCloud"]
 domains: ["Recommendation", "NLP"]
 root: pd_start

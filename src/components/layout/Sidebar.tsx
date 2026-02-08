@@ -159,16 +159,16 @@ export function Sidebar({
     // On mobile, render nothing when collapsed — hamburger in top bar opens it
     if (isMobile) return null;
     return (
-      <div className="w-12 h-screen bg-slate-900 border-r border-slate-700 flex flex-col items-center py-4 transition-all duration-300">
+      <div className="w-12 h-screen bg-slate-900 dark:bg-gray-900 border-r border-slate-700 dark:border-gray-700 flex flex-col items-center py-4 transition-all duration-300">
         <button
           onClick={onToggleCollapse}
-          className="p-2 hover:bg-slate-800 rounded-lg text-slate-300 hover:text-white transition-colors"
+          className="p-2 hover:bg-slate-800 dark:hover:bg-gray-700 rounded-lg text-slate-300 dark:text-gray-400 hover:text-white dark:hover:text-white transition-colors"
           title="Expand sidebar"
         >
           <ChevronRightIcon />
         </button>
 
-        <div className="mt-6 text-slate-300">
+        <div className="mt-6 text-slate-300 dark:text-gray-400">
           <BrainIcon />
         </div>
 
@@ -176,7 +176,7 @@ export function Sidebar({
 
         <button
           onClick={onGenerateNew}
-          className="p-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-white transition-colors"
+          className="p-2 bg-blue-600 dark:bg-blue-600 hover:bg-blue-700 dark:hover:bg-blue-700 rounded-lg text-white dark:text-white transition-colors"
           title="Generate New Problem"
         >
           <PlusIcon />
@@ -186,16 +186,16 @@ export function Sidebar({
   }
 
   const sidebarContent = (
-    <div className={`${isMobile ? 'w-72' : 'w-70'} h-screen bg-slate-900 border-r border-slate-700 flex flex-col transition-all duration-300`}>
+    <div className={`${isMobile ? 'w-72' : 'w-70'} h-screen bg-slate-900 dark:bg-gray-900 border-r border-slate-700 dark:border-gray-700 flex flex-col transition-all duration-300`}>
       {/* Header */}
-      <div className="p-4 border-b border-slate-700 flex items-center justify-between">
+      <div className="p-4 border-b border-slate-700 dark:border-gray-700 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <BrainIcon />
-          <h1 className="text-lg font-bold text-white">ML System Design</h1>
+          <h1 className="text-lg font-bold text-white dark:text-white">ML System Design</h1>
         </div>
         <button
           onClick={isMobile ? onOverlayClose : onToggleCollapse}
-          className="p-1.5 hover:bg-slate-800 rounded-lg text-slate-300 hover:text-white transition-colors"
+          className="p-1.5 hover:bg-slate-800 dark:hover:bg-gray-700 rounded-lg text-slate-300 dark:text-gray-400 hover:text-white dark:hover:text-white transition-colors"
           title={isMobile ? 'Close sidebar' : 'Collapse sidebar'}
         >
           <ChevronLeftIcon />
@@ -203,9 +203,9 @@ export function Sidebar({
       </div>
 
       {/* Search */}
-      <div className="p-3 border-b border-slate-700">
+      <div className="p-3 border-b border-slate-700 dark:border-gray-700">
         <div className="relative">
-          <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none text-slate-400">
+          <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none text-slate-400 dark:text-gray-400">
             <SearchIcon />
           </div>
           <input
@@ -213,17 +213,17 @@ export function Sidebar({
             placeholder="Search problems..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full pl-9 pr-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            className="w-full pl-9 pr-3 py-2 bg-slate-800 dark:bg-gray-800 border border-slate-700 dark:border-gray-600 rounded-lg text-sm text-white dark:text-white placeholder-slate-400 dark:placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent dark:focus:ring-blue-500"
           />
         </div>
       </div>
 
       {/* Filters */}
       {(availableOptions.companies.length > 0 || availableOptions.domains.length > 0) && (
-        <div className="border-b border-slate-700">
+        <div className="border-b border-slate-700 dark:border-gray-700">
           <button
             onClick={() => setFiltersExpanded(!filtersExpanded)}
-            className="w-full flex items-center justify-between px-3 py-2 text-sm text-slate-300 hover:text-white hover:bg-slate-800 transition-colors"
+            className="w-full flex items-center justify-between px-3 py-2 text-sm text-slate-300 dark:text-gray-400 hover:text-white dark:hover:text-white hover:bg-slate-800 dark:hover:bg-gray-700 transition-colors"
           >
             <span className="font-medium">
               Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}
@@ -235,7 +235,7 @@ export function Sidebar({
                     e.stopPropagation();
                     clearFilters();
                   }}
-                  className="text-xs text-blue-400 hover:text-blue-300"
+                  className="text-xs text-blue-400 dark:text-blue-400 hover:text-blue-300 dark:hover:text-blue-300"
                 >
                   Clear all
                 </span>
@@ -251,7 +251,7 @@ export function Sidebar({
               {/* Company filters */}
               {availableOptions.companies.length > 0 && (
                 <div>
-                  <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
+                  <div className="text-xs font-semibold text-slate-500 dark:text-gray-400 uppercase tracking-wider mb-1.5">
                     Company
                   </div>
                   <div className="flex flex-wrap gap-1">
@@ -261,8 +261,8 @@ export function Sidebar({
                         onClick={() => toggleCompany(company)}
                         className={`text-xs px-2 py-1 rounded-full transition-colors ${
                           selectedCompanies.has(company)
-                            ? 'bg-teal-600 text-white'
-                            : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                            ? 'bg-teal-600 dark:bg-teal-600 text-white dark:text-white'
+                            : 'bg-slate-700 dark:bg-gray-600 text-slate-300 dark:text-gray-300 hover:bg-slate-600 dark:hover:bg-gray-500'
                         }`}
                       >
                         {company}
@@ -275,7 +275,7 @@ export function Sidebar({
               {/* Domain filters */}
               {availableOptions.domains.length > 0 && (
                 <div>
-                  <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
+                  <div className="text-xs font-semibold text-slate-500 dark:text-gray-400 uppercase tracking-wider mb-1.5">
                     Domain
                   </div>
                   <div className="flex flex-wrap gap-1">
@@ -285,8 +285,8 @@ export function Sidebar({
                         onClick={() => toggleDomain(domain)}
                         className={`text-xs px-2 py-1 rounded-full transition-colors ${
                           selectedDomains.has(domain)
-                            ? 'bg-purple-600 text-white'
-                            : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                            ? 'bg-purple-600 dark:bg-purple-600 text-white dark:text-white'
+                            : 'bg-slate-700 dark:bg-gray-600 text-slate-300 dark:text-gray-300 hover:bg-slate-600 dark:hover:bg-gray-500'
                         }`}
                       >
                         {domain}
@@ -305,7 +305,7 @@ export function Sidebar({
         {/* Built-in Problems */}
         {groupedProblems.builtin.length > 0 && (
           <div className="p-3">
-            <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
+            <h2 className="text-xs font-semibold text-slate-400 dark:text-gray-400 uppercase tracking-wider mb-2">
               Built-in
             </h2>
             <div className="space-y-1">
@@ -324,7 +324,7 @@ export function Sidebar({
         {/* Gallery Problems */}
         {groupedProblems.gallery.length > 0 && (
           <div className="p-3">
-            <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
+            <h2 className="text-xs font-semibold text-slate-400 dark:text-gray-400 uppercase tracking-wider mb-2">
               Gallery
             </h2>
             <div className="space-y-1">
@@ -343,7 +343,7 @@ export function Sidebar({
         {/* Draft Problems */}
         {groupedProblems.draft.length > 0 && (
           <div className="p-3">
-            <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
+            <h2 className="text-xs font-semibold text-slate-400 dark:text-gray-400 uppercase tracking-wider mb-2">
               My Drafts ({groupedProblems.draft.length})
             </h2>
             <div className="space-y-1">
@@ -366,29 +366,29 @@ export function Sidebar({
         {groupedProblems.builtin.length === 0 &&
          groupedProblems.gallery.length === 0 &&
          groupedProblems.draft.length === 0 && (
-          <div className="p-8 text-center text-slate-400 text-sm">
+          <div className="p-8 text-center text-slate-400 dark:text-gray-400 text-sm">
             No problems found
           </div>
         )}
       </div>
 
       {/* Action Buttons */}
-      <div className="p-3 border-t border-slate-700 space-y-2">
+      <div className="p-3 border-t border-slate-700 dark:border-gray-700 space-y-2">
         <button
           onClick={onBrowseGallery}
-          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-white font-medium rounded-lg transition-colors"
+          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-800 dark:bg-gray-700 hover:bg-slate-700 dark:hover:bg-gray-600 text-white dark:text-white font-medium rounded-lg transition-colors"
         >
           <GalleryIcon />
           <span>Browse Gallery</span>
           {groupedProblems.gallery.length > 0 && (
-            <span className="ml-auto bg-blue-600 text-white text-xs px-2 py-0.5 rounded-full">
+            <span className="ml-auto bg-blue-600 dark:bg-blue-600 text-white dark:text-white text-xs px-2 py-0.5 rounded-full">
               {groupedProblems.gallery.length}
             </span>
           )}
         </button>
         <button
           onClick={onGenerateNew}
-          className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg transition-colors"
+          className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-blue-600 dark:bg-blue-600 hover:bg-blue-700 dark:hover:bg-blue-700 text-white dark:text-white font-medium rounded-lg transition-colors"
         >
           <PlusIcon />
           <span>Generate New Problem</span>
@@ -448,8 +448,8 @@ function ProblemItem({ problem, isActive, onClick, isDraft, onEdit, onDelete }: 
         onClick={onClick}
         className={`w-full text-left p-3 rounded-lg transition-colors ${
           isActive
-            ? 'bg-blue-600 text-white'
-            : 'bg-slate-800 hover:bg-slate-700 text-slate-200'
+            ? 'bg-blue-600 dark:bg-blue-600 text-white dark:text-white'
+            : 'bg-slate-800 dark:bg-gray-700 hover:bg-slate-700 dark:hover:bg-gray-600 text-slate-200 dark:text-gray-200'
         }`}
       >
         <div className="flex items-start justify-between gap-2 mb-1">
@@ -461,14 +461,14 @@ function ProblemItem({ problem, isActive, onClick, isDraft, onEdit, onDelete }: 
               <span
                 className={`text-xs px-2 py-0.5 rounded font-medium ${
                   difficultyColors[problem.difficulty]
-                } text-white`}
+                } text-white dark:text-white`}
               >
                 {problem.difficulty[0].toUpperCase()}
               </span>
             )}
           </div>
         </div>
-        <p className={`text-xs leading-relaxed ${isActive ? 'text-blue-100' : 'text-slate-400'}`}>
+        <p className={`text-xs leading-relaxed ${isActive ? 'text-blue-100 dark:text-blue-100' : 'text-slate-400 dark:text-gray-400'}`}>
           {truncateText(problem.description, 80)}
         </p>
         {/* General tags */}
@@ -479,8 +479,8 @@ function ProblemItem({ problem, isActive, onClick, isDraft, onEdit, onDelete }: 
                 key={idx}
                 className={`text-xs px-1.5 py-0.5 rounded ${
                   isActive
-                    ? 'bg-blue-700 text-blue-100'
-                    : 'bg-slate-700 text-slate-300'
+                    ? 'bg-blue-700 dark:bg-blue-700 text-blue-100 dark:text-blue-100'
+                    : 'bg-slate-700 dark:bg-gray-600 text-slate-300 dark:text-gray-300'
                 }`}
               >
                 {tag}
@@ -497,8 +497,8 @@ function ProblemItem({ problem, isActive, onClick, isDraft, onEdit, onDelete }: 
                 key={company}
                 className={`text-xs px-1.5 py-0.5 rounded ${
                   isActive
-                    ? 'bg-teal-700 text-teal-100'
-                    : 'bg-teal-900/50 text-teal-300'
+                    ? 'bg-teal-700 dark:bg-teal-700 text-teal-100 dark:text-teal-100'
+                    : 'bg-teal-900/50 dark:bg-teal-900/50 text-teal-300 dark:text-teal-300'
                 }`}
               >
                 {company}
@@ -509,8 +509,8 @@ function ProblemItem({ problem, isActive, onClick, isDraft, onEdit, onDelete }: 
                 key={domain}
                 className={`text-xs px-1.5 py-0.5 rounded ${
                   isActive
-                    ? 'bg-purple-700 text-purple-100'
-                    : 'bg-purple-900/50 text-purple-300'
+                    ? 'bg-purple-700 dark:bg-purple-700 text-purple-100 dark:text-purple-100'
+                    : 'bg-purple-900/50 dark:bg-purple-900/50 text-purple-300 dark:text-purple-300'
                 }`}
               >
                 {domain}
@@ -531,8 +531,8 @@ function ProblemItem({ problem, isActive, onClick, isDraft, onEdit, onDelete }: 
             }}
             className={`absolute top-2 right-2 p-1 rounded transition-colors ${
               menuOpen
-                ? 'bg-slate-600 text-white'
-                : 'opacity-0 group-hover:opacity-100 hover:bg-slate-600 text-slate-400 hover:text-white'
+                ? 'bg-slate-600 dark:bg-gray-500 text-white dark:text-white'
+                : 'opacity-0 group-hover:opacity-100 hover:bg-slate-600 dark:hover:bg-gray-500 text-slate-400 dark:text-gray-400 hover:text-white dark:hover:text-white'
             }`}
             title="Draft actions"
           >
@@ -543,10 +543,10 @@ function ProblemItem({ problem, isActive, onClick, isDraft, onEdit, onDelete }: 
 
           {/* Dropdown menu */}
           {menuOpen && (
-            <div className="absolute top-8 right-2 z-20 w-32 bg-slate-700 border border-slate-600 rounded-lg shadow-xl overflow-hidden">
+            <div className="absolute top-8 right-2 z-20 w-32 bg-slate-700 dark:bg-gray-600 border border-slate-600 dark:border-gray-500 rounded-lg shadow-xl overflow-hidden dark:shadow-gray-900/50">
               {confirmDelete ? (
                 <div className="p-2">
-                  <p className="text-xs text-slate-300 mb-2">Delete this draft?</p>
+                  <p className="text-xs text-slate-300 dark:text-gray-300 mb-2">Delete this draft?</p>
                   <div className="flex gap-1">
                     <button
                       onClick={(e) => {
@@ -555,7 +555,7 @@ function ProblemItem({ problem, isActive, onClick, isDraft, onEdit, onDelete }: 
                         setConfirmDelete(false);
                         onDelete?.();
                       }}
-                      className="flex-1 px-2 py-1 text-xs font-medium text-white bg-red-600 hover:bg-red-700 rounded transition-colors"
+                      className="flex-1 px-2 py-1 text-xs font-medium text-white dark:text-white bg-red-600 dark:bg-red-600 hover:bg-red-700 dark:hover:bg-red-700 rounded transition-colors"
                     >
                       Delete
                     </button>
@@ -564,7 +564,7 @@ function ProblemItem({ problem, isActive, onClick, isDraft, onEdit, onDelete }: 
                         e.stopPropagation();
                         setConfirmDelete(false);
                       }}
-                      className="flex-1 px-2 py-1 text-xs font-medium text-slate-300 hover:bg-slate-600 rounded transition-colors"
+                      className="flex-1 px-2 py-1 text-xs font-medium text-slate-300 dark:text-gray-300 hover:bg-slate-600 dark:hover:bg-gray-500 rounded transition-colors"
                     >
                       Cancel
                     </button>
@@ -578,7 +578,7 @@ function ProblemItem({ problem, isActive, onClick, isDraft, onEdit, onDelete }: 
                       setMenuOpen(false);
                       onEdit?.();
                     }}
-                    className="w-full px-3 py-2 text-left text-sm text-slate-200 hover:bg-slate-600 flex items-center gap-2 transition-colors"
+                    className="w-full px-3 py-2 text-left text-sm text-slate-200 dark:text-gray-200 hover:bg-slate-600 dark:hover:bg-gray-500 flex items-center gap-2 transition-colors"
                   >
                     <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
@@ -590,7 +590,7 @@ function ProblemItem({ problem, isActive, onClick, isDraft, onEdit, onDelete }: 
                       e.stopPropagation();
                       setConfirmDelete(true);
                     }}
-                    className="w-full px-3 py-2 text-left text-sm text-red-400 hover:bg-slate-600 flex items-center gap-2 transition-colors"
+                    className="w-full px-3 py-2 text-left text-sm text-red-400 dark:text-red-400 hover:bg-slate-600 dark:hover:bg-gray-500 flex items-center gap-2 transition-colors"
                   >
                     <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />

@@ -1,5 +1,34 @@
-import React, { createContext, useReducer, useMemo, type ReactNode } from 'react';
+import React, { createContext, useReducer, useMemo, useEffect, type ReactNode } from 'react';
 import type { Problem, TreeNode, PathEntry, DialogueLine } from '@/types/tree';
+
+const SESSION_KEY_PREFIX = 'wizard_session.';
+
+interface PersistedSession {
+  currentNodeId: string;
+  path: PathEntry[];
+  visitedNodeIds: string[];
+}
+
+function saveSession(problemId: string, state: { currentNodeId: string; path: PathEntry[]; visitedNodeIds: Set<string> }) {
+  try {
+    const data: PersistedSession = {
+      currentNodeId: state.currentNodeId,
+      path: state.path,
+      visitedNodeIds: Array.from(state.visitedNodeIds),
+    };
+    localStorage.setItem(`${SESSION_KEY_PREFIX}${problemId}`, JSON.stringify(data));
+  } catch { /* quota exceeded or private browsing */ }
+}
+
+function loadSession(problemId: string): PersistedSession | null {
+  try {
+    const raw = localStorage.getItem(`${SESSION_KEY_PREFIX}${problemId}`);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
 
 interface WizardContextState {
   problem: Problem | null;
@@ -44,6 +73,19 @@ function wizardReducer(state: WizardContextState, action: WizardAction): WizardC
   switch (action.type) {
     case 'SET_PROBLEM': {
       const problem = action.payload;
+      const saved = loadSession(problem.id);
+      if (saved) {
+        // Validate that saved currentNodeId still exists in the problem
+        const nodeIds = new Set(problem.nodes.map(n => n.id));
+        if (nodeIds.has(saved.currentNodeId) && saved.visitedNodeIds.every(id => nodeIds.has(id))) {
+          return {
+            problem,
+            currentNodeId: saved.currentNodeId,
+            path: saved.path,
+            visitedNodeIds: new Set(saved.visitedNodeIds),
+          };
+        }
+      }
       return {
         problem,
         currentNodeId: problem.root,
@@ -251,6 +293,13 @@ const WizardContext = createContext<WizardContextValue | null>(null);
 
 export function WizardProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(wizardReducer, initialState);
+
+  // Persist session to localStorage on state changes
+  useEffect(() => {
+    if (state.problem && state.currentNodeId) {
+      saveSession(state.problem.id, state);
+    }
+  }, [state.problem, state.currentNodeId, state.path, state.visitedNodeIds]);
 
   const nodeMap = useMemo(() => {
     if (!state.problem) return new Map<string, TreeNode>();

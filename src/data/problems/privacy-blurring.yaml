@@ -1,6 +1,7 @@
 id: privacy-blurring
 title: "Privacy Blurring"
 description: "Design an automated blurring system for privacy in street-level imagery."
+difficulty: "beginner"
 companies: ["Google", "Apple", "Mapbox"]
 domains: ["Computer Vision", "Real-time"]
 root: pd_start

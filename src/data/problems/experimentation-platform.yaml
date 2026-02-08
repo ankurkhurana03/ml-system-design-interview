@@ -1,6 +1,7 @@
 id: experimentation-platform
 title: "A/B Testing & Experimentation Platform"
 description: "Design an ML-powered experimentation platform for running and analyzing A/B tests at scale."
+difficulty: "advanced"
 companies: ["Netflix", "Meta", "Uber"]
 domains: ["Tabular/Structured", "Time Series"]
 root: pd_start

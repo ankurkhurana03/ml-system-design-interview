@@ -169,14 +169,14 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
       ></div>
 
       {/* Panel */}
-      <div className="absolute inset-0 md:inset-y-0 md:left-auto md:right-0 md:max-w-lg w-full bg-white shadow-2xl flex flex-col">
+      <div className="absolute inset-0 md:inset-y-0 md:left-auto md:right-0 md:max-w-lg w-full bg-white dark:bg-gray-800 shadow-2xl dark:shadow-gray-900/50 flex flex-col">
         {/* Header */}
-        <div className="px-6 py-4 border-b border-gray-200">
+        <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
           <div className="flex items-center justify-between">
-            <h2 className="text-xl font-semibold text-gray-900">LLM Settings</h2>
+            <h2 className="text-xl font-semibold text-gray-900 dark:text-white">LLM Settings</h2>
             <button
               onClick={onClose}
-              className="text-gray-400 hover:text-gray-600 transition-colors"
+              className="text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-400 transition-colors"
             >
               <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -188,14 +188,14 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
         {/* Content */}
         <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6">
           {/* Security info */}
-          <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+          <div className="bg-green-50 dark:bg-green-900/30 border border-green-200 dark:border-green-800 rounded-lg p-4">
             <div className="flex items-start gap-2">
               <svg className="w-5 h-5 text-green-600 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
               </svg>
               <div>
-                <p className="text-sm font-medium text-green-800">Your API keys stay on your device</p>
-                <p className="text-xs text-green-700 mt-1">
+                <p className="text-sm font-medium text-green-800 dark:text-green-200">Your API keys stay on your device</p>
+                <p className="text-xs text-green-700 dark:text-green-300 mt-1">
                   Keys are stored in your browser only and sent directly to LLM providers over HTTPS. They are never saved to our servers.
                 </p>
               </div>
@@ -204,7 +204,7 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
 
           {/* Providers Section */}
           <div>
-            <h3 className="text-sm font-semibold text-gray-900 uppercase tracking-wider mb-3">
+            <h3 className="text-sm font-semibold text-gray-900 dark:text-white uppercase tracking-wider mb-3">
               Providers
             </h3>
 
@@ -214,7 +214,7 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                 <button
                   key={preset}
                   onClick={() => handleAddProvider(preset)}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-full border border-gray-300 text-gray-700 hover:bg-gray-100 transition-colors"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-full border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
                 >
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -235,21 +235,21 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                     key={provider.id}
                     className={`rounded-lg border p-4 ${
                       provider.isPrimary
-                        ? 'border-indigo-300 bg-indigo-50/30'
+                        ? 'border-indigo-300 dark:border-indigo-700 bg-indigo-50/30 dark:bg-indigo-900/20'
                         : provider.enabled
-                          ? 'border-gray-200'
-                          : 'border-gray-200 bg-gray-50 opacity-60'
+                          ? 'border-gray-200 dark:border-gray-700'
+                          : 'border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 opacity-60'
                     }`}
                   >
                     {/* Card header */}
                     <div className="flex items-center justify-between mb-3">
                       <div className="flex items-center gap-2">
-                        <span className="font-medium text-gray-900">{provider.name}</span>
-                        <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">
+                        <span className="font-medium text-gray-900 dark:text-white">{provider.name}</span>
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400">
                           {provider.preset}
                         </span>
                         {provider.isPrimary && (
-                          <span className="text-xs px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 font-medium">
+                          <span className="text-xs px-2 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300 font-medium">
                             Primary
                           </span>
                         )}
@@ -259,7 +259,7 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                           <button
                             onClick={() => handleSetPrimary(provider.id)}
                             title="Set as primary"
-                            className="text-xs text-gray-500 hover:text-indigo-600"
+                            className="text-xs text-gray-500 dark:text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400"
                           >
                             Set primary
                           </button>
@@ -267,7 +267,7 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                         <button
                           onClick={() => handleRemoveProvider(provider.id)}
                           title="Remove provider"
-                          className="text-gray-400 hover:text-red-500 transition-colors"
+                          className="text-gray-400 dark:text-gray-500 hover:text-red-500 dark:hover:text-red-400 transition-colors"
                         >
                           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -279,7 +279,7 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                     {/* Base URL */}
                     <div className="space-y-3">
                       <div>
-                        <label className="block text-xs font-medium text-gray-600 mb-1">
+                        <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
                           Base URL
                         </label>
                         <input
@@ -287,13 +287,13 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                           value={form.baseUrl}
                           onChange={(e) => updateFormState(provider.id, { baseUrl: e.target.value })}
                           placeholder={PROVIDER_PRESETS[provider.preset].baseUrl}
-                          className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                          className="w-full px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
                         />
                       </div>
 
                       {/* API Key */}
                       <div>
-                        <label className="block text-xs font-medium text-gray-600 mb-1">
+                        <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
                           API Key
                         </label>
                         <div className="relative">
@@ -303,12 +303,12 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                             onChange={(e) => updateFormState(provider.id, { apiKey: e.target.value })}
                             placeholder={provider.preset === 'ollama' ? '(optional for Ollama)' : 'sk-...'}
                             autoComplete="off"
-                            className="w-full px-3 py-1.5 pr-9 text-sm border border-gray-300 rounded-md focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                            className="w-full px-3 py-1.5 pr-9 text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
                           />
                           <button
                             type="button"
                             onClick={() => updateFormState(provider.id, { showApiKey: !form.showApiKey })}
-                            className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                            className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-400"
                           >
                             {form.showApiKey ? (
                               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -327,15 +327,15 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                             type="checkbox"
                             checked={form.rememberKey}
                             onChange={(e) => updateFormState(provider.id, { rememberKey: e.target.checked })}
-                            className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 w-3.5 h-3.5"
+                            className="rounded border-gray-300 dark:border-gray-600 text-indigo-600 focus:ring-indigo-500 w-3.5 h-3.5"
                           />
-                          <span className="text-xs text-gray-500">Remember key</span>
+                          <span className="text-xs text-gray-500 dark:text-gray-400">Remember key</span>
                         </label>
                       </div>
 
                       {/* Model */}
                       <div>
-                        <label className="block text-xs font-medium text-gray-600 mb-1">
+                        <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
                           Model
                         </label>
                         <input
@@ -343,7 +343,7 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                           value={form.model}
                           onChange={(e) => updateFormState(provider.id, { model: e.target.value })}
                           placeholder={PROVIDER_PRESETS[provider.preset].model}
-                          className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                          className="w-full px-3 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
                         />
                       </div>
 
@@ -353,9 +353,9 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
                           type="checkbox"
                           checked={provider.enabled}
                           onChange={() => handleToggleEnabled(provider.id)}
-                          className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 w-3.5 h-3.5"
+                          className="rounded border-gray-300 dark:border-gray-600 text-indigo-600 focus:ring-indigo-500 w-3.5 h-3.5"
                         />
-                        <span className="text-xs text-gray-600">Enabled</span>
+                        <span className="text-xs text-gray-600 dark:text-gray-400">Enabled</span>
                       </label>
                     </div>
                   </div>
@@ -363,7 +363,7 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
               })}
 
               {providers.length === 0 && (
-                <div className="text-center py-8 text-gray-500 text-sm">
+                <div className="text-center py-8 text-gray-500 dark:text-gray-400 text-sm">
                   No providers configured. Click a button above to add one.
                 </div>
               )}
@@ -372,23 +372,23 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
 
           {/* Ensemble Mode */}
           <div>
-            <h3 className="text-sm font-semibold text-gray-900 uppercase tracking-wider mb-3">
+            <h3 className="text-sm font-semibold text-gray-900 dark:text-white uppercase tracking-wider mb-3">
               Ensemble Mode
             </h3>
-            <div className={`rounded-lg border p-4 ${enabledCount < 2 ? 'border-gray-200 bg-gray-50 opacity-60' : 'border-gray-200'}`}>
+            <div className={`rounded-lg border p-4 ${enabledCount < 2 ? 'border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 opacity-60' : 'border-gray-200 dark:border-gray-700'}`}>
               <label className="flex items-center gap-3 cursor-pointer">
                 <input
                   type="checkbox"
                   checked={ensemble}
                   onChange={(e) => setEnsemble(e.target.checked)}
                   disabled={enabledCount < 2}
-                  className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                  className="rounded border-gray-300 dark:border-gray-600 text-indigo-600 focus:ring-indigo-500"
                 />
                 <div>
-                  <span className="text-sm font-medium text-gray-900">
+                  <span className="text-sm font-medium text-gray-900 dark:text-white">
                     Call all enabled providers and synthesize
                   </span>
-                  <p className="text-xs text-gray-500 mt-0.5">
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
                     {enabledCount < 2
                       ? 'Requires 2 or more enabled providers'
                       : `${enabledCount} providers enabled — responses will be collated by the primary provider`}
@@ -400,8 +400,8 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
 
           {/* Auth Status */}
           {!user && (
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-              <p className="text-sm text-blue-800">
+            <div className="bg-blue-50 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-800 rounded-lg p-4">
+              <p className="text-sm text-blue-800 dark:text-blue-200">
                 Sign in to sync your base URL and model settings across devices. Your API keys always stay local.
               </p>
             </div>
@@ -411,8 +411,8 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
           {message && (
             <div className={`rounded-lg p-4 ${
               message.type === 'success'
-                ? 'bg-green-50 border border-green-200 text-green-800'
-                : 'bg-red-50 border border-red-200 text-red-800'
+                ? 'bg-green-50 dark:bg-green-900/30 border border-green-200 dark:border-green-800 text-green-800 dark:text-green-200'
+                : 'bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 text-red-800 dark:text-red-200'
             }`}>
               <p className="text-sm font-medium">{message.text}</p>
             </div>
@@ -420,11 +420,11 @@ export function SettingsPanel({ isOpen, onClose }: SettingsPanelProps) {
         </div>
 
         {/* Footer */}
-        <div className="px-6 py-4 border-t border-gray-200 bg-gray-50">
+        <div className="px-6 py-4 border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900">
           <div className="flex gap-3">
             <button
               onClick={onClose}
-              className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-100 font-medium transition-colors"
+              className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 font-medium transition-colors"
             >
               Cancel
             </button>

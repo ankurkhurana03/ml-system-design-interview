@@ -23,7 +23,7 @@ export function ModerationSettings() {
       <div className="flex items-center justify-center p-8">
         <div className="text-center">
           <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-gray-600">Loading settings...</p>
+          <p className="text-gray-600 dark:text-gray-400">Loading settings...</p>
         </div>
       </div>
     );
@@ -81,7 +81,7 @@ export function ModerationSettings() {
     <div className="p-6 space-y-8">
       {/* Mode Selector */}
       <div>
-        <h3 className="text-lg font-semibold text-gray-900 mb-4">Moderation Mode</h3>
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Moderation Mode</h3>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           {/* Full Auto */}
           <button
@@ -89,12 +89,12 @@ export function ModerationSettings() {
             disabled={saving}
             className={`p-4 rounded-lg border-2 transition-all text-left ${
               config.mode === 'full_auto'
-                ? 'border-green-500 bg-green-50'
-                : 'border-gray-200 hover:border-gray-300 bg-white'
+                ? 'border-green-500 dark:border-green-700 bg-green-50 dark:bg-green-900/30'
+                : 'border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600 bg-white dark:bg-gray-800'
             } ${saving ? 'opacity-50 cursor-not-allowed' : ''}`}
           >
             <div className="flex items-center justify-between mb-2">
-              <h4 className="font-semibold text-gray-900">Full Auto</h4>
+              <h4 className="font-semibold text-gray-900 dark:text-white">Full Auto</h4>
               {config.mode === 'full_auto' && (
                 <svg className="w-5 h-5 text-green-600" fill="currentColor" viewBox="0 0 20 20">
                   <path
@@ -105,7 +105,7 @@ export function ModerationSettings() {
                 </svg>
               )}
             </div>
-            <p className="text-sm text-gray-600">
+            <p className="text-sm text-gray-600 dark:text-gray-400">
               AI handles all moderation autonomously. Comments are processed immediately.
             </p>
           </button>
@@ -116,12 +116,12 @@ export function ModerationSettings() {
             disabled={saving}
             className={`p-4 rounded-lg border-2 transition-all text-left ${
               config.mode === 'ai_assisted'
-                ? 'border-blue-500 bg-blue-50'
-                : 'border-gray-200 hover:border-gray-300 bg-white'
+                ? 'border-blue-500 dark:border-blue-700 bg-blue-50 dark:bg-blue-900/30'
+                : 'border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600 bg-white dark:bg-gray-800'
             } ${saving ? 'opacity-50 cursor-not-allowed' : ''}`}
           >
             <div className="flex items-center justify-between mb-2">
-              <h4 className="font-semibold text-gray-900">AI-Assisted</h4>
+              <h4 className="font-semibold text-gray-900 dark:text-white">AI-Assisted</h4>
               {config.mode === 'ai_assisted' && (
                 <svg className="w-5 h-5 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
                   <path
@@ -132,7 +132,7 @@ export function ModerationSettings() {
                 </svg>
               )}
             </div>
-            <p className="text-sm text-gray-600">
+            <p className="text-sm text-gray-600 dark:text-gray-400">
               AI pre-screens comments. Uncertain ones are flagged for human review.
             </p>
           </button>
@@ -143,12 +143,12 @@ export function ModerationSettings() {
             disabled={saving}
             className={`p-4 rounded-lg border-2 transition-all text-left ${
               config.mode === 'manual'
-                ? 'border-purple-500 bg-purple-50'
-                : 'border-gray-200 hover:border-gray-300 bg-white'
+                ? 'border-purple-500 dark:border-purple-700 bg-purple-50 dark:bg-purple-900/30'
+                : 'border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600 bg-white dark:bg-gray-800'
             } ${saving ? 'opacity-50 cursor-not-allowed' : ''}`}
           >
             <div className="flex items-center justify-between mb-2">
-              <h4 className="font-semibold text-gray-900">Manual</h4>
+              <h4 className="font-semibold text-gray-900 dark:text-white">Manual</h4>
               {config.mode === 'manual' && (
                 <svg className="w-5 h-5 text-purple-600" fill="currentColor" viewBox="0 0 20 20">
                   <path
@@ -159,7 +159,7 @@ export function ModerationSettings() {
                 </svg>
               )}
             </div>
-            <p className="text-sm text-gray-600">
+            <p className="text-sm text-gray-600 dark:text-gray-400">
               All comments require manual admin review.
             </p>
           </button>
@@ -169,7 +169,7 @@ export function ModerationSettings() {
       {/* Moderation Rules */}
       <div>
         <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-semibold text-gray-900">Moderation Rules</h3>
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Moderation Rules</h3>
           <button
             onClick={() => setAddingRule(true)}
             disabled={saving || addingRule}
@@ -183,7 +183,7 @@ export function ModerationSettings() {
           {config.rules.map((rule) => (
             <div
               key={rule.name}
-              className="bg-white border border-gray-200 rounded-lg p-4 flex items-start gap-4"
+              className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4 flex items-start gap-4"
             >
               <label className="flex items-center cursor-pointer">
                 <input
@@ -191,12 +191,12 @@ export function ModerationSettings() {
                   checked={rule.enabled}
                   onChange={() => handleToggleRule(rule.name)}
                   disabled={saving}
-                  className="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
+                  className="w-5 h-5 text-blue-600 dark:text-blue-500 rounded focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600"
                 />
               </label>
               <div className="flex-1">
-                <h4 className="font-semibold text-gray-900">{rule.name}</h4>
-                <p className="text-sm text-gray-600 mt-1">{rule.description}</p>
+                <h4 className="font-semibold text-gray-900 dark:text-white">{rule.name}</h4>
+                <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">{rule.description}</p>
               </div>
               <button
                 onClick={() => handleRemoveRule(rule.name)}
