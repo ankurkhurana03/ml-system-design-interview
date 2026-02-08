@@ -7,6 +7,7 @@ import { useMode } from '@/hooks/useMode';
 import { useSpeechRecognition } from '@/hooks/useSpeechRecognition';
 import { useNodeComments } from '@/hooks/useNodeComments';
 import { useInterviewLLM, dialogueToConversation } from '@/hooks/useInterviewLLM';
+import { useHandsFree, useHandsFreeCallbacks } from '@/context/HandsFreeContext';
 import { mergeBranch, validateConvergenceRefs } from '@/utils/mergeBranch';
 import { getDownstreamSummaries } from '@/utils/treeTraversal';
 import { submitBranchForModeration } from '@/utils/branchModeration';
@@ -63,6 +64,7 @@ export function WizardPanel() {
   const voiceOver = useVoiceOver();
   const { config } = useMode();
   const speechRecognition = useSpeechRecognition();
+  const handsFree = useHandsFree();
   const { addComment } = useNodeComments(problem?.id || '', currentNode?.id || '');
   const sourcesHook = useSources(problem?.id || '');
   const previousNodeIdRef = useRef<string | null>(null);
@@ -334,6 +336,57 @@ export function WizardPanel() {
     // clarification: stay on node, user continues chatting
   }, [currentNode, problem, liveDialogue, interviewLLM, appendDialogue, voiceOver, selectChoice, sourcesHook.sources]);
 
+  // Re-speak current node content or dialogue
+  const respeakCurrentNode = useCallback(() => {
+    if (!currentNode) return;
+    voiceOver.stop();
+    const useDialogueMode = config.useDialogue && currentNode.dialogue && currentNode.dialogue.length > 0;
+    if (useDialogueMode) {
+      speakDialogueSequentially(currentNode.dialogue!);
+    } else {
+      voiceOver.speak(`${currentNode.label}. ${currentNode.content}`, currentNode.speaker);
+    }
+  }, [currentNode, voiceOver, config.useDialogue, speakDialogueSequentially]);
+
+  // Hands-free command dispatch
+  useHandsFreeCallbacks({
+    onCommand: (cmd) => {
+      switch (cmd.type) {
+        case 'continue':
+          advance();
+          break;
+        case 'go_back':
+          handleGoBack();
+          break;
+        case 'repeat':
+          respeakCurrentNode();
+          break;
+        case 'select_option':
+          if (
+            currentNode?.type === 'question' &&
+            currentNode.choices &&
+            cmd.optionIndex !== undefined &&
+            cmd.optionIndex < currentNode.choices.length
+          ) {
+            handleSelectChoice(cmd.optionIndex);
+          }
+          break;
+        case 'reset':
+          handleReset();
+          break;
+        case 'pause':
+          voiceOver.pause();
+          break;
+        case 'resume':
+          voiceOver.resume();
+          break;
+      }
+    },
+    onFreeformText: (text) => {
+      handleFreeformSubmit(text);
+    },
+  });
+
   const handleNovelAnswer = useCallback(async (response: InterviewLLMResponse) => {
     if (!currentNode || !problem || !response.choiceLabel || !response.choiceAnswer) return;
 
@@ -579,6 +632,7 @@ export function WizardPanel() {
               branchError={branchError}
               onDismissError={() => { setBranchError(null); setPendingNovelChoice(null); }}
               sources={sourcesHook.sources.length > 0 ? sourcesHook.sources : undefined}
+              handsFreeActive={handsFree.enabled}
             />
           )}
 
@@ -642,8 +696,8 @@ export function WizardPanel() {
             </div>
           )}
 
-          {/* Voice Input */}
-          {speechRecognition.isSupported && (config.mode === 'mock_interview' || config.mode === 'tutor') && (
+          {/* Voice Input — hidden when hands-free is active (it owns the mic) */}
+          {!handsFree.enabled && speechRecognition.isSupported && (config.mode === 'mock_interview' || config.mode === 'tutor') && (
             <div className="mt-4">
               <div className="flex items-center gap-3">
                 <button

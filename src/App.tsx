@@ -24,6 +24,7 @@ import { PublishModal } from '@/components/gallery/PublishModal';
 import { PracticeTimer } from '@/components/wizard/PracticeTimer';
 import { ModeSelector } from '@/components/wizard/ModeSelector';
 import { EditDraftModal } from '@/components/draft/EditDraftModal';
+import { HandsFreeProvider, useHandsFree } from '@/context/HandsFreeContext';
 import { getActiveProblemId, saveActiveProblemId, saveDraftProblem, isDraft } from '@/utils/draftStore';
 import type { Problem } from '@/types/tree';
 
@@ -34,6 +35,7 @@ function AppContent() {
   const { user } = useAuth();
   const { isAdmin } = useAdmin();
   const voiceOver = useVoiceOver();
+  const handsFree = useHandsFree();
   const { config: moderationConfig } = useModerationConfig();
 
   // Auto-moderation is active when admin is using the app
@@ -246,6 +248,27 @@ function AppContent() {
                 </svg>
               </button>
             )}
+            {handsFree.isSupported && (
+              <button
+                onClick={handsFree.toggle}
+                className={`relative p-1.5 hover:bg-gray-100 rounded-lg transition-colors ${
+                  handsFree.enabled ? 'text-green-600' : 'text-gray-500'
+                }`}
+                title={handsFree.enabled ? 'Disable Hands-Free' : 'Enable Hands-Free Listening'}
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"
+                  />
+                </svg>
+                {handsFree.isListening && (
+                  <span className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 bg-green-500 rounded-full animate-pulse" />
+                )}
+              </button>
+            )}
             {isAdmin && (
               <button
                 onClick={() => setModerationOpen(true)}
@@ -315,6 +338,49 @@ function AppContent() {
             )}
           </div>
         </div>
+
+        {/* Hands-free listening banner */}
+        {handsFree.enabled && (
+          <div className={`px-4 py-1.5 text-xs font-medium flex items-center gap-2 ${
+            handsFree.error
+              ? 'bg-red-50 text-red-700 border-b border-red-200'
+              : voiceOver.isPlaying
+                ? 'bg-amber-50 text-amber-700 border-b border-amber-200'
+                : handsFree.isListening
+                  ? 'bg-green-50 text-green-700 border-b border-green-200'
+                  : 'bg-gray-50 text-gray-500 border-b border-gray-200'
+          }`}>
+            {handsFree.error ? (
+              <>
+                <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                </svg>
+                <span>{handsFree.error}</span>
+              </>
+            ) : voiceOver.isPlaying ? (
+              <>
+                <span className="w-2 h-2 bg-amber-500 rounded-full" />
+                <span>Paused (voice-over speaking)</span>
+              </>
+            ) : handsFree.isListening ? (
+              <>
+                <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+                <span>{handsFree.interimTranscript ? `Hearing: "${handsFree.interimTranscript}"` : 'Hands-free listening...'}</span>
+              </>
+            ) : (
+              <>
+                <span className="w-2 h-2 bg-gray-400 rounded-full" />
+                <span>Hands-free paused</span>
+              </>
+            )}
+            {handsFree.lastCommand && (
+              <span className="ml-auto px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-xs">
+                {handsFree.lastCommand.type.replace('_', ' ')}
+                {handsFree.lastCommand.optionIndex !== undefined && ` ${handsFree.lastCommand.optionIndex + 1}`}
+              </span>
+            )}
+          </div>
+        )}
 
         <div className="flex-1 min-h-0">
           {config.showGraph ? (
@@ -389,7 +455,9 @@ export default function App() {
     <ModeProvider>
       <VoiceOverProvider>
         <WizardProvider>
-          <AppContent />
+          <HandsFreeProvider>
+            <AppContent />
+          </HandsFreeProvider>
         </WizardProvider>
       </VoiceOverProvider>
     </ModeProvider>

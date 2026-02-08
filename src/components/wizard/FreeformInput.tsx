@@ -6,9 +6,10 @@ interface FreeformInputProps {
   loading: boolean;
   disabled?: boolean;
   placeholder?: string;
+  handsFreeActive?: boolean;
 }
 
-export function FreeformInput({ onSubmit, loading, disabled, placeholder }: FreeformInputProps) {
+export function FreeformInput({ onSubmit, loading, disabled, placeholder, handsFreeActive }: FreeformInputProps) {
   const [text, setText] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
   const speechRecognition = useSpeechRecognition();
@@ -56,8 +57,8 @@ export function FreeformInput({ onSubmit, loading, disabled, placeholder }: Free
         className="flex-1 text-sm border-0 bg-transparent focus:outline-none focus:ring-0 placeholder-gray-400 text-gray-800 disabled:opacity-50"
       />
 
-      {/* Mic button */}
-      {speechRecognition.isSupported && (
+      {/* Mic button — hidden when hands-free mode owns the mic */}
+      {speechRecognition.isSupported && !handsFreeActive && (
         <button
           onClick={toggleMic}
           disabled={loading || disabled}

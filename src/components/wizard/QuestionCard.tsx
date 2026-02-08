@@ -29,6 +29,7 @@ interface QuestionCardProps {
   branchError?: string | null;
   onDismissError?: () => void;
   sources?: UserSource[];
+  handsFreeActive?: boolean;
 }
 
 const STAGE_COLORS: Record<string, string> = {
@@ -42,7 +43,7 @@ const STAGE_COLORS: Record<string, string> = {
   monitoring: 'pink',
 };
 
-export function QuestionCard({ node, problemId, onSelectChoice, onAdvance, onReset, liveDialogue, isTyping, onFreeformSubmit, freeformLoading, pendingNovelChoice, branchGenerating, branchError, onDismissError, sources }: QuestionCardProps) {
+export function QuestionCard({ node, problemId, onSelectChoice, onAdvance, onReset, liveDialogue, isTyping, onFreeformSubmit, freeformLoading, pendingNovelChoice, branchGenerating, branchError, onDismissError, sources, handsFreeActive }: QuestionCardProps) {
   const stageColor = STAGE_COLORS[node.stage] || 'gray';
   const isInterviewer = node.speaker === 'interviewer';
   const [showComparison, setShowComparison] = useState(false);
@@ -329,6 +330,7 @@ export function QuestionCard({ node, problemId, onSelectChoice, onAdvance, onRes
                 ? 'Type your own answer or ask a clarifying question...'
                 : 'Ask a question before continuing...'
             }
+            handsFreeActive={handsFreeActive}
           />
         )}
 
